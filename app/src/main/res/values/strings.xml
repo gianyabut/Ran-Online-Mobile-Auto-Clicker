@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Auto Clicker</string>
+    <string name="service_description">Shows a floating start/stop button and taps the red target repeatedly.</string>
+</resources>

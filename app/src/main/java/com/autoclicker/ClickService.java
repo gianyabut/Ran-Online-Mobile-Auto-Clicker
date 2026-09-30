@@ -1,0 +1,1465 @@
+package com.autoclicker;
+
+import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.hardware.HardwareBuffer;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.util.DisplayMetrics;
+import android.util.Log;
+import android.view.Display;
+import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.WindowManager;
+import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Consumer;
+
+/**
+ * Floating bar (start/stop, add target) plus any number of draggable targets.
+ * Each target taps on its own timer, one tap at a time. A target can optionally
+ * wait until the game button under it no longer shows its dimmed cooldown overlay.
+ */
+public class ClickService extends AccessibilityService {
+
+    private static final String TAG = "AutoClicker";
+    static final String PREFS = "settings";
+    private static final String KEY_TARGETS = "targets";
+    private static final int DEFAULT_INTERVAL = 500;
+    private static final int MIN_INTERVAL = 50;
+    private static final int MAX_INTERVAL = 600_000;
+    private static final int TAP_MS = 40;
+    // Pause after every tap before the next one. Games often ignore every skill for a moment
+    // after any cast (Ran Pinas: about 2.6 s after Heaven's Treatment), so taps sent sooner are wasted.
+    static final String KEY_TAP_GAP = "tap_gap_ms";
+    static final int DEFAULT_TAP_GAP_MS = 3000;
+
+    // Smart buff: recast when the buff's icon is gone or its timer bar is at or below this share.
+    private static final float SMART_RECAST_AT = 0.5f;
+    // After a smart-buff tap, give the game time to refill the bar before trying again.
+    // The refreshed bar shows up 2-7 s after the cast (Inspire is slowest); buffs recast at 70% have
+    // plenty of time left, so wait long enough never to cast the same buff twice.
+    private static final int SMART_RETRY_MS = 6000;
+    private static final int SMART_RECHECK_MS = 300;
+    // How long after a learning cast to look at the buff row again (the bar refreshes ~2.6 s after).
+    private static final int LEARN_AFTER_MS = 3000;
+    private int tapGapMs = DEFAULT_TAP_GAP_MS;
+
+    // Whether you left it running, and for which app, so it can resume after Android kills it.
+    private static final String KEY_RUNNING = "running";
+    private static final String KEY_GAME = "game_package";
+    private String gamePackage;
+    private String lastForeground;
+    private boolean pausedForOtherApp;
+    private boolean pausedForKeyboard;
+
+    // Manual mode (✋): no tapping and no rings in the way, so you play the game yourself.
+    // Remembered so a restart after Android kills the service doesn't bring the rings back.
+    private static final String KEY_MANUAL = "manual";
+    private boolean manual;
+    private int refusedInARow;
+
+    // Cooldown check. Android allows roughly one accessibility screenshot per 333 ms.
+    private static final int SCREENSHOT_EVERY_MS = 350;
+    private static final int BUFF_SCAN_EVERY_MS = 2000;
+    private static final int COOLDOWN_RECHECK_MS = 150;
+    // Sample grid inside the ring: rows top to bottom, because the game's dimming clears top-down.
+    private static final int SAMPLE_ROWS = 7;
+    private static final int SAMPLE_COLS = 3;
+    private static final float SAMPLE_SPREAD = 0.55f;
+    // A point counts as dimmed when it is below this share of its ready brightness.
+    private static final float DIM_RATIO = 0.75f;
+    // Points darker than this when ready can't show dimming, so they are ignored.
+    private static final int MIN_USEFUL_LUMA = 45;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final List<Target> targets = new ArrayList<>();
+    // Targets waiting for their turn to tap. Each target is in here at most once.
+    private final List<Target> pending = new ArrayList<>();
+    private final Runnable pump = this::pumpQueue;
+    private WindowManager wm;
+    private LinearLayout bar;
+    private WindowManager.LayoutParams barParams;
+    private TextView toggle;
+    private TextView add;
+    private TextView fullBuffButton;
+    private TextView manualButton;
+    private View editor;
+    private boolean running;
+    private long busyUntil;
+    private long lastAnyTapAt;
+    private long lastPriorityTapAt;
+    // Last buff tap, so the next buff waits BUFF_SPACING_MS and the three don't bunch up.
+    private long lastBuffTapAt;
+    private Target lastBuffRing;
+    // One heal cycle between buffs: with 4+ buffs (one lasting ~1 min) 20 s let them drain below 50%.
+    private static final int BUFF_SPACING_MS = 6000;
+    // After a buff reads full, ignore "low" readings this long (fastest buff needs ~30 s to 50%).
+    private static final int JUST_FULL_MS = 15_000;
+    // Below this a buff skips the spacing wait so it never runs out.
+    private static final float SMART_URGENT_AT = 0.4f;
+    private static final int MAX_EXTRA_GAP_MS = 3000;
+    // Full buff (FB button).
+    private long lastFullBuffAt;
+    private static final int FULL_BUFF_COOLDOWN_MS = 15_000;
+    private static final int FORCED_AFTER_HEAL_MS = 4000;
+    // The refreshed bar shows up 2-7 s after a cast.
+    private static final int FORCED_CHECK_MS = 7000;
+    // After a buff the heal waits 3 s: 2.5 s worked out of a fight but got the heal ignored in one.
+    private static final int AFTER_BUFF_GAP_MS = 3000;
+    // A buff may start up to this long after its slot opens (the heal's lock ending).
+    private static final int SLOT_WINDOW_MS = 1000;
+    // Fallback if the heal ring isn't tapping at all.
+    private static final int MAX_SLOT_WAIT_MS = 15_000;
+    // The buff row as of the latest screenshot, for learning which icon a ring's buff is.
+    private List<BuffReader.Icon> lastScan;
+    private long lastRowSeenAt;
+    private int screenW;
+    private int screenH;
+    private static final int ROW_GONE_BELIEVE_MS = 8000;
+    private long lastScanAt;
+
+    private class Target {
+        final LinearLayout root;
+        final View ring;
+        final TextView badge;
+        final WindowManager.LayoutParams params;
+        int interval;
+        boolean priority;
+        boolean waitForCooldown;
+        int[] readyLook; // brightness per sample point when the skill is ready, or null
+        boolean ready = true;
+
+        // Smart buff: the buff's icon in the game's buff row, and what the last screenshot saw.
+        boolean smartBuff;
+        int[] buffIcon; // colour signature from BuffReader, or null until picked
+        int buffY;
+        int buffSize;
+        boolean buffKnown;
+        boolean buffFound;
+        float buffFill;
+        long lastTapAt;
+        // While learning: the buff row just before this ring's last cast, and when to look again.
+        List<BuffReader.Icon> learnBefore;
+        long learnCheckAt;
+        int neededStreak;
+        // Extra wait after the previous skill before this buff taps, learned from ignored taps.
+        // Starts at 1 s (4 s after the heal): in a fight, 3-3.5 s after the heal usually gets ignored.
+        int extraGapMs = 1000;
+        // Queued by the FB button: cast even if the buff is still up, without waiting its turn.
+        boolean forced;
+        int forcedRetries;
+        long queuedAt;
+        int recastsWithoutOk;
+        // Recast when the buff's timer is at or below this share (70% default, per buff).
+        float recastAt = SMART_RECAST_AT;
+        long backoffUntil;
+        long lastFullAt;
+
+        boolean isSmart() {
+            return smartBuff && buffIcon != null;
+        }
+
+        final Runnable tick = new Runnable() {
+            @Override
+            public void run() {
+                if (!running) return;
+                if (isSmart()) {
+                    boolean needed = buffKnown && (!buffFound || buffFill <= recastAt);
+                    long now = SystemClock.uptimeMillis();
+                    long sinceTap = now - lastTapAt;
+                    // Keep the buffs spread out: right after another buff, wait before this one,
+                    // unless this buff is missing or running low.
+                    boolean urgent = !buffFound || buffFill <= Math.min(SMART_URGENT_AT, recastAt - 0.1f);
+                    boolean tooSoonAfterOtherBuff = lastBuffRing != null && lastBuffRing != Target.this
+                            && now - lastBuffTapAt < BUFF_SPACING_MS;
+                    if (needed && !urgent && tooSoonAfterOtherBuff) {
+                        handler.postDelayed(this, SMART_RECHECK_MS);
+                        return;
+                    }
+                    if (needed && now < backoffUntil) {
+                        handler.postDelayed(this, SMART_RECHECK_MS);
+                        return;
+                    }
+                    if (needed && sinceTap >= SMART_RETRY_MS) {
+                        // Only when the buff can't be seen at all: a visible buff whose taps get
+                        // ignored in a fight must keep retrying, or it runs out.
+                        if (!buffFound && ++recastsWithoutOk > 3) {
+                            // Cast 3 times and still not seen: probably a misread, not a missing
+                            // buff. Stop wasting casts for a minute.
+                            recastsWithoutOk = 0;
+                            backoffUntil = now + 60_000;
+                            Log.w(TAG, "buff target " + (targets.indexOf(Target.this) + 1)
+                                    + ": recast 3 times but still can't see it, pausing it for 60 s");
+                            handler.postDelayed(this, SMART_RECHECK_MS);
+                            return;
+                        }
+                        if (lastTapAt > 0 && sinceTap < SMART_RETRY_MS + 5000 && extraGapMs < MAX_EXTRA_GAP_MS) {
+                            // Still low right after our tap: the game ignored it, usually because the
+                            // previous skill's lock lasts longer in a fight. Wait a bit longer next time.
+                            extraGapMs += 500;
+                            Log.i(TAG, "buff target " + (targets.indexOf(Target.this) + 1) + ": tap was ignored, now waiting "
+                                    + (tapGapMs + extraGapMs) + "ms after the previous skill");
+                            saveTargets();
+                        }
+                        queueTap(Target.this);
+                    } else {
+                        handler.postDelayed(this, SMART_RECHECK_MS);
+                    }
+                    return;
+                }
+                if (waitForCooldown && readyLook != null && !ready) {
+                    handler.postDelayed(this, COOLDOWN_RECHECK_MS);
+                    return;
+                }
+                // The next tick is scheduled when this tap actually goes out (see pumpQueue),
+                // so a tap that waited in line doesn't make the following one come too early.
+                queueTap(Target.this);
+            }
+        };
+
+        Target(int x, int y, int interval) {
+            this.interval = interval;
+
+            root = new LinearLayout(ClickService.this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setGravity(Gravity.CENTER_HORIZONTAL);
+
+            // Hollow ring so the game button underneath stays visible and readable.
+            ring = new View(ClickService.this);
+            GradientDrawable d = new GradientDrawable();
+            d.setShape(GradientDrawable.OVAL);
+            d.setColor(Color.TRANSPARENT);
+            d.setStroke(dp(3), Color.rgb(230, 30, 30));
+            ring.setBackground(d);
+            root.addView(ring, new LinearLayout.LayoutParams(dp(56), dp(56)));
+
+            badge = new TextView(ClickService.this);
+            badge.setTextColor(Color.WHITE);
+            badge.setTextSize(11);
+            badge.setTypeface(Typeface.DEFAULT_BOLD);
+            badge.setPadding(dp(6), dp(1), dp(6), dp(1));
+            GradientDrawable pill = new GradientDrawable();
+            pill.setColor(Color.argb(200, 180, 20, 20));
+            pill.setCornerRadius(dp(8));
+            badge.setBackground(pill);
+            LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            badgeLp.topMargin = dp(2);
+            root.addView(badge, badgeLp);
+
+            params = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
+            params.x = x;
+            params.y = y;
+            // The ring is centred in a window as wide as its label, so a label that grows or
+            // shrinks would slide the ring sideways. Shift the window to keep the ring still.
+            root.addOnLayoutChangeListener((v, l, t, r, b, oldL, oldT, oldR, oldB) -> {
+                int oldWidth = oldR - oldL;
+                int newWidth = r - l;
+                if (oldWidth > 0 && newWidth != oldWidth) {
+                    params.x += (oldWidth - newWidth) / 2;
+                    safeUpdate(root, params);
+                    saveTargets();
+                }
+            });
+            makeDraggable(root, root, params, () -> openEditor(this), () -> {
+                // The saved ready look belongs to the old spot.
+                readyLook = null;
+                refreshLabel();
+            });
+        }
+
+        void refreshLabel() {
+            String text = (priority ? "★" : "") + (targets.indexOf(this) + 1) + " · ";
+            if (smartBuff) {
+                text += buffIcon != null ? "smart buff" : formatInterval(interval) + " · learning";
+                if (Math.round(recastAt * 100) != Math.round(SMART_RECAST_AT * 100)) text += " " + Math.round(recastAt * 100) + "%";
+            } else {
+                text += formatInterval(interval);
+                if (waitForCooldown) text += readyLook != null ? " · CD" : " · CD?";
+            }
+            badge.setText(text);
+        }
+
+        void setTouchable(boolean touchable) {
+            if (touchable) {
+                params.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+            } else {
+                params.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+            }
+            root.setAlpha(touchable ? 1f : 0.5f);
+            safeUpdate(root, params);
+        }
+
+        /** Screen coordinates of the sample points, top row first. */
+        int[][] samplePoints() {
+            int[] loc = new int[2];
+            ring.getLocationOnScreen(loc);
+            float cx = loc[0] + ring.getWidth() / 2f;
+            float cy = loc[1] + ring.getHeight() / 2f;
+            float r = ring.getWidth() / 2f * SAMPLE_SPREAD;
+            int[][] pts = new int[SAMPLE_ROWS * SAMPLE_COLS][];
+            for (int row = 0; row < SAMPLE_ROWS; row++) {
+                float y = cy - r + 2 * r * row / (SAMPLE_ROWS - 1);
+                for (int col = 0; col < SAMPLE_COLS; col++) {
+                    float x = cx - r / 2 + r * col / (SAMPLE_COLS - 1);
+                    pts[row * SAMPLE_COLS + col] = new int[] {Math.round(x), Math.round(y)};
+                }
+            }
+            return pts;
+        }
+    }
+
+    @Override
+    protected void onServiceConnected() {
+        wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+
+        // Android can disconnect and reconnect this same service without destroying it.
+        // Clear everything from the previous connection so bars and rings aren't duplicated.
+        removeOverlays("connect");
+        loadTargets();
+        refusedInARow = 0;
+        Watchdog.schedule(this);
+
+        bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.VERTICAL);
+        toggle = roundButton("");
+        add = roundButton("+");
+        LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(dp(48), dp(48));
+        gap.topMargin = dp(8);
+        bar.addView(toggle, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        bar.addView(add, gap);
+        fullBuffButton = roundButton("FB");
+        fullBuffButton.setTextSize(15);
+        fullBuffButton.setTypeface(Typeface.DEFAULT_BOLD);
+        fullBuffButton.setBackground(circle(Color.rgb(210, 120, 20)));
+        LinearLayout.LayoutParams fbGap = new LinearLayout.LayoutParams(dp(48), dp(48));
+        fbGap.topMargin = dp(8);
+        bar.addView(fullBuffButton, fbGap);
+        manualButton = roundButton("");
+        LinearLayout.LayoutParams manualGap = new LinearLayout.LayoutParams(dp(48), dp(48));
+        manualGap.topMargin = dp(8);
+        bar.addView(manualButton, manualGap);
+        barParams = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
+        barParams.x = dp(8);
+        barParams.y = dp(200);
+        makeDraggable(toggle, bar, barParams, () -> setRunning(!running, "button"), null);
+        makeDraggable(add, bar, barParams, this::addTargetFromBar, null);
+        makeDraggable(fullBuffButton, bar, barParams, this::fullBuff, null);
+        makeDraggable(manualButton, bar, barParams, () -> setManual(!manual, "button"), null);
+        if (!safeAdd(bar, barParams)) {
+            // Half connected (switched back on too soon after a crash): nothing will work until
+            // the service is turned off and on again.
+            Watchdog.requestRevive(this, "can't show its bar");
+        }
+
+        setRunning(false, "connected");
+
+        // Android kills background apps when the game uses most of the memory, then restarts
+        // this service. If you had pressed ▶, carry on where it left off.
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_MANUAL, false)) {
+            setManual(true, "restored");
+        } else {
+            setManual(false, "connected");
+        }
+        if (!manual && prefs.getBoolean(KEY_RUNNING, false)) {
+            gamePackage = prefs.getString(KEY_GAME, null);
+            setRunning(true, "resumed after restart");
+        }
+    }
+
+    /** Stops tapping and removes every overlay window this service has open. */
+    private void removeOverlays(String why) {
+        Log.i(TAG, "overlays removed (" + why + ")" + (running ? ", was running" : ""));
+        running = false;
+        handler.removeCallbacksAndMessages(null);
+        pending.clear();
+        busyUntil = 0;
+        closeEditor();
+        for (Target t : targets) safeRemove(t.root);
+        targets.clear();
+        if (bar != null) safeRemove(bar);
+        bar = null;
+    }
+
+    /** Adds an overlay window; false while the service is between connections and Android refuses it. */
+    private boolean safeAdd(View view, WindowManager.LayoutParams params) {
+        try {
+            wm.addView(view, params);
+            return true;
+        } catch (WindowManager.BadTokenException e) {
+            Log.w(TAG, "overlay refused: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private void safeRemove(View view) {
+        try {
+            wm.removeView(view);
+        } catch (IllegalArgumentException ignored) {
+            // already gone
+        }
+    }
+
+    private void safeUpdate(View view, WindowManager.LayoutParams params) {
+        try {
+            wm.updateViewLayout(view, params);
+        } catch (IllegalArgumentException ignored) {
+            // not attached any more
+        }
+    }
+
+    private void setRunning(boolean run, String why) {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (run) {
+            tapGapMs = Math.max(0, prefs.getInt(KEY_TAP_GAP, DEFAULT_TAP_GAP_MS));
+        }
+        if (why.equals("button")) {
+            // Remember that you want it running, and which app it's for, so it can resume
+            // after Android kills it and only ever taps that app.
+            if (run) {
+                // Keep the game we already know if Android can't tell us right now.
+                String front = foregroundPackage();
+                if (front != null) gamePackage = front;
+                Log.i(TAG, "tapping only while " + gamePackage + " is in front");
+            }
+            prefs.edit().putBoolean(KEY_RUNNING, run).putString(KEY_GAME, gamePackage).apply();
+        }
+        pausedForOtherApp = false;
+        Log.i(TAG, (run ? "start" : "stop") + " (" + why + "), " + targets.size() + " targets"
+                + (run ? ", pause after tap " + tapGapMs + "ms" : ""));
+        running = run;
+        handler.removeCallbacksAndMessages(null);
+        pending.clear();
+        busyUntil = 0;
+        lastAnyTapAt = 0;
+        lastPriorityTapAt = 0;
+        lastBuffTapAt = 0;
+        lastBuffRing = null;
+        // Right after ▶ the first screenshots can miss the buff row; give it the same grace period.
+        lastRowSeenAt = SystemClock.uptimeMillis();
+        if (run) closeEditor();
+
+        toggle.setText(run ? "■" : "▶");
+        toggle.setBackground(circle(run ? Color.rgb(200, 40, 40) : Color.rgb(40, 150, 60)));
+        add.setAlpha(run ? 0.4f : 1f);
+
+        lastScan = null;
+        // While running, taps must pass through the targets to reach the game underneath.
+        for (Target t : targets) {
+            t.ready = true;
+            t.buffKnown = false;
+            t.learnBefore = null;
+            t.lastTapAt = 0;
+            t.neededStreak = 0;
+            t.forced = false;
+            t.setTouchable(!run);
+            if (run) handler.postDelayed(t.tick, 300);
+        }
+        if (run) handler.post(this::cooldownCheck);
+    }
+
+    /**
+     * ✋ Manual mode: stops tapping, hides the rings (they'd block your own taps on the skills)
+     * and shrinks the bar to one button. Tapping that button again shows the rings and starts
+     * auto clicking straight away.
+     */
+    private void setManual(boolean on, String why) {
+        boolean changed = manual != on;
+        manual = on;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_MANUAL, on).apply();
+        if (changed || on) Log.i(TAG, "manual mode " + (on ? "on" : "off") + " (" + why + ")");
+        if (on) {
+            closeEditor();
+            if (running) setRunning(false, "button");
+        }
+        for (Target t : targets) {
+            // Untouchable as well as hidden, so no invisible window swallows a tap meant for the game.
+            t.setTouchable(!on);
+            t.root.setVisibility(on ? View.GONE : View.VISIBLE);
+        }
+        int others = on ? View.GONE : View.VISIBLE;
+        toggle.setVisibility(others);
+        add.setVisibility(others);
+        fullBuffButton.setVisibility(others);
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) manualButton.getLayoutParams();
+        lp.topMargin = on ? 0 : dp(8);
+        manualButton.setLayoutParams(lp);
+        manualButton.setText(on ? "AUTO" : "✋");
+        manualButton.setTextSize(on ? 12 : 20);
+        manualButton.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        manualButton.setBackground(circle(on ? Color.rgb(40, 150, 60) : Color.rgb(120, 70, 170)));
+        if (changed && why.equals("button")) {
+            shake(manualButton);
+            if (!on) setRunning(true, "button");
+        }
+    }
+
+    /**
+     * FB: cast every buff ring back to back, as fast as the game allows, even if the buffs are
+     * still up (someone asked for a full buff). The heal keeps priority in between. Covers all
+     * rings with Smart buff on, so new buffs are included once they are set up that way.
+     */
+    private void fullBuff() {
+        List<Target> buffs = new ArrayList<>();
+        for (Target t : targets) if (!t.priority && t.smartBuff) buffs.add(t);
+        if (buffs.isEmpty()) {
+            for (Target t : targets) if (!t.priority) buffs.add(t);
+        }
+        if (buffs.isEmpty()) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - lastFullBuffAt < FULL_BUFF_COOLDOWN_MS) {
+            Log.i(TAG, "full buff already in progress");
+            shake(fullBuffButton);
+            return;
+        }
+        lastFullBuffAt = now;
+        // Start first: starting clears all timers, including the one that resets the button.
+        if (!running) setRunning(true, "button");
+        showFullBuffActive();
+        Log.i(TAG, "full buff: casting " + buffs.size() + " buffs back to back");
+        for (Target t : buffs) {
+            t.forced = true;
+            t.forcedRetries = 0;
+            queueTap(t);
+        }
+    }
+
+    /** Press feedback: a quick squeeze and a tick, then green "…" until the full buff is done. */
+    private void showFullBuffActive() {
+        View b = fullBuffButton;
+        b.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY, HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING);
+        b.animate().scaleX(0.75f).scaleY(0.75f).setDuration(80)
+                .withEndAction(() -> b.animate().scaleX(1f).scaleY(1f).setDuration(160).start())
+                .start();
+        fullBuffButton.setText("…");
+        fullBuffButton.setBackground(circle(Color.rgb(40, 170, 70)));
+        handler.removeCallbacks(resetFullBuffButton);
+        handler.postDelayed(resetFullBuffButton, FULL_BUFF_COOLDOWN_MS);
+    }
+
+    private final Runnable resetFullBuffButton = () -> {
+        if (fullBuffButton == null) return;
+        fullBuffButton.setText("FB");
+        fullBuffButton.setBackground(circle(Color.rgb(210, 120, 20)));
+    };
+
+    /** "Already busy": a short side-to-side shake. */
+    private void shake(View v) {
+        v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY, HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING);
+        v.animate().translationX(dp(6)).setDuration(50).withEndAction(() ->
+                v.animate().translationX(-dp(6)).setDuration(70).withEndAction(() ->
+                        v.animate().translationX(0).setDuration(50).start()).start()).start();
+    }
+
+    /**
+     * A few seconds after a full-buff tap: if the buff's bar didn't refresh, the game ignored the
+     * tap (usually the skill lock after the heal), so try that buff again, waiting a bit longer.
+     */
+    private void checkForcedBuff(Target t) {
+        if (!running || !t.isSmart()) return;
+        boolean took = t.buffKnown && t.buffFound && t.buffFill >= 0.9f;
+        if (took || t.forcedRetries >= 2) return;
+        t.forcedRetries++;
+        t.extraGapMs = Math.min(MAX_EXTRA_GAP_MS, t.extraGapMs + 500);
+        Log.i(TAG, "full buff: target " + (targets.indexOf(t) + 1) + " didn't take, retrying");
+        t.forced = true;
+        queueTap(t);
+    }
+
+    private void addTargetFromBar() {
+        if (running) return;
+        DisplayMetrics m = getResources().getDisplayMetrics();
+        int offset = (targets.size() % 5) * dp(30);
+        addTarget(m.widthPixels / 2 - dp(30) + offset, m.heightPixels / 2 - dp(30) + offset, DEFAULT_INTERVAL);
+        saveTargets();
+    }
+
+    private Target addTarget(int x, int y, int interval) {
+        Target t = new Target(x, y, interval);
+        if (!safeAdd(t.root, t.params)) return null;
+        targets.add(t);
+        t.refreshLabel();
+        return t;
+    }
+
+    private void removeTarget(Target t) {
+        safeRemove(t.root);
+        targets.remove(t);
+        pending.remove(t);
+        for (Target other : targets) other.refreshLabel();
+        saveTargets();
+    }
+
+    /**
+     * Android cancels an in-progress gesture when a new one is dispatched, and the game
+     * doesn't accept simultaneous taps anyway, so taps are lined up one after another.
+     * Priority targets jump to the front of the line.
+     */
+    private void queueTap(Target t) {
+        if (!pending.contains(t)) {
+            pending.add(t);
+            t.queuedAt = SystemClock.uptimeMillis();
+        }
+        pumpQueue();
+    }
+
+    private void pumpQueue() {
+        if (!running || pending.isEmpty()) return;
+        // While the game isn't in front (or the keyboard is up) hold everything as it is,
+        // so no tap is sent, counted, or mistaken for one the game ignored.
+        if (!gameInFront()) {
+            schedulePump(500);
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (now < busyUntil) {
+            schedulePump(busyUntil - now);
+            return;
+        }
+        // Buffs that came due together must still go ~20 s apart: send back to waiting any buff
+        // that isn't urgent while another buff was tapped too recently. Its tick re-queues it.
+        for (int i = pending.size() - 1; i >= 0; i--) {
+            Target t = pending.get(i);
+            if (t.isSmart() && !t.forced && !buffUrgent(t) && lastBuffRing != null && lastBuffRing != t
+                    && now - lastBuffTapAt < BUFF_SPACING_MS) {
+                pending.remove(i);
+                handler.removeCallbacks(t.tick);
+                handler.postDelayed(t.tick, SMART_RECHECK_MS);
+            }
+        }
+        if (pending.isEmpty()) return;
+        Target next = pickNext(now);
+        // A buff that waited in line may have been refreshed meanwhile; don't waste the slot.
+        while (next.isSmart() && !next.forced && !buffNeeded(next)) {
+            pending.remove(next);
+            handler.removeCallbacks(next.tick);
+            handler.postDelayed(next.tick, SMART_RECHECK_MS);
+            if (pending.isEmpty()) return;
+            next = pickNext(now);
+        }
+        if (!next.priority) {
+            long waitMs = buffWait(next, now);
+            if (waitMs > 0) {
+                schedulePump(waitMs);
+                return;
+            }
+        }
+        pending.remove(next);
+        // The game locks all skills for a while after a cast: ~2.6-4 s after the heal (longer in a
+        // fight), but only ~2.5 s after a buff. Wait just that long so the heal isn't held up.
+        busyUntil = now + TAP_MS + (next.priority ? tapGapMs : AFTER_BUFF_GAP_MS);
+        lastAnyTapAt = now;
+        if (next.priority) lastPriorityTapAt = now;
+        if (next.isSmart()) {
+            lastBuffTapAt = now;
+            lastBuffRing = next;
+        }
+        tap(next);
+        if (next.forced) {
+            next.forced = false;
+            Target forcedTarget = next;
+            handler.postDelayed(() -> checkForcedBuff(forcedTarget), FORCED_CHECK_MS);
+        }
+        // Assume the skill went on cooldown until the next screenshot says otherwise,
+        // and count this ring's interval from the moment it really tapped.
+        next.ready = false;
+        next.lastTapAt = now;
+        if (next.smartBuff && next.buffIcon == null && lastScan != null && now - lastScanAt < 2500) {
+            // Learning: compare the buff row from just before this cast with one a moment after.
+            next.learnBefore = lastScan;
+            next.learnCheckAt = now + LEARN_AFTER_MS;
+        }
+        handler.removeCallbacks(next.tick);
+        handler.postDelayed(next.tick, next.isSmart() ? SMART_RECHECK_MS : next.interval);
+        if (!pending.isEmpty()) schedulePump(TAP_MS + tapGapMs);
+    }
+
+    /**
+     * How long a non-priority ring (a buff) must still wait, or 0 if it may tap now. With a heal
+     * ring present, buffs only go in the slot right after a heal, once that heal's lock is over:
+     * tapping a buff just before the heal is due would push the heal back further.
+     */
+    private long buffWait(Target t, long now) {
+        if (t.forced) {
+            // Full buff: go as soon as the previous skill's lock is over (busyUntil). Right after
+            // the heal the lock can last ~4 s in a fight, so wait at least that long then.
+            boolean afterHeal = lastPriorityTapAt > 0 && lastPriorityTapAt == lastAnyTapAt;
+            if (!afterHeal) return 0;
+            long wait = Math.max(tapGapMs + t.extraGapMs, FORCED_AFTER_HEAL_MS);
+            return Math.max(0, lastAnyTapAt + TAP_MS + wait - now);
+        }
+        boolean anyPriority = false;
+        for (Target o : targets) if (o.priority) anyPriority = true;
+        if (!anyPriority) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + t.extraGapMs - now);
+
+        long slotStart = lastPriorityTapAt + TAP_MS + tapGapMs + t.extraGapMs;
+        if (now < slotStart) return slotStart - now;
+        // Its turn (a heal already went ahead of it): go now even if the slot window has passed.
+        if (now <= slotStart + SLOT_WINDOW_MS || t.queuedAt < lastPriorityTapAt) return 0;
+        // Missed this heal's slot: wait for the next heal, unless the heal seems stuck.
+        long stuckAt = t.queuedAt + MAX_SLOT_WAIT_MS;
+        return now >= stuckAt ? 0 : stuckAt - now;
+    }
+
+    private static boolean buffUrgent(Target t) {
+        return t.buffKnown && (!t.buffFound || t.buffFill <= SMART_URGENT_AT);
+    }
+
+    private static boolean buffNeeded(Target t) {
+        return t.buffKnown && (!t.buffFound || t.buffFill <= t.recastAt);
+    }
+
+    /**
+     * Priority rings go first; everything else in the order it came due. A buff that a heal
+     * already went ahead of gets the next turn, and the heal waits for it once, otherwise a buff
+     * needing a long wait after the heal would never fit between two heals.
+     */
+    private Target pickNext(long now) {
+        for (Target t : pending) {
+            if (!t.priority && lastPriorityTapAt > 0 && t.queuedAt < lastPriorityTapAt) return t;
+        }
+        for (Target t : pending) if (t.priority) return t;
+        return pending.get(0);
+    }
+
+    private void schedulePump(long delayMs) {
+        handler.removeCallbacks(pump);
+        handler.postDelayed(pump, delayMs);
+    }
+
+    /** 500ms, 1.5s, 1m, 1m 30s */
+    private static String formatInterval(int ms) {
+        if (ms < 1000) return ms + "ms";
+        if (ms < 60_000) {
+            String s = String.valueOf(ms / 1000.0);
+            if (s.endsWith(".0")) s = s.substring(0, s.length() - 2);
+            return s + "s";
+        }
+        int min = ms / 60_000;
+        int sec = (ms % 60_000) / 1000;
+        return sec == 0 ? min + "m" : min + "m " + sec + "s";
+    }
+
+    /** Package of the app whose window is in front, or null if Android won't say right now. */
+    private String foregroundPackage() {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) {
+                // Sometimes there's no "active" window right after a restart; fall back to the
+                // top-most app window (windows are listed top first).
+                for (AccessibilityWindowInfo w : getWindows()) {
+                    if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+                    root = w.getRoot();
+                    if (root != null) break;
+                }
+            }
+            if (root == null) return lastForeground;
+            CharSequence pkg = root.getPackageName();
+            if (pkg != null) lastForeground = pkg.toString();
+        } catch (RuntimeException ignored) {
+            // the window went away while asking
+        }
+        return lastForeground;
+    }
+
+    /** True while an on-screen keyboard is up, e.g. while typing in the game's chat. */
+    private boolean keyboardShowing() {
+        try {
+            for (AccessibilityWindowInfo w : getWindows()) {
+                if (w.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return true;
+            }
+        } catch (RuntimeException ignored) {
+            // windows changed while asking
+        }
+        return false;
+    }
+
+    /**
+     * Only tap the app that was in front when ▶ was pressed (the game), never home or other apps,
+     * and never while the keyboard is up: the rings would land on its keys (backspace, enter...).
+     */
+    private boolean gameInFront() {
+        if (keyboardShowing()) {
+            if (!pausedForKeyboard) Log.i(TAG, "paused: keyboard is open");
+            pausedForKeyboard = true;
+            return false;
+        }
+        if (pausedForKeyboard) {
+            Log.i(TAG, "keyboard closed, tapping again");
+            pausedForKeyboard = false;
+        }
+        if (gamePackage == null) return true;
+        String front = foregroundPackage();
+        // If Android won't say which app is in front, keep tapping rather than pause forever.
+        if (front == null) return true;
+        boolean inFront = gamePackage.equals(front);
+        if (inFront == pausedForOtherApp) {
+            pausedForOtherApp = !inFront;
+            Log.i(TAG, inFront ? "game back in front, tapping again"
+                    : "paused: " + lastForeground + " is in front, not " + gamePackage);
+        }
+        return inFront;
+    }
+
+    private void tap(Target t) {
+        if (!running || !gameInFront()) return;
+        int[] loc = new int[2];
+        t.ring.getLocationOnScreen(loc);
+        float x = loc[0] + t.ring.getWidth() / 2f;
+        float y = loc[1] + t.ring.getHeight() / 2f;
+
+        Path path = new Path();
+        path.moveTo(x, y);
+        GestureDescription gesture = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, TAP_MS))
+                .build();
+        String which = "target " + (targets.indexOf(t) + 1) + " at " + Math.round(x) + "," + Math.round(y);
+        boolean sent = dispatchGesture(gesture, new GestureResultCallback() {
+            @Override
+            public void onCompleted(GestureDescription g) {
+                Log.d(TAG, "tap " + which);
+            }
+
+            @Override
+            public void onCancelled(GestureDescription g) {
+                Log.w(TAG, "tap cancelled: " + which);
+            }
+        }, null);
+        if (sent) {
+            refusedInARow = 0;
+        } else {
+            Log.w(TAG, "tap refused by Android: " + which);
+            // Android only refuses taps when the service is half connected; a restart fixes it.
+            if (++refusedInARow >= 3) {
+                refusedInARow = 0;
+                Watchdog.requestRevive(this, "has its taps refused");
+            }
+        }
+    }
+
+    // ---------- cooldown detection ----------
+
+    private static boolean canReadScreen() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R;
+    }
+
+    /** Repeats while running: one screenshot updates the ready state of every watching target. */
+    private void cooldownCheck() {
+        if (!running) return;
+        boolean anyCooldown = false;
+        boolean anySmart = false;
+        for (Target t : targets) {
+            if (t.smartBuff) anySmart = true;
+            if (t.waitForCooldown && t.readyLook != null) anyCooldown = true;
+        }
+        boolean anyWatching = anyCooldown || anySmart;
+        if (anyWatching && canReadScreen()) {
+            boolean scanBuffs = anySmart;
+            boolean cropped = anySmart && !anyCooldown;
+            captureScreen(shot -> {
+                if (!running) return;
+                // The chat window, keyboard or another app hide the buff row; don't mistake that
+                // for buffs running out.
+                if (keyboardShowing() || (gamePackage != null && !gamePackage.equals(foregroundPackage()))) return;
+                List<BuffReader.Icon> icons = scanBuffs ? BuffReader.scan(shot, screenW, screenH) : null;
+                long now = SystemClock.uptimeMillis();
+                // The whole row vanishing at once means something covered it (a menu, an effect),
+                // not that every buff ran out in the same second. Only believe it after a while.
+                // Judge by our own learned buffs: if none of them can be seen at once, the row is
+                // hidden or partly covered, even if some other box still looks like an icon.
+                if (icons != null) {
+                    boolean anyLearned = false;
+                    boolean anySeen = false;
+                    for (Target t : targets) {
+                        if (!t.isSmart()) continue;
+                        anyLearned = true;
+                        if (BuffReader.freshest(icons, t.buffIcon) != null) anySeen = true;
+                    }
+                    if (!anyLearned || anySeen) {
+                        lastRowSeenAt = now;
+                    } else if (now - lastRowSeenAt < ROW_GONE_BELIEVE_MS) {
+                        return;
+                    }
+                }
+                for (Target t : targets) {
+                    if (t.smartBuff) {
+                        updateBuff(t, icons, now);
+                    } else if (t.waitForCooldown && t.readyLook != null) {
+                        t.ready = !isDimmed(shot, t);
+                    }
+                }
+                lastScan = icons;
+                lastScanAt = now;
+            }, cropped);
+        }
+        // Each screenshot is a full-screen copy (~16 MB). Buff timers change slowly, so smart
+        // buffs only need one a second; the fast rate is for rings watching a cooldown shade.
+        handler.postDelayed(this::cooldownCheck, anyCooldown ? SCREENSHOT_EVERY_MS : BUFF_SCAN_EVERY_MS);
+    }
+
+    /** For the log: each icon as x,y size fill%. */
+    private static String describe(List<BuffReader.Icon> icons) {
+        if (icons == null) return "[no scan]";
+        StringBuilder sb = new StringBuilder("[");
+        for (BuffReader.Icon i : icons) {
+            if (sb.length() > 1) sb.append(' ');
+            sb.append(i.x).append(',').append(i.y).append(' ').append(i.size).append(' ')
+                    .append(Math.round(i.fill * 100)).append('%');
+        }
+        return sb.append(']').toString();
+    }
+
+    /** Reads a learned buff's timer, or learns which icon is this ring's buff. */
+    private void updateBuff(Target t, List<BuffReader.Icon> icons, long now) {
+        int n = targets.indexOf(t) + 1;
+        if (t.buffIcon == null) {
+            if (t.learnBefore == null || now < t.learnCheckAt) return;
+            BuffReader.Icon mine = BuffReader.refreshedIcon(t.learnBefore, icons);
+            String seen = "before " + describe(t.learnBefore) + " after " + describe(icons);
+            t.learnBefore = null;
+            if (mine == null) {
+                Log.i(TAG, "buff target " + n + ": couldn't tell which icon is mine, will try again next cast; " + seen);
+                return;
+            }
+            Log.i(TAG, "buff target " + n + ": " + seen);
+            t.buffIcon = mine.sig;
+            t.buffY = mine.y;
+            t.buffSize = mine.size;
+            Log.i(TAG, "buff target " + n + ": learned its icon at " + mine.x + "," + mine.y + ", smart buff active");
+            t.refreshLabel();
+            saveTargets();
+        }
+
+        BuffReader.Icon icon = BuffReader.freshest(icons, t.buffIcon);
+        boolean wasNeeded = t.buffKnown && (!t.buffFound || t.buffFill <= t.recastAt);
+        boolean looksNeeded = icon == null || icon.fill <= t.recastAt;
+        if (icon != null && icon.fill >= 0.9f) t.lastFullAt = now;
+        // A buff can't drop from full to its threshold within seconds; right after it read full,
+        // a low reading is a glitch (the row reshuffling after a recast, often "48%"). Throw the
+        // reading away entirely and keep the last good one, so nothing acts on it.
+        if (icon != null && looksNeeded && now - t.lastFullAt < JUST_FULL_MS) return;
+        // One odd frame (an effect or a player walking over the row) shouldn't trigger a recast:
+        // only believe "missing" or "low" once two scans in a row agree.
+        t.neededStreak = looksNeeded ? t.neededStreak + 1 : 0;
+        if (looksNeeded && t.neededStreak < 2) return;
+        t.buffKnown = true;
+        t.buffFound = icon != null;
+        t.buffFill = icon != null ? icon.fill : 0f;
+        boolean needed = looksNeeded;
+        if (!needed) t.recastsWithoutOk = 0;
+        if (needed != wasNeeded) {
+            Log.i(TAG, "buff target " + n + ": "
+                    + (icon != null ? Math.round(icon.fill * 100) + "% left" : "not active")
+                    + (needed ? ", recasting" : ", ok"));
+        }
+    }
+
+    private boolean isDimmed(Bitmap shot, Target t) {
+        int[] now = readLook(shot, t);
+        for (int row = 0; row < SAMPLE_ROWS; row++) {
+            int useful = 0;
+            int dimmed = 0;
+            for (int col = 0; col < SAMPLE_COLS; col++) {
+                int i = row * SAMPLE_COLS + col;
+                if (t.readyLook[i] < MIN_USEFUL_LUMA || now[i] < 0) continue;
+                useful++;
+                if (now[i] < t.readyLook[i] * DIM_RATIO) dimmed++;
+            }
+            // Most of a row darker than when ready means the cooldown shade still covers it.
+            if (useful > 0 && dimmed * 2 > useful) return true;
+        }
+        return false;
+    }
+
+    /** Brightness at each sample point, or -1 for points outside the screenshot. */
+    private int[] readLook(Bitmap shot, Target t) {
+        int[][] pts = t.samplePoints();
+        int[] look = new int[pts.length];
+        for (int i = 0; i < pts.length; i++) {
+            int x = pts[i][0];
+            int y = pts[i][1];
+            if (x < 0 || y < 0 || x >= shot.getWidth() || y >= shot.getHeight()) {
+                look[i] = -1;
+                continue;
+            }
+            int c = shot.getPixel(x, y);
+            look[i] = (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000;
+        }
+        return look;
+    }
+
+    private void captureScreen(Consumer<Bitmap> onShot) {
+        captureScreen(onShot, false);
+    }
+
+    /**
+     * Takes a screenshot and hands over a readable copy. With buffRowOnly, only the top-left
+     * corner holding the buff row is copied (~2.5 MB instead of ~16 MB): the game uses most of
+     * the tablet's memory, and Android kills whichever app it can spare when it runs out.
+     */
+    private void captureScreen(Consumer<Bitmap> onShot, boolean buffRowOnly) {
+        if (!canReadScreen()) return;
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult result) {
+                HardwareBuffer buffer = result.getHardwareBuffer();
+                Bitmap hw = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
+                buffer.close();
+                if (hw == null) return;
+                screenW = hw.getWidth();
+                screenH = hw.getHeight();
+                // Hardware bitmaps can't be read pixel by pixel, so make a readable copy.
+                Bitmap shot = null;
+                if (buffRowOnly) {
+                    try {
+                        Bitmap part = Bitmap.createBitmap(hw, 0, 0, screenW * 45 / 100, screenH * 35 / 100);
+                        shot = part.copy(Bitmap.Config.ARGB_8888, false);
+                        if (part != hw) part.recycle();
+                    } catch (RuntimeException e) {
+                        Log.w(TAG, "couldn't copy just the buff row, copying the whole screen: " + e);
+                    }
+                }
+                if (shot == null) shot = hw.copy(Bitmap.Config.ARGB_8888, false);
+                hw.recycle();
+                if (shot == null) return;
+                onShot.accept(shot);
+                shot.recycle();
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                // Usually "too soon after the last screenshot"; the next check will retry.
+            }
+        });
+    }
+
+    /** Hides the editor so it isn't in the picture, then saves how the button looks when ready. */
+    private void rememberReadyLook(Target t) {
+        closeEditor();
+        handler.postDelayed(() -> captureScreen(shot -> {
+            t.readyLook = readLook(shot, t);
+            t.waitForCooldown = true;
+            t.refreshLabel();
+            saveTargets();
+            openEditor(t);
+        }), 200);
+    }
+
+    // ---------- editor panel ----------
+
+    /** Small panel for changing one target's interval, cooldown check, or deleting it. */
+    private void openEditor(Target t) {
+        closeEditor();
+        int pad = dp(16);
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setGravity(Gravity.CENTER_HORIZONTAL);
+        panel.setPadding(pad, pad, pad, pad);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.argb(235, 30, 30, 30));
+        bg.setCornerRadius(dp(16));
+        panel.setBackground(bg);
+
+        TextView title = new TextView(this);
+        title.setTextColor(Color.LTGRAY);
+        title.setTextSize(15);
+        title.setText("Target " + (targets.indexOf(t) + 1) + " taps every");
+        title.setGravity(Gravity.CENTER);
+        panel.addView(title, fullWidth());
+
+        TextView value = new TextView(this);
+        value.setTextColor(Color.WHITE);
+        value.setTextSize(30);
+        value.setTypeface(Typeface.DEFAULT_BOLD);
+        value.setGravity(Gravity.CENTER);
+        value.setText(formatInterval(t.interval));
+        panel.addView(value, fullWidth());
+
+        // Small steps for fast taps, big steps for buffs every minute or two.
+        int[][] stepRows = {
+                {-100, -10, 10, 100},
+                {-60_000, -10_000, -1000, 1000, 10_000, 60_000},
+        };
+        for (int[] row : stepRows) {
+            LinearLayout steps = new LinearLayout(this);
+            for (int step : row) {
+                String text = (step > 0 ? "+" : "−") + formatInterval(Math.abs(step));
+                TextView b = pillButton(text, Color.rgb(70, 70, 70), () -> {
+                    t.interval = Math.max(MIN_INTERVAL, Math.min(MAX_INTERVAL, t.interval + step));
+                    value.setText(formatInterval(t.interval));
+                    t.refreshLabel();
+                    saveTargets();
+                });
+                b.setTextSize(14);
+                b.setPadding(dp(4), dp(10), dp(4), dp(10));
+                steps.addView(b, shared());
+            }
+            panel.addView(steps, fullWidth());
+        }
+
+        TextView priority = pillButton("", Color.rgb(70, 70, 70), null);
+        Runnable showPriority = () -> priority.setText(t.priority
+                ? "★ Priority: On (goes first when due)"
+                : "Priority: Off");
+        priority.setOnClickListener(v -> {
+            t.priority = !t.priority;
+            showPriority.run();
+            t.refreshLabel();
+            saveTargets();
+        });
+        showPriority.run();
+        LinearLayout.LayoutParams priorityLp = fullWidth();
+        priorityLp.topMargin = dp(16);
+        panel.addView(priority, priorityLp);
+
+        if (canReadScreen()) {
+            TextView smartNote = new TextView(this);
+            smartNote.setTextColor(Color.LTGRAY);
+            smartNote.setTextSize(13);
+            smartNote.setGravity(Gravity.CENTER);
+            smartNote.setPadding(0, dp(14), 0, 0);
+            panel.addView(smartNote, fullWidth());
+
+            LinearLayout smartRow = new LinearLayout(this);
+            TextView smartToggle = pillButton("", Color.rgb(70, 70, 70), null);
+            Runnable showSmart = () -> {
+                smartToggle.setText(t.smartBuff ? "Smart buff: On" : "Smart buff: Off");
+                if (!t.smartBuff) {
+                    smartNote.setText("Smart buff watches this buff's timer in the top-left buff row.");
+                } else if (t.buffIcon == null) {
+                    smartNote.setText("Learning: taps on its interval until it sees which buff icon refreshes when it casts.");
+                } else {
+                    smartNote.setText("Casts when the buff is missing or its timer drops to the % below. Interval is ignored.");
+                }
+            };
+            smartToggle.setOnClickListener(v -> {
+                t.smartBuff = !t.smartBuff;
+                showSmart.run();
+                t.refreshLabel();
+                saveTargets();
+            });
+            showSmart.run();
+            smartRow.addView(smartToggle, shared());
+            smartRow.addView(pillButton("Relearn icon", Color.rgb(40, 90, 180), () -> {
+                t.buffIcon = null;
+                t.buffKnown = false;
+                showSmart.run();
+                t.refreshLabel();
+                saveTargets();
+            }), shared());
+            panel.addView(smartRow, fullWidth());
+
+            LinearLayout recastRow = new LinearLayout(this);
+            recastRow.setGravity(Gravity.CENTER_VERTICAL);
+            TextView recastLabel = new TextView(this);
+            recastLabel.setTextColor(Color.WHITE);
+            recastLabel.setTextSize(15);
+            recastLabel.setGravity(Gravity.CENTER);
+            Runnable showRecast = () -> recastLabel.setText("Recast at " + Math.round(t.recastAt * 100) + "%");
+            showRecast.run();
+            for (int step : new int[] {-10, 10}) {
+                TextView b = pillButton((step > 0 ? "+" : "−") + Math.abs(step) + "%", Color.rgb(70, 70, 70), () -> {
+                    int pct = Math.max(10, Math.min(90, Math.round(t.recastAt * 100) + step));
+                    t.recastAt = pct / 100f;
+                    showRecast.run();
+                    t.refreshLabel();
+                    saveTargets();
+                });
+                if (step < 0) {
+                    recastRow.addView(b, shared());
+                    recastRow.addView(recastLabel, shared());
+                } else {
+                    recastRow.addView(b, shared());
+                }
+            }
+            panel.addView(recastRow, fullWidth());
+        }
+
+        TextView cdNote = new TextView(this);
+        cdNote.setTextColor(Color.LTGRAY);
+        cdNote.setTextSize(13);
+        cdNote.setGravity(Gravity.CENTER);
+        cdNote.setPadding(0, dp(14), 0, 0);
+        panel.addView(cdNote, fullWidth());
+
+        LinearLayout cdRow = new LinearLayout(this);
+        if (canReadScreen()) {
+            TextView cdToggle = pillButton("", Color.rgb(70, 70, 70), null);
+            Runnable showCd = () -> {
+                cdToggle.setText(t.waitForCooldown ? "Wait for cooldown: On" : "Wait for cooldown: Off");
+                if (!t.waitForCooldown) {
+                    cdNote.setText("Taps on its timer, even during cooldown.");
+                } else if (t.readyLook == null) {
+                    cdNote.setText("Ready look not saved yet.\nWhile the skill is ready, press Remember ready look.");
+                } else {
+                    cdNote.setText("Skips taps while the button is dimmed.");
+                }
+            };
+            cdToggle.setOnClickListener(v -> {
+                t.waitForCooldown = !t.waitForCooldown;
+                showCd.run();
+                t.refreshLabel();
+                saveTargets();
+            });
+            showCd.run();
+            cdRow.addView(cdToggle, shared());
+            cdRow.addView(pillButton("Remember ready look", Color.rgb(40, 90, 180), () -> rememberReadyLook(t)), shared());
+        } else {
+            cdNote.setText("Cooldown check needs Android 11 or newer.");
+        }
+        panel.addView(cdRow, fullWidth());
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.addView(pillButton("Delete", Color.rgb(170, 40, 40), () -> {
+            closeEditor();
+            removeTarget(t);
+        }), shared());
+        actions.addView(pillButton("Done", Color.rgb(40, 150, 60), this::closeEditor), shared());
+        LinearLayout.LayoutParams actionsLp = fullWidth();
+        actionsLp.topMargin = dp(10);
+        panel.addView(actions, actionsLp);
+
+        // Android squeezes auto-sized popups to phone-dialog width, so size the panel ourselves.
+        DisplayMetrics m = getResources().getDisplayMetrics();
+        int width = Math.min(m.widthPixels - dp(32), dp(520));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(panel, new ScrollView.LayoutParams(width, ScrollView.LayoutParams.WRAP_CONTENT));
+
+        WindowManager.LayoutParams p = overlayParams(width, WindowManager.LayoutParams.WRAP_CONTENT);
+        p.gravity = Gravity.CENTER;
+        if (safeAdd(scroll, p)) editor = scroll;
+    }
+
+    /** A child that spans the full panel width. */
+    private LinearLayout.LayoutParams fullWidth() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(4), 0, 0);
+        return lp;
+    }
+
+    /** Buttons in a row share its width equally. */
+    private LinearLayout.LayoutParams shared() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        lp.setMargins(dp(4), dp(8), dp(4), 0);
+        return lp;
+    }
+
+    private void closeEditor() {
+        if (editor != null) {
+            safeRemove(editor);
+            editor = null;
+        }
+    }
+
+    // ---------- saving ----------
+
+    /**
+     * One target per ";": x,y,interval,waitForCooldown,readyLook,priority,smartBuff,buffY,buffSize,buffIcon
+     * (readyLook and buffIcon are numbers joined by ".").
+     */
+    private void saveTargets() {
+        StringBuilder sb = new StringBuilder();
+        for (Target t : targets) {
+            if (sb.length() > 0) sb.append(';');
+            sb.append(t.params.x).append(',').append(t.params.y).append(',').append(t.interval)
+                    .append(',').append(t.waitForCooldown ? 1 : 0).append(',');
+            if (t.readyLook != null) {
+                for (int i = 0; i < t.readyLook.length; i++) {
+                    if (i > 0) sb.append('.');
+                    sb.append(t.readyLook[i]);
+                }
+            }
+            sb.append(',').append(t.priority ? 1 : 0);
+            sb.append(',').append(t.smartBuff ? 1 : 0).append(',').append(t.buffY).append(',').append(t.buffSize).append(',');
+            if (t.buffIcon != null) {
+                for (int i = 0; i < t.buffIcon.length; i++) {
+                    if (i > 0) sb.append('.');
+                    sb.append(t.buffIcon[i]);
+                }
+            }
+            sb.append(',').append(Math.round(t.recastAt * 100));
+            sb.append(',').append(t.extraGapMs);
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_TARGETS, sb.toString()).apply();
+    }
+
+    private void loadTargets() {
+        String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TARGETS, "");
+        for (String entry : saved.split(";")) {
+            String[] parts = entry.split(",", -1);
+            if (parts.length < 3) continue;
+            try {
+                Target t = addTarget(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]),
+                        Math.max(MIN_INTERVAL, Integer.parseInt(parts[2])));
+                if (t == null) continue;
+                if (parts.length >= 5) {
+                    t.waitForCooldown = parts[3].equals("1");
+                    String[] look = parts[4].isEmpty() ? new String[0] : parts[4].split("\\.");
+                    if (look.length == SAMPLE_ROWS * SAMPLE_COLS) {
+                        t.readyLook = new int[look.length];
+                        for (int i = 0; i < look.length; i++) t.readyLook[i] = Integer.parseInt(look[i]);
+                    }
+                }
+                if (parts.length >= 6) t.priority = parts[5].equals("1");
+                if (parts.length >= 12 && !parts[11].isEmpty()) {
+                    t.extraGapMs = Math.max(0, Math.min(MAX_EXTRA_GAP_MS, Integer.parseInt(parts[11])));
+                }
+                if (parts.length >= 11 && !parts[10].isEmpty()) {
+                    t.recastAt = Math.max(10, Math.min(90, Integer.parseInt(parts[10]))) / 100f;
+                }
+                if (parts.length >= 10) {
+                    t.smartBuff = parts[6].equals("1");
+                    t.buffY = Integer.parseInt(parts[7]);
+                    t.buffSize = Integer.parseInt(parts[8]);
+                    if (!parts[9].isEmpty()) {
+                        String[] icon = parts[9].split("\\.");
+                        t.buffIcon = new int[icon.length];
+                        for (int i = 0; i < icon.length; i++) t.buffIcon[i] = Integer.parseInt(icon[i]);
+                    }
+                }
+                t.refreshLabel();
+            } catch (NumberFormatException ignored) {
+            }
+        }
+    }
+
+    // ---------- views ----------
+
+    private WindowManager.LayoutParams overlayParams(int width, int height) {
+        WindowManager.LayoutParams p = new WindowManager.LayoutParams(
+                width, height,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT);
+        p.gravity = Gravity.TOP | Gravity.START;
+        return p;
+    }
+
+    /** Drag the handle to move the window; a touch that barely moves counts as a click. */
+    private void makeDraggable(View handle, View window, WindowManager.LayoutParams params,
+                               Runnable onClick, Runnable onMoved) {
+        int slop = dp(8);
+        handle.setOnTouchListener(new View.OnTouchListener() {
+            float downX, downY;
+            int startX, startY;
+            boolean dragging;
+
+            @Override
+            public boolean onTouch(View v, MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        downX = e.getRawX();
+                        downY = e.getRawY();
+                        startX = params.x;
+                        startY = params.y;
+                        dragging = false;
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        float dx = e.getRawX() - downX;
+                        float dy = e.getRawY() - downY;
+                        if (Math.abs(dx) > slop || Math.abs(dy) > slop) dragging = true;
+                        if (dragging) {
+                            params.x = startX + (int) dx;
+                            params.y = startY + (int) dy;
+                            safeUpdate(window, params);
+                        }
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        if (dragging) {
+                            if (onMoved != null) onMoved.run();
+                            saveTargets();
+                        } else {
+                            v.performClick();
+                            onClick.run();
+                        }
+                        return true;
+                }
+                return false;
+            }
+        });
+    }
+
+    private TextView roundButton(String text) {
+        TextView b = new TextView(this);
+        b.setGravity(Gravity.CENTER);
+        b.setTextSize(22);
+        b.setTextColor(Color.WHITE);
+        b.setText(text);
+        b.setBackground(circle(Color.rgb(40, 90, 180)));
+        return b;
+    }
+
+    private TextView pillButton(String text, int color, Runnable action) {
+        TextView b = new TextView(this);
+        b.setGravity(Gravity.CENTER);
+        b.setTextColor(Color.WHITE);
+        b.setTextSize(15);
+        b.setText(text);
+        b.setPadding(dp(14), dp(10), dp(14), dp(10));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(dp(20));
+        b.setBackground(bg);
+        if (action != null) b.setOnClickListener(v -> action.run());
+        return b;
+    }
+
+    private GradientDrawable circle(int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(color);
+        d.setStroke(dp(2), Color.WHITE);
+        return d;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    @Override
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+    }
+
+    @Override
+    public void onInterrupt() {
+        // Meant for screen readers ("stop talking"). Any app can send it at any time,
+        // so it must not stop the clicker.
+        Log.i(TAG, "interrupt ignored");
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        if (wm != null) removeOverlays("unbind");
+        return super.onUnbind(intent);
+    }
+
+    @Override
+    public void onDestroy() {
+        if (wm != null) removeOverlays("destroy");
+        super.onDestroy();
+    }
+}

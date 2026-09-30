@@ -1,0 +1,14 @@
+# Gradle and build output
+.gradle/
+build/
+app/build/
+
+# Machine-specific (Android SDK path)
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# Built APK copy
+*.apk
