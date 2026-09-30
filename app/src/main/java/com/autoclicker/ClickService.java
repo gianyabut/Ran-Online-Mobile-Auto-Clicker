@@ -77,6 +77,8 @@ public class ClickService extends AccessibilityService {
     private static final String KEY_MANUAL = "manual";
     private boolean manual;
     private int refusedInARow;
+    // The connected service, for the watchdog's health check (it runs in this same process).
+    private static volatile ClickService instance;
 
     // Cooldown check. Android allows roughly one accessibility screenshot per 333 ms.
     private static final int SCREENSHOT_EVERY_MS = 350;
@@ -338,6 +340,7 @@ public class ClickService extends AccessibilityService {
         removeOverlays("connect");
         loadTargets();
         refusedInARow = 0;
+        instance = this;
         Watchdog.schedule(this);
 
         bar = new LinearLayout(this);
@@ -1451,14 +1454,33 @@ public class ClickService extends AccessibilityService {
         Log.i(TAG, "interrupt ignored");
     }
 
+    /**
+     * Whether Android shows any of this service's overlay windows. False when the service is only
+     * half connected, or when a restart took the bar away while leaving the service connected.
+     */
+    static boolean overlayShowing() {
+        ClickService s = instance;
+        if (s == null) return false;
+        try {
+            for (AccessibilityWindowInfo w : s.getWindows()) {
+                if (w.getType() == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) return true;
+            }
+        } catch (RuntimeException ignored) {
+            // windows changed while asking
+        }
+        return false;
+    }
+
     @Override
     public boolean onUnbind(Intent intent) {
+        if (instance == this) instance = null;
         if (wm != null) removeOverlays("unbind");
         return super.onUnbind(intent);
     }
 
     @Override
     public void onDestroy() {
+        if (instance == this) instance = null;
         if (wm != null) removeOverlays("destroy");
         super.onDestroy();
     }

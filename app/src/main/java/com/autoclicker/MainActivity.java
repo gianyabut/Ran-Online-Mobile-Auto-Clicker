@@ -52,7 +52,7 @@ public class MainActivity extends Activity {
         enable.setOnClickListener(v -> {
             // Android leaves a killed service switched on but dead; opening settings would just
             // show the switch already on. Restart it directly instead.
-            if (Watchdog.isSwitchedOn(this) && !Watchdog.isConnected(this) && Watchdog.canRestart(this)) {
+            if (Watchdog.isSwitchedOn(this) && Watchdog.problem(this) != null && Watchdog.canRestart(this)) {
                 Watchdog.requestRevive(this, "restarted from the app", true);
                 Toast.makeText(this, "Restarting Auto Clicker, the bar comes back in a few seconds", Toast.LENGTH_LONG).show();
                 status.postDelayed(this::showStatus, 5000);
@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
         String text;
         if (!Watchdog.isSwitchedOn(this)) {
             text = "Service: off. Press Enable service and turn on Auto Clicker.";
-        } else if (Watchdog.isConnected(this)) {
+        } else if (Watchdog.problem(this) == null) {
             text = "Service: running.";
         } else {
             text = "Service: stopped by Android. Press Enable service to restart it.";

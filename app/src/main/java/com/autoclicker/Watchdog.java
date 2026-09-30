@@ -3,6 +3,7 @@ package com.autoclicker;
 import android.Manifest;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.AlarmManager;
+import android.app.KeyguardManager;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -13,6 +14,7 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.TextUtils;
@@ -21,6 +23,7 @@ import android.view.accessibility.AccessibilityManager;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Brings the service back when Android kills it.
@@ -48,8 +51,10 @@ public class Watchdog extends BroadcastReceiver {
     // Off long enough for Android to forget the "crashed" mark. Switching back on sooner leaves
     // the service half connected: the bar can't be drawn and every tap is refused.
     private static final int OFF_FOR_MS = 3000;
-    // Time for the service to connect before the second round of a restart.
-    private static final int CONNECT_MS = 2000;
+    // Time for the service to connect and show its bar after each round of a restart.
+    private static final int CONNECT_MS = 2500;
+    private static final int MIN_ROUNDS = 2;
+    private static final int MAX_ROUNDS = 4;
     private static final int MIN_REVIVE_GAP_MS = 20_000;
     private static final String KEY_REVIVING_SINCE = "reviving_since";
     private static final String KEY_LAST_REVIVE = "last_revive";
@@ -62,7 +67,7 @@ public class Watchdog extends BroadcastReceiver {
         schedule(app);
         String action = intent.getAction();
         boolean force = ACTION_REVIVE.equals(action);
-        String reason = force ? intent.getStringExtra(EXTRA_REASON) : "not connected";
+        String reason = force ? intent.getStringExtra(EXTRA_REASON) : null;
 
         SharedPreferences prefs = prefs(app);
         if (!isSwitchedOn(app)) {
@@ -75,22 +80,33 @@ public class Watchdog extends BroadcastReceiver {
             prefs.edit().remove(KEY_REVIVING_SINCE).apply();
             return;
         }
-        if (!force && isConnected(app)) return;
+        if (!force && problem(app) == null) return;
 
         PendingResult pending = goAsync();
         boolean now = intent.getBooleanExtra(EXTRA_NOW, false);
-        Runnable restart = () -> revive(app, reason, now, pending);
         if (force) {
-            restart.run();
+            revive(app, reason, now, pending);
         } else {
             handler.postDelayed(() -> {
-                if (isConnected(app)) {
+                String found = problem(app);
+                if (found == null) {
                     pending.finish();
                 } else {
-                    restart.run();
+                    revive(app, found, now, pending);
                 }
             }, RECHECK_MS);
         }
+    }
+
+    /** What's wrong with the service, or null if it's connected and its bar is on screen. */
+    static String problem(Context context) {
+        if (!isConnected(context)) return "not connected";
+        // The overlay check needs the screen on and unlocked; with it off, trust the connection.
+        PowerManager power = context.getSystemService(PowerManager.class);
+        KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
+        boolean canSee = (power == null || power.isInteractive()) && (keyguard == null || !keyguard.isKeyguardLocked());
+        if (canSee && !ClickService.overlayShowing()) return "connected but its bar is gone";
+        return null;
     }
 
     private static void revive(Context app, String reason, boolean ignoreGap, PendingResult pending) {
@@ -107,25 +123,36 @@ public class Watchdog extends BroadcastReceiver {
         }
         prefs.edit().putLong(KEY_REVIVING_SINCE, now).putLong(KEY_LAST_REVIVE, now).commit();
         Log.i(TAG, "watchdog: service " + reason + ", turning it off and on");
-        // The first off-and-on after a crash only half connects the service (seen every time on
-        // the Xiaomi Pad 5: bar can't be drawn, taps refused); a second one right after fixes it.
-        cycle(app, 2, () -> {
+        cycle(app, 1, ok -> {
             prefs.edit().remove(KEY_REVIVING_SINCE).apply();
-            Log.i(TAG, "watchdog: service switched back on");
+            if (ok) {
+                Log.i(TAG, "watchdog: service is back");
+            } else {
+                Log.w(TAG, "watchdog: service still not right after " + MAX_ROUNDS + " restarts: " + problem(app));
+            }
             pending.finish();
         });
     }
 
-    /** Switch off, wait, switch on; `times` rounds, letting the service connect in between. */
-    private static void cycle(Context app, int times, Runnable done) {
+    /**
+     * One round: switch off, wait, switch on, let it connect. The first round after a crash only
+     * half connects the service on the Xiaomi Pad 5 (taps refused), so always do MIN_ROUNDS; after
+     * that, stop as soon as the service is connected with its bar on screen. A round can also end
+     * with the service connected twice and no bar, which the next round clears.
+     */
+    private static void cycle(Context app, int round, Consumer<Boolean> done) {
         setSwitch(app, false);
         handler.postDelayed(() -> {
             setSwitch(app, true);
-            if (times <= 1) {
-                done.run();
-            } else {
-                handler.postDelayed(() -> cycle(app, times - 1, done), CONNECT_MS);
-            }
+            handler.postDelayed(() -> {
+                if (round >= MIN_ROUNDS && problem(app) == null) {
+                    done.accept(true);
+                } else if (round >= MAX_ROUNDS) {
+                    done.accept(false);
+                } else {
+                    cycle(app, round + 1, done);
+                }
+            }, CONNECT_MS);
         }, OFF_FOR_MS);
     }
 
