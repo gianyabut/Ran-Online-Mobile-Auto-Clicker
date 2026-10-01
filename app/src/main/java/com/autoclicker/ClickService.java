@@ -860,7 +860,10 @@ public class ClickService extends AccessibilityService {
             // the heal the lock can last ~4 s in a fight, so wait at least that long then.
             boolean afterHeal = lastPriorityTapAt > 0 && lastPriorityTapAt == lastAnyTapAt;
             if (!afterHeal) return 0;
-            long wait = Math.max(tapGapMs + t.extraGapMs, FORCED_AFTER_HEAL_MS);
+            // End Game: a fixed 4 s, so the first buff goes before the next heal is due (4.17 s).
+            // A learned wait (up to 3 s extra) let a heal in first and started the wait over: the
+            // full buff began 10 s after the wave cleared.
+            long wait = endGame ? FORCED_AFTER_HEAL_MS : Math.max(tapGapMs + t.extraGapMs, FORCED_AFTER_HEAL_MS);
             return Math.max(0, lastAnyTapAt + TAP_MS + wait - now);
         }
         boolean anyPriority = false;
