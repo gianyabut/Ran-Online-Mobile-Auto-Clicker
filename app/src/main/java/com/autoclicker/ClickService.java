@@ -91,12 +91,15 @@ public class ClickService extends AccessibilityService {
     // Cooldown check. Android allows roughly one accessibility screenshot per 333 ms.
     private static final int SCREENSHOT_EVERY_MS = 350;
     private static final int BUFF_SCAN_EVERY_MS = 2000;
-    // Big pull (see updatePull): this many monsters on screen. A crowd of ~12 reads 9-10.
-    private static final int PULL_MOBS = 8;
-    private static final int PULL_HOLD_MS = 6000;
-    private static final float PULL_BUFF_FLOOR = 0.15f;
-    private long pullUntil;
-    private boolean inPull; // for the log: what we last said
+    // Waves (see updateWave). The count runs low in a crowd (~12 reads 9-10) and can read 1 on
+    // red graffiti, so "cleared" is 3 or fewer.
+    private static final int WAVE_START_MOBS = 6;
+    private static final int WAVE_END_MOBS = 3;
+    private static final int WAVE_END_SCANS = 3;
+    private static final int MIN_WAVE_MS = 15_000;
+    private boolean inWave;
+    private long waveStartedAt;
+    private int clearScans;
     private long lastMobCountAt;
     private static final int COOLDOWN_RECHECK_MS = 150;
     // Sample grid inside the ring: rows top to bottom, because the game's dimming clears top-down.
@@ -115,10 +118,10 @@ public class ClickService extends AccessibilityService {
     private final Runnable pump = this::pumpQueue;
     private WindowManager wm;
     private View touchWatcher;
-    // Your last touch on the game: no taps until USER_TOUCH_PAUSE_MS after it (spamming heal by
-    // hand comes in bursts; a held button repeats, so allow a short hold too).
+    // Your last touch on the game: no taps until USER_TOUCH_PAUSE_MS after it. A skill you cast by
+    // hand locks the others for up to ~4 s, so a tap any sooner would just be ignored.
     private long userTouchAt;
-    private static final int USER_TOUCH_PAUSE_MS = 2500;
+    private static final int USER_TOUCH_PAUSE_MS = 4000;
     // Touches before this are our own tap arriving.
     private long ownTapUntil;
     private static final int OWN_TAP_SLACK_MS = 250;
@@ -199,6 +202,10 @@ public class ClickService extends AccessibilityService {
         // Queued by the FB button: cast even if the buff is still up, without waiting its turn.
         boolean forced;
         int forcedRetries;
+        // Full buff: tapped, and the check whether it took is still to come.
+        boolean awaitingCheck;
+        // Goes after every other buff that's due (and last in a full buff).
+        boolean castLast;
         long queuedAt;
         int recastsWithoutOk;
         // Recast when the buff's timer is at or below this share (70% default, per buff).
@@ -244,7 +251,10 @@ public class ClickService extends AccessibilityService {
                             handler.postDelayed(this, SMART_RECHECK_MS);
                             return;
                         }
-                        if (lastTapAt > 0 && sinceTap < SMART_RETRY_MS + 5000 && extraGapMs < MAX_EXTRA_GAP_MS) {
+                        // A skill you cast by hand locks the others too; that's no reason to wait longer.
+                        boolean youCastBefore = lastTapAt - userTouchAt < USER_TOUCH_PAUSE_MS + 2000;
+                        if (lastTapAt > 0 && sinceTap < SMART_RETRY_MS + 5000 && extraGapMs < MAX_EXTRA_GAP_MS
+                                && !youCastBefore) {
                             // Still low right after our tap: the game ignored it, usually because the
                             // previous skill's lock lasts longer in a fight. Wait a bit longer next time.
                             extraGapMs += 500;
@@ -329,6 +339,7 @@ public class ClickService extends AccessibilityService {
                 text += formatInterval(interval);
                 if (waitForCooldown) text += readyLook != null ? " · CD" : " · CD?";
             }
+            if (castLast) text += " · last";
             badge.setText(text);
         }
 
@@ -519,6 +530,9 @@ public class ClickService extends AccessibilityService {
         lastBuffRing = null;
         // Right after ▶ the first screenshots can miss the buff row; give it the same grace period.
         lastRowSeenAt = SystemClock.uptimeMillis();
+        // A wave in progress isn't carried over a stop: the screen may look nothing alike now.
+        inWave = false;
+        clearScans = 0;
         if (run) closeEditor();
 
         toggle.setText(run ? "■" : "▶");
@@ -638,8 +652,11 @@ public class ClickService extends AccessibilityService {
      * tap (usually the skill lock after the heal), so try that buff again, waiting a bit longer.
      */
     private void checkForcedBuff(Target t) {
+        t.awaitingCheck = false;
         if (!running || !t.isSmart()) return;
-        boolean took = t.buffKnown && t.buffFound && t.buffFill >= 0.9f;
+        // Read full at some point since the tap. Not "is it still full": a short buff (Massive
+        // Haste) has drained below 90% by the time this runs, and was cast again for nothing.
+        boolean took = t.lastFullAt >= t.lastTapAt;
         if (took || t.forcedRetries >= 2) return;
         t.forcedRetries++;
         t.extraGapMs = Math.min(MAX_EXTRA_GAP_MS, t.extraGapMs + 500);
@@ -724,6 +741,11 @@ public class ClickService extends AccessibilityService {
             if (pending.isEmpty()) return;
             next = pickNext(now);
         }
+        if (waitsForOthers(next)) {
+            // Only cast-last rings are waiting, and a full buff's checks are still to come.
+            schedulePump(SMART_RECHECK_MS);
+            return;
+        }
         if (!next.priority) {
             long waitMs = buffWait(next, now);
             if (waitMs > 0) {
@@ -744,6 +766,7 @@ public class ClickService extends AccessibilityService {
         tap(next);
         if (next.forced) {
             next.forced = false;
+            next.awaitingCheck = true;
             Target forcedTarget = next;
             handler.postDelayed(() -> checkForcedBuff(forcedTarget), FORCED_CHECK_MS);
         }
@@ -793,31 +816,42 @@ public class ClickService extends AccessibilityService {
     }
 
     /**
-     * Big pull: lots of monsters on screen means lots of damage, so the heal gets every slot.
-     * Stays on PULL_HOLD_MS after the count drops, so one scan with names hidden behind effects
-     * doesn't let the buffs in mid-fight.
+     * Party farming in waves: the party lures a crowd onto the support, who only heals until it's
+     * nearly dead, then full-buffs everyone for the next lure.
+     * A wave starts at WAVE_START_MOBS on screen and ends once WAVE_END_MOBS or fewer show for
+     * WAVE_END_SCANS scans in a row (spell effects can hide names for a moment mid-fight).
      */
-    private void updatePull(int mobs, long now) {
+    private void updateWave(int mobs) {
         if (mobs < 0) return;
-        if (mobs >= PULL_MOBS) pullUntil = now + PULL_HOLD_MS;
-        boolean active = pullActive(now);
-        if (active != inPull) {
-            inPull = active;
-            Log.i(TAG, active ? "big pull: ~" + mobs + " monsters, buffs wait until they're at "
-                    + Math.round(PULL_BUFF_FLOOR * 100) + "%"
-                    : "pull over (~" + mobs + " monsters), buffs back to normal");
+        long now = SystemClock.uptimeMillis();
+        if (mobs >= WAVE_START_MOBS) {
+            clearScans = 0;
+            if (!inWave) {
+                inWave = true;
+                waveStartedAt = now;
+                Log.i(TAG, "wave: ~" + mobs + " monsters, heal only");
+            }
+            return;
         }
-    }
-
-    private boolean pullActive(long now) {
-        return now < pullUntil;
+        if (!inWave) return;
+        clearScans = mobs <= WAVE_END_MOBS ? clearScans + 1 : 0;
+        if (clearScans < WAVE_END_SCANS) return;
+        inWave = false;
+        clearScans = 0;
+        long lasted = now - waveStartedAt;
+        // At a busy spot another group's crowd can pass through for a few seconds; that's no
+        // reason to spend ~20 s of heals on a full buff.
+        if (lasted < MIN_WAVE_MS) {
+            Log.i(TAG, "wave over after " + lasted / 1000 + " s (~" + mobs + " left), too short for a full buff");
+            return;
+        }
+        Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff");
+        fullBuff();
     }
 
     private boolean buffNeeded(Target t) {
-        if (!t.forced && pullActive(SystemClock.uptimeMillis())) {
-            // Only a buff about to run out still costs a heal; a missing one waits for the pull to end.
-            return t.buffKnown && t.buffFound && t.buffFill <= PULL_BUFF_FLOOR;
-        }
+        // Mid-wave every slot goes to the heal; the full buff after the wave refreshes everything.
+        if (!t.forced && inWave) return false;
         return t.buffKnown && (!t.buffFound || t.buffFill <= t.recastAt);
     }
 
@@ -828,10 +862,25 @@ public class ClickService extends AccessibilityService {
      */
     private Target pickNext(long now) {
         for (Target t : pending) {
-            if (!t.priority && lastPriorityTapAt > 0 && t.queuedAt < lastPriorityTapAt) return t;
+            if (!t.priority && lastPriorityTapAt > 0 && t.queuedAt < lastPriorityTapAt && !waitsForOthers(t)) return t;
         }
         for (Target t : pending) if (t.priority) return t;
+        for (Target t : pending) if (!waitsForOthers(t)) return t;
         return pending.get(0);
+    }
+
+    /**
+     * A "cast last" ring lets every other waiting buff go first; in a full buff it also waits for
+     * the others' "did it take?" checks, so a retried buff can't land after it.
+     */
+    private boolean waitsForOthers(Target t) {
+        if (!t.castLast) return false;
+        for (Target o : targets) {
+            if (o == t || o.priority || o.castLast) continue;
+            if (pending.contains(o)) return true;
+            if (t.forced && (o.forced || o.awaitingCheck)) return true;
+        }
+        return false;
     }
 
     private void schedulePump(long delayMs) {
@@ -984,7 +1033,7 @@ public class ClickService extends AccessibilityService {
                 // per BUFF_SCAN_EVERY_MS is plenty.
                 if (scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
                     lastMobCountAt = now;
-                    updatePull(MobCounter.count(shot, screenW, screenH), now);
+                    updateWave(MobCounter.count(shot, screenW, screenH));
                 }
                 // The whole row vanishing at once means something covered it (a menu, an effect),
                 // not that every buff ran out in the same second. Only believe it after a while.
@@ -1084,7 +1133,7 @@ public class ClickService extends AccessibilityService {
         if (needed != wasNeeded) {
             Log.i(TAG, "buff target " + n + ": "
                     + (icon != null ? Math.round(icon.fill * 100) + "% left" : "not active")
-                    + (needed ? ", recasting" : ", ok"));
+                    + (!needed ? ", ok" : inWave ? ", waiting for the wave to end" : ", recasting"));
         }
         if (wasNeeded && !needed && icon.fill >= 0.9f) {
             // Our tap took first time: the wait after the heal may be longer than it needs to be.
@@ -1266,6 +1315,21 @@ public class ClickService extends AccessibilityService {
         priorityLp.topMargin = dp(16);
         panel.addView(priority, priorityLp);
 
+        TextView castLast = pillButton("", Color.rgb(70, 70, 70), null);
+        Runnable showCastLast = () -> castLast.setText(t.castLast
+                ? "⤓ Cast last: On (after the other buffs)"
+                : "Cast last: Off");
+        castLast.setOnClickListener(v -> {
+            t.castLast = !t.castLast;
+            showCastLast.run();
+            t.refreshLabel();
+            saveTargets();
+        });
+        showCastLast.run();
+        LinearLayout.LayoutParams castLastLp = fullWidth();
+        castLastLp.topMargin = dp(8);
+        panel.addView(castLast, castLastLp);
+
         if (canReadScreen()) {
             TextView smartNote = new TextView(this);
             smartNote.setTextColor(Color.LTGRAY);
@@ -1434,6 +1498,7 @@ public class ClickService extends AccessibilityService {
             }
             sb.append(',').append(Math.round(t.recastAt * 100));
             sb.append(',').append(t.extraGapMs);
+            sb.append(',').append(t.castLast ? 1 : 0);
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_TARGETS, sb.toString()).apply();
     }
@@ -1458,6 +1523,7 @@ public class ClickService extends AccessibilityService {
                     }
                 }
                 if (parts.length >= 6) t.priority = parts[5].equals("1");
+                if (parts.length >= 13) t.castLast = parts[12].equals("1");
                 if (parts.length >= 12 && !parts[11].isEmpty()) {
                     t.extraGapMs = Math.max(0, Math.min(MAX_EXTRA_GAP_MS, Integer.parseInt(parts[11])));
                 }

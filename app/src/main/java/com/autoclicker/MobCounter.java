@@ -62,7 +62,8 @@ final class MobCounter {
 
     /**
      * HUD parts with red in them: HP panel and team list (red HP bars), chat (red system lines),
-     * top menu, minimap, joystick, and the skill buttons with our red rings.
+     * top menu, the selected target's bar, minimap, joystick, and the skill buttons with our red
+     * rings.
      */
     private static boolean hud(int x, int y, int w, int h) {
         float fx = x / (float) w;
@@ -70,6 +71,7 @@ final class MobCounter {
         return (fx < 0.25f && fy < 0.42f)
                 || (fx > 0.31f && fx < 0.69f && fy > 0.72f)
                 || (fx > 0.65f && fy < 0.08f)
+                || (fx > 0.28f && fx < 0.72f && fy < 0.09f) // selected target's name and HP bar
                 || (fx > 0.78f && fy > 0.08f && fy < 0.25f)
                 || (fx < 0.20f && fy > 0.60f)
                 || (fx > 0.78f && fy > 0.52f)
