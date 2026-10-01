@@ -963,6 +963,12 @@ public class ClickService extends AccessibilityService {
      * needing a long wait after the heal would never fit between two heals.
      */
     private Target pickNext(long now) {
+        // Full buff in progress: its buffs go back to back and the heal waits until the last one
+        // is out (~12 s). It comes when the wave is cleared, right after a heal, and the party
+        // gets every buff ~4 s sooner, before heading off to lure.
+        for (Target t : pending) {
+            if (t.forced && !t.priority && !waitsForOthers(t)) return t;
+        }
         for (Target t : pending) {
             if (!t.priority && lastPriorityTapAt > 0 && t.queuedAt < lastPriorityTapAt && !waitsForOthers(t)) return t;
         }
