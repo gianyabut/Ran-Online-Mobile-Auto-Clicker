@@ -75,6 +75,10 @@ public class ClickService extends AccessibilityService {
     // Whether you left it running, and for which app, so it can resume after Android kills it.
     private static final String KEY_RUNNING = "running";
     private static final String KEY_GAME = "game_package";
+    // Until ▶ has been pressed in a game, the bar shows for Ran Online.
+    private static final String DEFAULT_GAME = "com.ranpinas.client";
+    private boolean overlaysHidden;
+    private static final int VISIBILITY_RECHECK_MS = 1000;
     private String gamePackage;
     private String lastForeground;
     private boolean pausedForOtherApp;
@@ -468,6 +472,7 @@ public class ClickService extends AccessibilityService {
             gamePackage = prefs.getString(KEY_GAME, null);
             setRunning(true, "resumed after restart");
         }
+        updateOverlayVisibility();
     }
 
     /**
@@ -507,6 +512,7 @@ public class ClickService extends AccessibilityService {
         targets.clear();
         if (bar != null) safeRemove(bar);
         bar = null;
+        overlaysHidden = false;
         if (touchWatcher != null) safeRemove(touchWatcher);
         touchWatcher = null;
     }
@@ -590,6 +596,8 @@ public class ClickService extends AccessibilityService {
             if (run) handler.postDelayed(t.tick, 300);
         }
         if (run) handler.post(this::cooldownCheck);
+        // Clearing the handler above also dropped the "game back yet?" check.
+        updateOverlayVisibility();
         // End Game starts the cycle like the support does by hand: buff the party first. Skipped
         // when this start came from a full buff (FB or the EG switch while stopped).
         if (run && endGame && why.equals("button")
@@ -615,7 +623,7 @@ public class ClickService extends AccessibilityService {
         for (Target t : targets) {
             // Untouchable as well as hidden, so no invisible window swallows a tap meant for the game.
             t.setTouchable(!on);
-            t.root.setVisibility(on ? View.GONE : View.VISIBLE);
+            t.root.setVisibility(on || overlaysHidden ? View.GONE : View.VISIBLE);
         }
         int others = on ? View.GONE : View.VISIBLE;
         toggle.setVisibility(others);
@@ -1811,7 +1819,34 @@ public class ClickService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) updateOverlayVisibility();
     }
+
+    /**
+     * The bar and rings only show while the game is in front; on the home screen or in another app
+     * they'd just be in the way. Only an app window decides: our own settings screen and the
+     * keyboard leave things as they are.
+     */
+    private void updateOverlayVisibility() {
+        if (bar == null) return;
+        handler.removeCallbacks(visibilityCheck);
+        String front = foregroundPackage();
+        String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+        if (front != null && !front.equals(getPackageName())) {
+            boolean show = front.equals(game);
+            if (show == overlaysHidden) {
+                overlaysHidden = !show;
+                if (!show) closeEditor();
+                bar.setVisibility(show ? View.VISIBLE : View.GONE);
+                for (Target t : targets) t.root.setVisibility(show && !manual ? View.VISIBLE : View.GONE);
+                Log.i(TAG, show ? "game in front: showing the bar" : "hidden while " + front + " is in front");
+            }
+        }
+        // Not every way back to the game sends an event (e.g. closing the notification shade).
+        if (overlaysHidden) handler.postDelayed(visibilityCheck, VISIBILITY_RECHECK_MS);
+    }
+
+    private final Runnable visibilityCheck = this::updateOverlayVisibility;
 
     @Override
     public void onInterrupt() {
