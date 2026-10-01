@@ -91,6 +91,13 @@ public class ClickService extends AccessibilityService {
     // Cooldown check. Android allows roughly one accessibility screenshot per 333 ms.
     private static final int SCREENSHOT_EVERY_MS = 350;
     private static final int BUFF_SCAN_EVERY_MS = 2000;
+    // Big pull (see updatePull): this many monsters on screen. A crowd of ~12 reads 9-10.
+    private static final int PULL_MOBS = 8;
+    private static final int PULL_HOLD_MS = 6000;
+    private static final float PULL_BUFF_FLOOR = 0.15f;
+    private long pullUntil;
+    private boolean inPull; // for the log: what we last said
+    private long lastMobCountAt;
     private static final int COOLDOWN_RECHECK_MS = 150;
     // Sample grid inside the ring: rows top to bottom, because the game's dimming clears top-down.
     private static final int SAMPLE_ROWS = 7;
@@ -208,7 +215,7 @@ public class ClickService extends AccessibilityService {
             public void run() {
                 if (!running) return;
                 if (isSmart()) {
-                    boolean needed = buffKnown && (!buffFound || buffFill <= recastAt);
+                    boolean needed = buffNeeded(Target.this);
                     long now = SystemClock.uptimeMillis();
                     long sinceTap = now - lastTapAt;
                     // Keep the buffs spread out: right after another buff, wait before this one,
@@ -785,7 +792,32 @@ public class ClickService extends AccessibilityService {
         return t.buffKnown && (!t.buffFound || t.buffFill <= SMART_URGENT_AT);
     }
 
-    private static boolean buffNeeded(Target t) {
+    /**
+     * Big pull: lots of monsters on screen means lots of damage, so the heal gets every slot.
+     * Stays on PULL_HOLD_MS after the count drops, so one scan with names hidden behind effects
+     * doesn't let the buffs in mid-fight.
+     */
+    private void updatePull(int mobs, long now) {
+        if (mobs < 0) return;
+        if (mobs >= PULL_MOBS) pullUntil = now + PULL_HOLD_MS;
+        boolean active = pullActive(now);
+        if (active != inPull) {
+            inPull = active;
+            Log.i(TAG, active ? "big pull: ~" + mobs + " monsters, buffs wait until they're at "
+                    + Math.round(PULL_BUFF_FLOOR * 100) + "%"
+                    : "pull over (~" + mobs + " monsters), buffs back to normal");
+        }
+    }
+
+    private boolean pullActive(long now) {
+        return now < pullUntil;
+    }
+
+    private boolean buffNeeded(Target t) {
+        if (!t.forced && pullActive(SystemClock.uptimeMillis())) {
+            // Only a buff about to run out still costs a heal; a missing one waits for the pull to end.
+            return t.buffKnown && t.buffFound && t.buffFill <= PULL_BUFF_FLOOR;
+        }
         return t.buffKnown && (!t.buffFound || t.buffFill <= t.recastAt);
     }
 
@@ -938,7 +970,9 @@ public class ClickService extends AccessibilityService {
         boolean anyWatching = anyCooldown || anySmart;
         if (anyWatching && canReadScreen()) {
             boolean scanBuffs = anySmart;
-            boolean cropped = anySmart && !anyCooldown;
+            // The whole screen, for the monster count. Copying just the buff row saved nothing:
+            // Android makes a full copy internally to crop a screenshot (measured ~18 MB either way).
+            boolean cropped = false;
             captureScreen(shot -> {
                 if (!running) return;
                 // The chat window, keyboard or another app hide the buff row; don't mistake that
@@ -946,6 +980,12 @@ public class ClickService extends AccessibilityService {
                 if (keyboardShowing() || (gamePackage != null && !gamePackage.equals(foregroundPackage()))) return;
                 List<BuffReader.Icon> icons = scanBuffs ? BuffReader.scan(shot, screenW, screenH) : null;
                 long now = SystemClock.uptimeMillis();
+                // Screenshots come every 0.35 s while a ring watches a cooldown; counting once
+                // per BUFF_SCAN_EVERY_MS is plenty.
+                if (scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
+                    lastMobCountAt = now;
+                    updatePull(MobCounter.count(shot, screenW, screenH), now);
+                }
                 // The whole row vanishing at once means something covered it (a menu, an effect),
                 // not that every buff ran out in the same second. Only believe it after a while.
                 // Judge by our own learned buffs: if none of them can be seen at once, the row is
