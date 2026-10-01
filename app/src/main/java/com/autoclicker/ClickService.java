@@ -99,12 +99,16 @@ public class ClickService extends AccessibilityService {
     // Cooldown check. Android allows roughly one accessibility screenshot per 333 ms.
     private static final int SCREENSHOT_EVERY_MS = 350;
     private static final int BUFF_SCAN_EVERY_MS = 2000;
-    // Waves (see updateWave). The count runs low in a crowd (~12 reads 9-10) and can read 1 on
-    // red graffiti, so "cleared" is 3 or fewer.
+    // Waves (see updateWave): 6+ on screen is a wave, fewer than 6 means it's (nearly) cleared,
+    // the user's call. The count runs low in a crowd (~12 reads 9-10) and can read 1 on graffiti.
     private static final int WAVE_START_MOBS = 6;
-    private static final int WAVE_END_MOBS = 3;
+    private static final int WAVE_END_MOBS = 5;
     private static final int WAVE_END_SCANS = 3;
     private static final int MIN_WAVE_MS = 15_000;
+    // Between waves a low buff triggers a full buff, but not more often than this.
+    private static final int QUIET_FULL_BUFF_GAP_MS = 30_000;
+    private long lastAutoFullBuffAt;
+    private int lastMobCount = -1;
     private boolean inWave;
     private long waveStartedAt;
     private int clearScans;
@@ -188,6 +192,7 @@ public class ClickService extends AccessibilityService {
         boolean priority;
         boolean waitForCooldown;
         int[] readyLook; // brightness per sample point when the skill is ready, or null
+        int lookX, lookY; // where the ring was when readyLook was saved
         boolean ready = true;
 
         // Smart buff: the buff's icon in the game's buff row, and what the last screenshot saw.
@@ -341,9 +346,12 @@ public class ClickService extends AccessibilityService {
                 }
             });
             makeDraggable(root, root, params, () -> openEditor(this), () -> {
-                // The saved ready look belongs to the old spot.
-                readyLook = null;
-                refreshLabel();
+                // The saved ready look belongs to the old spot, but a nudge while tapping the
+                // ring to open its settings still sees the same button: only a real move clears it.
+                if (Math.hypot(params.x - lookX, params.y - lookY) > ring.getWidth() / 3f) {
+                    readyLook = null;
+                    refreshLabel();
+                }
             });
         }
 
@@ -857,10 +865,16 @@ public class ClickService extends AccessibilityService {
      * nearly dead, then full-buffs everyone for the next lure.
      * A wave starts at WAVE_START_MOBS on screen and ends once WAVE_END_MOBS or fewer show for
      * WAVE_END_SCANS scans in a row (spell effects can hide names for a moment mid-fight).
+     * Between waves, a buff running low also triggers a full buff (at most every 30 s).
      */
     private void updateWave(int mobs) {
         if (mobs < 0) return;
         long now = SystemClock.uptimeMillis();
+        if (mobs != lastMobCount) {
+            // For tuning: what the counter read whenever it changes.
+            Log.d(TAG, "monsters: ~" + mobs);
+            lastMobCount = mobs;
+        }
         if (mobs >= WAVE_START_MOBS) {
             clearScans = 0;
             if (!inWave) {
@@ -870,20 +884,41 @@ public class ClickService extends AccessibilityService {
             }
             return;
         }
-        if (!inWave) return;
         clearScans = mobs <= WAVE_END_MOBS ? clearScans + 1 : 0;
         if (clearScans < WAVE_END_SCANS) return;
-        inWave = false;
-        clearScans = 0;
-        long lasted = now - waveStartedAt;
-        // At a busy spot another group's crowd can pass through for a few seconds; that's no
-        // reason to spend ~20 s of heals on a full buff.
-        if (lasted < MIN_WAVE_MS) {
+        if (inWave) {
+            inWave = false;
+            long lasted = now - waveStartedAt;
+            // At a busy spot another group's crowd can pass through for a few seconds; that's no
+            // reason to spend ~20 s of heals on a full buff (the low-buff rule below still applies).
+            if (lasted >= MIN_WAVE_MS) {
+                Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff");
+                lastAutoFullBuffAt = now;
+                fullBuff();
+                return;
+            }
             Log.i(TAG, "wave over after " + lasted / 1000 + " s (~" + mobs + " left), too short for a full buff");
-            return;
         }
-        Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff");
-        fullBuff();
+        // Quiet between waves: buffs are only cast in full buffs, so when one runs low, buff them all.
+        Target low = lowBuff();
+        if (low != null && now - lastAutoFullBuffAt >= QUIET_FULL_BUFF_GAP_MS) {
+            Log.i(TAG, "quiet (~" + mobs + " monsters) and buff target " + (targets.indexOf(low) + 1)
+                    + " is low, full buff");
+            lastAutoFullBuffAt = now;
+            fullBuff();
+        }
+    }
+
+    /** A learned buff that's missing or at/below its recast %, and castable (not cooling down). */
+    private Target lowBuff() {
+        for (Target t : targets) {
+            if (t.isSmart() && !t.onCooldown() && buffBelowRecast(t)) return t;
+        }
+        return null;
+    }
+
+    private static boolean buffBelowRecast(Target t) {
+        return t.buffKnown && (!t.buffFound || t.buffFill <= t.recastAt);
     }
 
     /** EG/LL button. */
@@ -911,7 +946,7 @@ public class ClickService extends AccessibilityService {
     private boolean buffNeeded(Target t) {
         // End Game: buffs only go out in full buffs; every other slot is a heal.
         if (!t.forced && endGame) return false;
-        return t.buffKnown && (!t.buffFound || t.buffFill <= t.recastAt);
+        return buffBelowRecast(t);
     }
 
     /**
@@ -1306,6 +1341,8 @@ public class ClickService extends AccessibilityService {
         closeEditor();
         handler.postDelayed(() -> captureScreen(shot -> {
             t.readyLook = readLook(shot, t);
+            t.lookX = t.params.x;
+            t.lookY = t.params.y;
             t.waitForCooldown = true;
             t.refreshLabel();
             saveTargets();
@@ -1586,6 +1623,8 @@ public class ClickService extends AccessibilityService {
                     if (look.length == SAMPLE_ROWS * SAMPLE_COLS) {
                         t.readyLook = new int[look.length];
                         for (int i = 0; i < look.length; i++) t.readyLook[i] = Integer.parseInt(look[i]);
+                        t.lookX = t.params.x;
+                        t.lookY = t.params.y;
                     }
                 }
                 if (parts.length >= 6) t.priority = parts[5].equals("1");
