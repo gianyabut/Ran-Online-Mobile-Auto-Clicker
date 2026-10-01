@@ -107,6 +107,10 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
+    // A player or monster is selected (bar at the top centre), as of the latest screenshot.
+    private boolean targetSelected;
+    // After tapping its ✕, give the game a moment before the buff goes out.
+    private static final int DESELECT_SETTLE_MS = 300;
     private long waveStartedAt;
     private int clearScans;
     private long lastMobCountAt;
@@ -697,7 +701,10 @@ public class ClickService extends AccessibilityService {
      * tap (usually the skill lock after the heal), so try that buff again, waiting a bit longer.
      */
     private void checkForcedBuff(Target t) {
-        if (!running || !t.isSmart()) return;
+        // End Game: a full buff casts every buff once, in order, through the last one. Judging by
+        // our own buff row made it retry (e.g. buffs that went to a selected player) and the
+        // cast-last buff (Massive Haste) never got its turn.
+        if (!running || !t.isSmart() || endGame) return;
         // Read full at some point since the tap. Not "is it still full": a short buff (Massive
         // Haste) has drained below 90% by the time this runs, and was cast again for nothing.
         boolean took = t.lastFullAt >= t.lastTapAt;
@@ -801,6 +808,16 @@ public class ClickService extends AccessibilityService {
                 schedulePump(waitMs);
                 return;
             }
+        }
+        if (next.smartBuff && targetSelected && gameInFront()) {
+            // With a player selected, the game casts buffs on that player instead of us and the
+            // party. Close the selection (the ✕ by its name) first; the buff goes next.
+            targetSelected = false;
+            Log.i(TAG, "a target is selected, so buffs would go to it: deselecting first");
+            busyUntil = now + TAP_MS + DESELECT_SETTLE_MS;
+            tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "deselect");
+            schedulePump(TAP_MS + DESELECT_SETTLE_MS);
+            return;
         }
         pending.remove(next);
         // The game locks all skills for a while after a cast: ~2.6-4 s after the heal (longer in a
@@ -959,7 +976,8 @@ public class ClickService extends AccessibilityService {
         if (!t.castLast) return false;
         for (Target o : targets) {
             if (o == t || o.priority || o.castLast) continue;
-            if (pending.contains(o)) return true;
+            // A retry of a buff that "didn't take" doesn't hold the last buff back.
+            if (pending.contains(o) && o.forcedRetries == 0) return true;
         }
         return false;
     }
@@ -1059,13 +1077,15 @@ public class ClickService extends AccessibilityService {
         t.ring.getLocationOnScreen(loc);
         float x = loc[0] + t.ring.getWidth() / 2f;
         float y = loc[1] + t.ring.getHeight() / 2f;
+        tapAt(x, y, "target " + (targets.indexOf(t) + 1) + " at " + Math.round(x) + "," + Math.round(y));
+    }
 
+    private void tapAt(float x, float y, String which) {
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription gesture = new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, TAP_MS))
                 .build();
-        String which = "target " + (targets.indexOf(t) + 1) + " at " + Math.round(x) + "," + Math.round(y);
         ownTapUntil = SystemClock.uptimeMillis() + TAP_MS + OWN_TAP_SLACK_MS;
         boolean sent = dispatchGesture(gesture, new GestureResultCallback() {
             @Override
@@ -1127,6 +1147,7 @@ public class ClickService extends AccessibilityService {
                     lastMobCountAt = now;
                     updateWave(MobCounter.count(shot, screenW, screenH));
                 }
+                if (scanBuffs) targetSelected = MobCounter.targetSelected(shot, screenW, screenH);
                 // The whole row vanishing at once means something covered it (a menu, an effect),
                 // not that every buff ran out in the same second. Only believe it after a while.
                 // Judge by our own learned buffs: if none of them can be seen at once, the row is

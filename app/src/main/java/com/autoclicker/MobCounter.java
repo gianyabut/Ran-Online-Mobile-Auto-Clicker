@@ -41,6 +41,40 @@ final class MobCounter {
         return Math.round(redPixels / (float) PIXELS_PER_NAME);
     }
 
+    // The selected target's bar at the top centre: its ✕ close button, and the start of its HP bar.
+    static final float CLOSE_X = 0.7055f;
+    static final float CLOSE_Y = 0.0825f;
+
+    /**
+     * Whether a target (a player or a monster) is selected. Buffs go to a selected player instead
+     * of us, so our own timers never refresh and a full buff keeps "retrying".
+     */
+    static boolean targetSelected(Bitmap shot, int screenW, int screenH) {
+        if (shot.getWidth() < screenW || shot.getHeight() < screenH) return false;
+        // The white ✕: measured 10% bright pixels in this box with a target, 0% without.
+        int bright = 0;
+        int total = 0;
+        for (int y = (int) (screenH * 0.069f); y < screenH * 0.097f; y += 2) {
+            for (int x = (int) (screenW * 0.697f); x < screenW * 0.715f; x += 2) {
+                int c = shot.getPixel(x, y);
+                total++;
+                if (Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c))) > 200) bright++;
+            }
+        }
+        if (total == 0 || bright * 100 < total * 4) return false;
+        // And the red HP bar's left end (always red unless the target is nearly dead).
+        int red = 0;
+        total = 0;
+        for (int y = (int) (screenH * 0.074f); y < screenH * 0.092f; y += 2) {
+            for (int x = (int) (screenW * 0.32f); x < screenW * 0.38f; x += 3) {
+                int c = shot.getPixel(x, y);
+                total++;
+                if (Color.red(c) > 150 && Color.green(c) < 70 && Color.blue(c) < 70) red++;
+            }
+        }
+        return red * 100 >= total * 25;
+    }
+
     private static boolean isTagRed(int c) {
         int r = Color.red(c);
         int g = Color.green(c);
