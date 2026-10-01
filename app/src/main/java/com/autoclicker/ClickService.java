@@ -105,9 +105,6 @@ public class ClickService extends AccessibilityService {
     private static final int WAVE_END_MOBS = 5;
     private static final int WAVE_END_SCANS = 3;
     private static final int MIN_WAVE_MS = 15_000;
-    // Between waves a low buff triggers a full buff, but not more often than this.
-    private static final int QUIET_FULL_BUFF_GAP_MS = 30_000;
-    private long lastAutoFullBuffAt;
     private int lastMobCount = -1;
     private boolean inWave;
     private long waveStartedAt;
@@ -865,7 +862,7 @@ public class ClickService extends AccessibilityService {
      * nearly dead, then full-buffs everyone for the next lure.
      * A wave starts at WAVE_START_MOBS on screen and ends once WAVE_END_MOBS or fewer show for
      * WAVE_END_SCANS scans in a row (spell effects can hide names for a moment mid-fight).
-     * Between waves, a buff running low also triggers a full buff (at most every 30 s).
+     * Nothing is cast between waves: the party is away luring.
      */
     private void updateWave(int mobs) {
         if (mobs < 0) return;
@@ -884,37 +881,22 @@ public class ClickService extends AccessibilityService {
             }
             return;
         }
+        if (!inWave) return;
         clearScans = mobs <= WAVE_END_MOBS ? clearScans + 1 : 0;
         if (clearScans < WAVE_END_SCANS) return;
-        if (inWave) {
-            inWave = false;
-            long lasted = now - waveStartedAt;
-            // At a busy spot another group's crowd can pass through for a few seconds; that's no
-            // reason to spend ~20 s of heals on a full buff (the low-buff rule below still applies).
-            if (lasted >= MIN_WAVE_MS) {
-                Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff");
-                lastAutoFullBuffAt = now;
-                fullBuff();
-                return;
-            }
+        inWave = false;
+        clearScans = 0;
+        long lasted = now - waveStartedAt;
+        // At a busy spot another group's crowd can pass through for a few seconds; that's no
+        // reason to spend ~20 s of heals on a full buff.
+        if (lasted < MIN_WAVE_MS) {
             Log.i(TAG, "wave over after " + lasted / 1000 + " s (~" + mobs + " left), too short for a full buff");
+            return;
         }
-        // Quiet between waves: buffs are only cast in full buffs, so when one runs low, buff them all.
-        Target low = lowBuff();
-        if (low != null && now - lastAutoFullBuffAt >= QUIET_FULL_BUFF_GAP_MS) {
-            Log.i(TAG, "quiet (~" + mobs + " monsters) and buff target " + (targets.indexOf(low) + 1)
-                    + " is low, full buff");
-            lastAutoFullBuffAt = now;
-            fullBuff();
-        }
-    }
-
-    /** A learned buff that's missing or at/below its recast %, and castable (not cooling down). */
-    private Target lowBuff() {
-        for (Target t : targets) {
-            if (t.isSmart() && !t.onCooldown() && buffBelowRecast(t)) return t;
-        }
-        return null;
+        // No full buff between waves even when a buff runs low: the party is away luring then, and
+        // a buff cast now would miss them. They get buffed when they bring the next wave down.
+        Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff");
+        fullBuff();
     }
 
     private static boolean buffBelowRecast(Target t) {
