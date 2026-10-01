@@ -103,7 +103,7 @@ public class ClickService extends AccessibilityService {
     // the user's call. The count runs low in a crowd (~12 reads 9-10) and can read 1 on graffiti.
     private static final int WAVE_START_MOBS = 6;
     private static final int WAVE_END_MOBS = 5;
-    private static final int WAVE_END_SCANS = 3;
+    private static final int WAVE_END_SCANS = 4;
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
@@ -904,6 +904,7 @@ public class ClickService extends AccessibilityService {
                 inWave = true;
                 waveStartedAt = now;
                 Log.i(TAG, "wave: ~" + mobs + " monsters, heal only");
+                stopFullBuff();
             }
             return;
         }
@@ -923,6 +924,30 @@ public class ClickService extends AccessibilityService {
         // a buff cast now would miss them. They get buffed when they bring the next wave down.
         Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff");
         fullBuff();
+    }
+
+    /**
+     * A wave came back while a full buff was going out (the count dipped below 6 mid-fight): drop
+     * the buffs still in line so the heal gets its slots again. The next clear buffs again.
+     */
+    private void stopFullBuff() {
+        int dropped = 0;
+        for (int i = pending.size() - 1; i >= 0; i--) {
+            Target t = pending.get(i);
+            if (!t.forced) continue;
+            t.forced = false;
+            pending.remove(i);
+            handler.removeCallbacks(t.tick);
+            handler.postDelayed(t.tick, SMART_RECHECK_MS);
+            dropped++;
+        }
+        if (dropped == 0) return;
+        // Let the next clear start a full buff right away, not "already in progress".
+        lastFullBuffAt = 0;
+        handler.removeCallbacks(resetFullBuffButton);
+        resetFullBuffButton.run();
+        Log.i(TAG, "wave is back: full buff stopped (" + dropped + " buffs not cast), healing");
+        schedulePump(0);
     }
 
     private static boolean buffBelowRecast(Target t) {
