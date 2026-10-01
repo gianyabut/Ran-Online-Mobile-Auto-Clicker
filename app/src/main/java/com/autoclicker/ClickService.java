@@ -79,6 +79,7 @@ public class ClickService extends AccessibilityService {
     private String lastForeground;
     private boolean pausedForOtherApp;
     private boolean pausedForKeyboard;
+    private boolean pausedForPortrait;
 
     // Manual mode (✋): no tapping and no rings in the way, so you play the game yourself.
     // Remembered so a restart after Android kills the service doesn't bring the rings back.
@@ -210,8 +211,6 @@ public class ClickService extends AccessibilityService {
         // Queued by the FB button: cast even if the buff is still up, without waiting its turn.
         boolean forced;
         int forcedRetries;
-        // Full buff: tapped, and the check whether it took is still to come.
-        boolean awaitingCheck;
         // Goes after every other buff that's due (and last in a full buff).
         boolean castLast;
         long queuedAt;
@@ -687,7 +686,6 @@ public class ClickService extends AccessibilityService {
      * tap (usually the skill lock after the heal), so try that buff again, waiting a bit longer.
      */
     private void checkForcedBuff(Target t) {
-        t.awaitingCheck = false;
         if (!running || !t.isSmart()) return;
         // Read full at some point since the tap. Not "is it still full": a short buff (Massive
         // Haste) has drained below 90% by the time this runs, and was cast again for nothing.
@@ -782,7 +780,7 @@ public class ClickService extends AccessibilityService {
             next = pickNext(now);
         }
         if (waitsForOthers(next)) {
-            // Only cast-last rings are waiting, and a full buff's checks are still to come.
+            // Safety net: pickNext found nothing else, yet another buff is still in line.
             schedulePump(SMART_RECHECK_MS);
             return;
         }
@@ -806,7 +804,6 @@ public class ClickService extends AccessibilityService {
         tap(next);
         if (next.forced) {
             next.forced = false;
-            next.awaitingCheck = true;
             Target forcedTarget = next;
             handler.postDelayed(() -> checkForcedBuff(forcedTarget), FORCED_CHECK_MS);
         }
@@ -927,15 +924,14 @@ public class ClickService extends AccessibilityService {
     }
 
     /**
-     * A "cast last" ring lets every other waiting buff go first; in a full buff it also waits for
-     * the others' "did it take?" checks, so a retried buff can't land after it.
+     * A "cast last" ring lets every other waiting buff go first. It doesn't wait for the others'
+     * "did it take?" checks (7 s): that let a heal in between and put it ~9 s after the rest.
      */
     private boolean waitsForOthers(Target t) {
         if (!t.castLast) return false;
         for (Target o : targets) {
             if (o == t || o.priority || o.castLast) continue;
             if (pending.contains(o)) return true;
-            if (t.forced && (o.forced || o.awaitingCheck)) return true;
         }
         return false;
     }
@@ -1006,6 +1002,16 @@ public class ClickService extends AccessibilityService {
             Log.i(TAG, "keyboard closed, tapping again");
             pausedForKeyboard = false;
         }
+        // The game is landscape only. MIUI's "install via USB" screen turns the display to portrait
+        // while the game still counts as the active window; rings tapped then hit that screen.
+        DisplayMetrics real = new DisplayMetrics();
+        wm.getDefaultDisplay().getRealMetrics(real);
+        boolean portrait = real.widthPixels < real.heightPixels;
+        if (portrait != pausedForPortrait) {
+            pausedForPortrait = portrait;
+            Log.i(TAG, portrait ? "paused: screen turned to portrait" : "screen back to landscape, tapping again");
+        }
+        if (portrait) return false;
         if (gamePackage == null) return true;
         String front = foregroundPackage();
         // If Android won't say which app is in front, keep tapping rather than pause forever.
