@@ -583,6 +583,12 @@ public class ClickService extends AccessibilityService {
             if (run) handler.postDelayed(t.tick, 300);
         }
         if (run) handler.post(this::cooldownCheck);
+        // End Game starts the cycle like the support does by hand: buff the party first. Skipped
+        // when this start came from a full buff (FB or the EG switch while stopped).
+        if (run && endGame && why.equals("button")
+                && SystemClock.uptimeMillis() - lastFullBuffAt >= FULL_BUFF_COOLDOWN_MS) {
+            handler.post(this::fullBuff);
+        }
     }
 
     /**
@@ -1690,6 +1696,9 @@ public class ClickService extends AccessibilityService {
                             saveTargets();
                         } else {
                             v.performClick();
+                            // That touch was on our own button, not the game: don't hold taps for it
+                            // (pressing ▶ used to delay the first heal by the 4 s touch pause).
+                            userTouchAt = 0;
                             onClick.run();
                         }
                         return true;
