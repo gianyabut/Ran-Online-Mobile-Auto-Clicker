@@ -107,6 +107,14 @@ public class ClickService extends AccessibilityService {
     private final List<Target> pending = new ArrayList<>();
     private final Runnable pump = this::pumpQueue;
     private WindowManager wm;
+    private View touchWatcher;
+    // Your last touch on the game: no taps until USER_TOUCH_PAUSE_MS after it (spamming heal by
+    // hand comes in bursts; a held button repeats, so allow a short hold too).
+    private long userTouchAt;
+    private static final int USER_TOUCH_PAUSE_MS = 2500;
+    // Touches before this are our own tap arriving.
+    private long ownTapUntil;
+    private static final int OWN_TAP_SLACK_MS = 250;
     private LinearLayout bar;
     private WindowManager.LayoutParams barParams;
     private TextView toggle;
@@ -390,6 +398,7 @@ public class ClickService extends AccessibilityService {
             Watchdog.requestRevive(this, "can't show its bar");
         }
 
+        addTouchWatcher();
         setRunning(false, "connected");
 
         // Android kills background apps when the game uses most of the memory, then restarts
@@ -406,6 +415,31 @@ public class ClickService extends AccessibilityService {
         }
     }
 
+    /**
+     * A 1 px window that Android tells about every touch elsewhere on the screen (not where).
+     * The game breaks on two touches at once: your finger on the heal button plus our tap left
+     * it thinking heal was held down, ignoring every tap after. So while you touch, we hold off.
+     */
+    private void addTouchWatcher() {
+        touchWatcher = new View(this);
+        WindowManager.LayoutParams p = overlayParams(1, 1);
+        p.flags |= WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
+        touchWatcher.setOnTouchListener((v, e) -> {
+            if (e.getActionMasked() != MotionEvent.ACTION_OUTSIDE) return false;
+            long now = SystemClock.uptimeMillis();
+            // Our own taps reach the game as touches too.
+            if (now < ownTapUntil) return false;
+            userTouched(now);
+            return false;
+        });
+        if (!safeAdd(touchWatcher, p)) touchWatcher = null;
+    }
+
+    private void userTouched(long now) {
+        if (running && now - userTouchAt > USER_TOUCH_PAUSE_MS) Log.i(TAG, "you're touching the screen, holding taps");
+        userTouchAt = now;
+    }
+
     /** Stops tapping and removes every overlay window this service has open. */
     private void removeOverlays(String why) {
         Log.i(TAG, "overlays removed (" + why + ")" + (running ? ", was running" : ""));
@@ -418,6 +452,8 @@ public class ClickService extends AccessibilityService {
         targets.clear();
         if (bar != null) safeRemove(bar);
         bar = null;
+        if (touchWatcher != null) safeRemove(touchWatcher);
+        touchWatcher = null;
     }
 
     /** Adds an overlay window; false while the service is between connections and Android refuses it. */
@@ -656,6 +692,10 @@ public class ClickService extends AccessibilityService {
             schedulePump(busyUntil - now);
             return;
         }
+        if (now - userTouchAt < USER_TOUCH_PAUSE_MS) {
+            schedulePump(userTouchAt + USER_TOUCH_PAUSE_MS - now);
+            return;
+        }
         // Buffs that came due together must still go ~20 s apart: send back to waiting any buff
         // that isn't urgent while another buff was tapped too recently. Its tick re-queues it.
         for (int i = pending.size() - 1; i >= 0; i--) {
@@ -854,6 +894,7 @@ public class ClickService extends AccessibilityService {
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, TAP_MS))
                 .build();
         String which = "target " + (targets.indexOf(t) + 1) + " at " + Math.round(x) + "," + Math.round(y);
+        ownTapUntil = SystemClock.uptimeMillis() + TAP_MS + OWN_TAP_SLACK_MS;
         boolean sent = dispatchGesture(gesture, new GestureResultCallback() {
             @Override
             public void onCompleted(GestureDescription g) {
@@ -862,7 +903,9 @@ public class ClickService extends AccessibilityService {
 
             @Override
             public void onCancelled(GestureDescription g) {
+                // Android cancels our tap when a finger lands on the screen during it.
                 Log.w(TAG, "tap cancelled: " + which);
+                userTouched(SystemClock.uptimeMillis());
             }
         }, null);
         if (sent) {
