@@ -62,6 +62,9 @@ public class ClickService extends AccessibilityService {
     private static final int SMART_RECHECK_MS = 300;
     // How long after a learning cast to look at the buff row again (the bar refreshes ~2.6 s after).
     private static final int LEARN_AFTER_MS = 3000;
+    // A just-cast buff whose icon scores at least this far from its saved look (the HUD was redrawn
+    // at another size) has its look saved again, so it doesn't drift out of reach.
+    private static final int RELEARN_DIFF = 10;
     private int tapGapMs = DEFAULT_TAP_GAP_MS;
 
     // Whether you left it running, and for which app, so it can resume after Android kills it.
@@ -897,7 +900,7 @@ public class ClickService extends AccessibilityService {
                     for (Target t : targets) {
                         if (!t.isSmart()) continue;
                         anyLearned = true;
-                        if (BuffReader.freshest(icons, t.buffIcon) != null) anySeen = true;
+                        if (findBuff(t, icons) != null) anySeen = true;
                     }
                     if (!anyLearned || anySeen) {
                         lastRowSeenAt = now;
@@ -954,7 +957,18 @@ public class ClickService extends AccessibilityService {
             saveTargets();
         }
 
-        BuffReader.Icon icon = BuffReader.freshest(icons, t.buffIcon);
+        BuffReader.Icon icon = findBuff(t, icons);
+        if (icon != null && icon.fill >= 0.9f) {
+            int d = BuffReader.diff(icon.sig, t.buffIcon);
+            if (d >= RELEARN_DIFF) {
+                Log.i(TAG, "buff target " + n + ": icon now " + icon.size + " px and " + d
+                        + " off its saved look, saving the new look");
+                t.buffIcon = icon.sig;
+                t.buffY = icon.y;
+                t.buffSize = icon.size;
+                saveTargets();
+            }
+        }
         boolean wasNeeded = t.buffKnown && (!t.buffFound || t.buffFill <= t.recastAt);
         boolean looksNeeded = icon == null || icon.fill <= t.recastAt;
         if (icon != null && icon.fill >= 0.9f) t.lastFullAt = now;
@@ -976,6 +990,15 @@ public class ClickService extends AccessibilityService {
                     + (icon != null ? Math.round(icon.fill * 100) + "% left" : "not active")
                     + (needed ? ", recasting" : ", ok"));
         }
+    }
+
+    /** This ring's buff in the row, told apart from the other rings' learned buffs. */
+    private BuffReader.Icon findBuff(Target t, List<BuffReader.Icon> icons) {
+        List<int[]> others = new ArrayList<>();
+        for (Target o : targets) {
+            if (o != t && o.isSmart()) others.add(o.buffIcon);
+        }
+        return BuffReader.find(icons, t.buffIcon, others);
     }
 
     private boolean isDimmed(Bitmap shot, Target t) {

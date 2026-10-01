@@ -28,6 +28,9 @@ final class BuffReader {
     // Average colour difference per channel (0-255) below which two icons count as the same buff.
     // The same icon scores 0-8; Fortify vs Inspire (both light-on-dark art) score about 37-40.
     private static final int MATCH_LIMIT = 20;
+    // After the game redraws the HUD at another size (62 px -> 57 px), the same icon scores up to
+    // about 20; the closest stranger in the row (someone else's red buff vs Fortify) scored 35.
+    private static final int LOOSE_LIMIT = 28;
     // A row of the bar counts as filled when it has at least this many coloured pixels side by
     // side. The bar is about 8 px wide; its thin red border line must not count as "full".
     private static final int MIN_BAR_RUN = 3;
@@ -102,6 +105,31 @@ final class BuffReader {
             if (diff(icon.sig, sig) < MATCH_LIMIT && (best == null || icon.fill > best.fill)) best = icon;
         }
         return best;
+    }
+
+    /**
+     * Like freshest(), but if nothing matches closely (the HUD was redrawn at another size), takes
+     * the icon that looks most like sig within a looser limit, unless it looks even more like one
+     * of the other learned buffs in others.
+     */
+    static Icon find(List<Icon> icons, int[] sig, List<int[]> others) {
+        Icon icon = freshest(icons, sig);
+        if (icon != null) return icon;
+        int bestDiff = LOOSE_LIMIT;
+        for (Icon i : icons) {
+            int d = diff(i.sig, sig);
+            if (d >= bestDiff || closerToOther(i, d, others)) continue;
+            bestDiff = d;
+            icon = i;
+        }
+        return icon;
+    }
+
+    private static boolean closerToOther(Icon icon, int d, List<int[]> others) {
+        for (int[] o : others) {
+            if (diff(icon.sig, o) <= d) return true;
+        }
+        return false;
     }
 
     /** The icon in the list that looks most like sig, or null if the buff isn't showing. */
