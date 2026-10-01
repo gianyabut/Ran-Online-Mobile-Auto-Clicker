@@ -54,7 +54,12 @@ public class ClickService extends AccessibilityService {
     static final int DEFAULT_TAP_GAP_MS = 3000;
 
     // Smart buff: recast when the buff's icon is gone or its timer bar is at or below this share.
-    private static final float SMART_RECAST_AT = 0.5f;
+    // 40%: each buff cast costs about one heal, and even the shortest buff (Confusion Strike, ~2 min)
+    // still has ~48 s left at 40%.
+    private static final float SMART_RECAST_AT = 0.4f;
+    // Settings saved before 40% became the default had 50% and an extra wait inflated by misread
+    // ignored taps; bring them over once.
+    private static final String KEY_TUNED_40 = "tuned_40";
     // After a smart-buff tap, give the game time to refill the bar before trying again.
     // The refreshed bar shows up 2-7 s after the cast (Inspire is slowest); buffs recast at 70% have
     // plenty of time left, so wait long enough never to cast the same buff twice.
@@ -123,6 +128,10 @@ public class ClickService extends AccessibilityService {
     // Below this a buff skips the spacing wait so it never runs out.
     private static final float SMART_URGENT_AT = 0.4f;
     private static final int MAX_EXTRA_GAP_MS = 3000;
+    // Each buff that takes on the first tap lowers its extra wait by this much, down to the minimum,
+    // so a few ignored taps (or misreads) don't cost heal time forever.
+    private static final int MIN_EXTRA_GAP_MS = 1000;
+    private static final int EXTRA_GAP_DECAY_MS = 250;
     // Full buff (FB button).
     private long lastFullBuffAt;
     private static final int FULL_BUFF_COOLDOWN_MS = 15_000;
@@ -169,7 +178,9 @@ public class ClickService extends AccessibilityService {
         int neededStreak;
         // Extra wait after the previous skill before this buff taps, learned from ignored taps.
         // Starts at 1 s (4 s after the heal): in a fight, 3-3.5 s after the heal usually gets ignored.
-        int extraGapMs = 1000;
+        int extraGapMs = MIN_EXTRA_GAP_MS;
+        // Whether a tap since the buff last read full was a retry after an ignored one.
+        boolean retried;
         // Queued by the FB button: cast even if the buff is still up, without waiting its turn.
         boolean forced;
         int forcedRetries;
@@ -222,6 +233,7 @@ public class ClickService extends AccessibilityService {
                             // Still low right after our tap: the game ignored it, usually because the
                             // previous skill's lock lasts longer in a fight. Wait a bit longer next time.
                             extraGapMs += 500;
+                            retried = true;
                             Log.i(TAG, "buff target " + (targets.indexOf(Target.this) + 1) + ": tap was ignored, now waiting "
                                     + (tapGapMs + extraGapMs) + "ms after the previous skill");
                             saveTargets();
@@ -588,6 +600,7 @@ public class ClickService extends AccessibilityService {
         if (took || t.forcedRetries >= 2) return;
         t.forcedRetries++;
         t.extraGapMs = Math.min(MAX_EXTRA_GAP_MS, t.extraGapMs + 500);
+        t.retried = true;
         Log.i(TAG, "full buff: target " + (targets.indexOf(t) + 1) + " didn't take, retrying");
         t.forced = true;
         queueTap(t);
@@ -990,6 +1003,16 @@ public class ClickService extends AccessibilityService {
                     + (icon != null ? Math.round(icon.fill * 100) + "% left" : "not active")
                     + (needed ? ", recasting" : ", ok"));
         }
+        if (wasNeeded && !needed && icon.fill >= 0.9f) {
+            // Our tap took first time: the wait after the heal may be longer than it needs to be.
+            if (!t.retried && t.extraGapMs > MIN_EXTRA_GAP_MS) {
+                t.extraGapMs = Math.max(MIN_EXTRA_GAP_MS, t.extraGapMs - EXTRA_GAP_DECAY_MS);
+                Log.i(TAG, "buff target " + n + ": took first tap, now waiting "
+                        + (tapGapMs + t.extraGapMs) + "ms after the previous skill");
+                saveTargets();
+            }
+            t.retried = false;
+        }
     }
 
     /** This ring's buff in the row, told apart from the other rings' learned buffs. */
@@ -1333,7 +1356,9 @@ public class ClickService extends AccessibilityService {
     }
 
     private void loadTargets() {
-        String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TARGETS, "");
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String saved = prefs.getString(KEY_TARGETS, "");
+        boolean retune = !prefs.getBoolean(KEY_TUNED_40, false);
         for (String entry : saved.split(";")) {
             String[] parts = entry.split(",", -1);
             if (parts.length < 3) continue;
@@ -1366,9 +1391,18 @@ public class ClickService extends AccessibilityService {
                         for (int i = 0; i < icon.length; i++) t.buffIcon[i] = Integer.parseInt(icon[i]);
                     }
                 }
+                if (retune) {
+                    if (Math.round(t.recastAt * 100) == 50) t.recastAt = SMART_RECAST_AT;
+                    t.extraGapMs = MIN_EXTRA_GAP_MS;
+                }
                 t.refreshLabel();
             } catch (NumberFormatException ignored) {
             }
+        }
+        if (retune) {
+            Log.i(TAG, "settings: buffs at 50% now recast at 40%, extra waits reset to " + MIN_EXTRA_GAP_MS + "ms");
+            saveTargets();
+            prefs.edit().putBoolean(KEY_TUNED_40, true).apply();
         }
     }
 
