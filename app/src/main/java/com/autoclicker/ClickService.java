@@ -83,6 +83,13 @@ public class ClickService extends AccessibilityService {
     // Manual mode (✋): no tapping and no rings in the way, so you play the game yourself.
     // Remembered so a restart after Android kills the service doesn't bring the rings back.
     private static final String KEY_MANUAL = "manual";
+
+    // Full support modes (EG/LL button on the bar):
+    // - End Game FS: party farming in waves. Buffs only go out in full buffs (FB, or automatically
+    //   once a lured wave is cleared); every other slot is a heal.
+    // - Low Level FS: each buff is recast on its own when it drops to its recast % (40%).
+    private static final String KEY_END_GAME = "end_game";
+    private boolean endGame = true;
     private boolean manual;
     private int refusedInARow;
     // The connected service, for the watchdog's health check (it runs in this same process).
@@ -131,6 +138,7 @@ public class ClickService extends AccessibilityService {
     private TextView add;
     private TextView fullBuffButton;
     private TextView manualButton;
+    private TextView modeButton;
     private View editor;
     private boolean running;
     private long busyUntil;
@@ -217,6 +225,11 @@ public class ClickService extends AccessibilityService {
             return smartBuff && buffIcon != null;
         }
 
+        /** The game shows this ring's button dimmed: a tap now would just be ignored. */
+        boolean onCooldown() {
+            return waitForCooldown && readyLook != null && !ready;
+        }
+
         final Runnable tick = new Runnable() {
             @Override
             public void run() {
@@ -235,6 +248,11 @@ public class ClickService extends AccessibilityService {
                         return;
                     }
                     if (needed && now < backoffUntil) {
+                        handler.postDelayed(this, SMART_RECHECK_MS);
+                        return;
+                    }
+                    // A long-cooldown buff (Massive Haste) can come due before it's castable again.
+                    if (needed && onCooldown()) {
                         handler.postDelayed(this, SMART_RECHECK_MS);
                         return;
                     }
@@ -335,6 +353,7 @@ public class ClickService extends AccessibilityService {
             if (smartBuff) {
                 text += buffIcon != null ? "smart buff" : formatInterval(interval) + " · learning";
                 if (Math.round(recastAt * 100) != Math.round(SMART_RECAST_AT * 100)) text += " " + Math.round(recastAt * 100) + "%";
+                if (waitForCooldown) text += readyLook != null ? " · CD" : " · CD?";
             } else {
                 text += formatInterval(interval);
                 if (waitForCooldown) text += readyLook != null ? " · CD" : " · CD?";
@@ -399,6 +418,12 @@ public class ClickService extends AccessibilityService {
         LinearLayout.LayoutParams fbGap = new LinearLayout.LayoutParams(dp(48), dp(48));
         fbGap.topMargin = dp(8);
         bar.addView(fullBuffButton, fbGap);
+        modeButton = roundButton("");
+        modeButton.setTextSize(15);
+        modeButton.setTypeface(Typeface.DEFAULT_BOLD);
+        LinearLayout.LayoutParams modeGap = new LinearLayout.LayoutParams(dp(48), dp(48));
+        modeGap.topMargin = dp(8);
+        bar.addView(modeButton, modeGap);
         manualButton = roundButton("");
         LinearLayout.LayoutParams manualGap = new LinearLayout.LayoutParams(dp(48), dp(48));
         manualGap.topMargin = dp(8);
@@ -410,6 +435,7 @@ public class ClickService extends AccessibilityService {
         makeDraggable(add, bar, barParams, this::addTargetFromBar, null);
         makeDraggable(fullBuffButton, bar, barParams, this::fullBuff, null);
         makeDraggable(manualButton, bar, barParams, () -> setManual(!manual, "button"), null);
+        makeDraggable(modeButton, bar, barParams, () -> setEndGame(!endGame, "button"), null);
         if (!safeAdd(bar, barParams)) {
             // Half connected (switched back on too soon after a crash): nothing will work until
             // the service is turned off and on again.
@@ -422,6 +448,7 @@ public class ClickService extends AccessibilityService {
         // Android kills background apps when the game uses most of the memory, then restarts
         // this service. If you had pressed ▶, carry on where it left off.
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        setEndGame(prefs.getBoolean(KEY_END_GAME, true), "restored");
         if (prefs.getBoolean(KEY_MANUAL, false)) {
             setManual(true, "restored");
         } else {
@@ -577,6 +604,7 @@ public class ClickService extends AccessibilityService {
         toggle.setVisibility(others);
         add.setVisibility(others);
         fullBuffButton.setVisibility(others);
+        modeButton.setVisibility(others);
         LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) manualButton.getLayoutParams();
         lp.topMargin = on ? 0 : dp(8);
         manualButton.setLayoutParams(lp);
@@ -612,6 +640,13 @@ public class ClickService extends AccessibilityService {
         // Start first: starting clears all timers, including the one that resets the button.
         if (!running) setRunning(true, "button");
         showFullBuffActive();
+        for (int i = buffs.size() - 1; i >= 0; i--) {
+            Target t = buffs.get(i);
+            if (t.onCooldown()) {
+                Log.i(TAG, "full buff: skipping target " + (targets.indexOf(t) + 1) + ", still on cooldown");
+                buffs.remove(i);
+            }
+        }
         Log.i(TAG, "full buff: casting " + buffs.size() + " buffs back to back");
         for (Target t : buffs) {
             t.forced = true;
@@ -658,6 +693,11 @@ public class ClickService extends AccessibilityService {
         // Haste) has drained below 90% by the time this runs, and was cast again for nothing.
         boolean took = t.lastFullAt >= t.lastTapAt;
         if (took || t.forcedRetries >= 2) return;
+        if (t.onCooldown()) {
+            // Ignored because it's still cooling down, not because of the lock: retrying can't help.
+            Log.i(TAG, "full buff: target " + (targets.indexOf(t) + 1) + " didn't take, still on cooldown");
+            return;
+        }
         t.forcedRetries++;
         t.extraGapMs = Math.min(MAX_EXTRA_GAP_MS, t.extraGapMs + 500);
         t.retried = true;
@@ -849,9 +889,26 @@ public class ClickService extends AccessibilityService {
         fullBuff();
     }
 
+    /** EG/LL button. */
+    private void setEndGame(boolean on, String why) {
+        boolean changed = endGame != on;
+        endGame = on;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_END_GAME, on).apply();
+        if (changed || !why.equals("restored")) {
+            Log.i(TAG, (on ? "End Game FS mode: buffs only in full buffs, auto full buff after each wave"
+                    : "Low Level FS mode: each buff recast at its %") + " (" + why + ")");
+        }
+        inWave = false;
+        clearScans = 0;
+        modeButton.setText(on ? "EG" : "LL");
+        modeButton.setBackground(circle(on ? Color.rgb(170, 40, 40) : Color.rgb(40, 130, 130)));
+        for (Target t : targets) t.refreshLabel();
+        if (changed && why.equals("button")) shake(modeButton);
+    }
+
     private boolean buffNeeded(Target t) {
-        // Mid-wave every slot goes to the heal; the full buff after the wave refreshes everything.
-        if (!t.forced && inWave) return false;
+        // End Game: buffs only go out in full buffs; every other slot is a heal.
+        if (!t.forced && endGame) return false;
         return t.buffKnown && (!t.buffFound || t.buffFill <= t.recastAt);
     }
 
@@ -1014,7 +1071,8 @@ public class ClickService extends AccessibilityService {
         boolean anySmart = false;
         for (Target t : targets) {
             if (t.smartBuff) anySmart = true;
-            if (t.waitForCooldown && t.readyLook != null) anyCooldown = true;
+            // A smart buff's cooldown lasts far longer than a scan; only plain rings need 0.35 s.
+            if (t.waitForCooldown && t.readyLook != null && !t.smartBuff) anyCooldown = true;
         }
         boolean anyWatching = anyCooldown || anySmart;
         if (anyWatching && canReadScreen()) {
@@ -1031,7 +1089,7 @@ public class ClickService extends AccessibilityService {
                 long now = SystemClock.uptimeMillis();
                 // Screenshots come every 0.35 s while a ring watches a cooldown; counting once
                 // per BUFF_SCAN_EVERY_MS is plenty.
-                if (scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
+                if (endGame && scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
                     lastMobCountAt = now;
                     updateWave(MobCounter.count(shot, screenW, screenH));
                 }
@@ -1054,11 +1112,8 @@ public class ClickService extends AccessibilityService {
                     }
                 }
                 for (Target t : targets) {
-                    if (t.smartBuff) {
-                        updateBuff(t, icons, now);
-                    } else if (t.waitForCooldown && t.readyLook != null) {
-                        t.ready = !isDimmed(shot, t);
-                    }
+                    if (t.waitForCooldown && t.readyLook != null) t.ready = !isDimmed(shot, t);
+                    if (t.smartBuff) updateBuff(t, icons, now);
                 }
                 lastScan = icons;
                 lastScanAt = now;
@@ -1133,7 +1188,7 @@ public class ClickService extends AccessibilityService {
         if (needed != wasNeeded) {
             Log.i(TAG, "buff target " + n + ": "
                     + (icon != null ? Math.round(icon.fill * 100) + "% left" : "not active")
-                    + (!needed ? ", ok" : inWave ? ", waiting for the wave to end" : ", recasting"));
+                    + (!needed ? ", ok" : endGame ? ", left for the next full buff" : ", recasting"));
         }
         if (wasNeeded && !needed && icon.fill >= 0.9f) {
             // Our tap took first time: the wait after the heal may be longer than it needs to be.
