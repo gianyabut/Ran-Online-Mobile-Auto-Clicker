@@ -107,6 +107,8 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
+    // A full buff was stopped because the wave came back; the next clear buffs regardless.
+    private boolean fullBuffOwed;
     // A player or monster is selected (bar at the top centre), as of the latest screenshot.
     private boolean targetSelected;
     // After tapping its ✕, give the game a moment before the buff goes out.
@@ -568,6 +570,7 @@ public class ClickService extends AccessibilityService {
         // A wave in progress isn't carried over a stop: the screen may look nothing alike now.
         inWave = false;
         clearScans = 0;
+        fullBuffOwed = false;
         if (run) closeEditor();
 
         toggle.setText(run ? "■" : "▶");
@@ -651,6 +654,7 @@ public class ClickService extends AccessibilityService {
             return;
         }
         lastFullBuffAt = now;
+        fullBuffOwed = false;
         // Start first: starting clears all timers, including the one that resets the button.
         if (!running) setRunning(true, "button");
         showFullBuffActive();
@@ -915,14 +919,17 @@ public class ClickService extends AccessibilityService {
         clearScans = 0;
         long lasted = now - waveStartedAt;
         // At a busy spot another group's crowd can pass through for a few seconds; that's no
-        // reason to spend ~20 s of heals on a full buff.
-        if (lasted < MIN_WAVE_MS) {
+        // reason to spend ~20 s of heals on a full buff. Unless a full buff was stopped because
+        // the wave came back: this short wave is the rest of the real one, and the party is owed.
+        if (lasted < MIN_WAVE_MS && !fullBuffOwed) {
             Log.i(TAG, "wave over after " + lasted / 1000 + " s (~" + mobs + " left), too short for a full buff");
             return;
         }
         // No full buff between waves even when a buff runs low: the party is away luring then, and
         // a buff cast now would miss them. They get buffed when they bring the next wave down.
-        Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff");
+        Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff"
+                + (fullBuffOwed ? " (the one stopped when the wave came back)" : ""));
+        fullBuffOwed = false;
         fullBuff();
     }
 
@@ -942,8 +949,10 @@ public class ClickService extends AccessibilityService {
             dropped++;
         }
         if (dropped == 0) return;
-        // Let the next clear start a full buff right away, not "already in progress".
+        // Let the next clear start a full buff right away, not "already in progress", however
+        // short the rest of the wave turns out to be.
         lastFullBuffAt = 0;
+        fullBuffOwed = true;
         handler.removeCallbacks(resetFullBuffButton);
         resetFullBuffButton.run();
         Log.i(TAG, "wave is back: full buff stopped (" + dropped + " buffs not cast), healing");
