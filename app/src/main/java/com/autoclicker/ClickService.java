@@ -900,7 +900,12 @@ public class ClickService extends AccessibilityService {
         modeButton.setText(on ? "EG" : "LL");
         modeButton.setBackground(circle(on ? Color.rgb(170, 40, 40) : Color.rgb(40, 130, 130)));
         for (Target t : targets) t.refreshLabel();
-        if (changed && why.equals("button")) shake(modeButton);
+        if (changed && why.equals("button")) {
+            shake(modeButton);
+            // Switching to End Game starts the cycle like the support does by hand: buff the
+            // party first, then they go lure. (Starts tapping too, like the FB button.)
+            if (on) fullBuff();
+        }
     }
 
     private boolean buffNeeded(Target t) {
