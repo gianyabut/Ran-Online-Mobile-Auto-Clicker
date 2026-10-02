@@ -126,6 +126,7 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
+    private boolean presenceCheckShown;
     // After a wave, buffs at or below this are recast (the user's call). With a clear every ~2 min
     // (93-214 s on 2026-10-02) the ~4.5-5 min buffs sit at ~55-60% after one wave and well below
     // after two: recast every 2nd wave. Confusion Strike (~2 min) and Massive Haste (~40 s) every
@@ -1115,6 +1116,24 @@ public class ClickService extends AccessibilityService {
         return dropped;
     }
 
+    /**
+     * The game's "please click Confirm" panel: disconnects you if nobody answers in ~25 s. Alert
+     * (sound, vibration, heads-up; on a linked phone too) the moment it shows, clear it once it's
+     * gone. Answering is up to you.
+     */
+    private void updatePresenceCheck(boolean shown) {
+        if (shown == presenceCheckShown) return;
+        presenceCheckShown = shown;
+        if (shown) {
+            Log.w(TAG, "the game is asking if you're there (Move button): alerting you");
+            Alerts.question(this, gamePackage != null ? gamePackage : DEFAULT_GAME,
+                    "The game is checking if you're there. Tap Move within ~25 s or it disconnects you.");
+        } else {
+            Log.i(TAG, "presence check gone");
+            Alerts.clearQuestion(this);
+        }
+    }
+
     /** Buffs of a full buff are still waiting to go out. */
     private boolean fullBuffGoingOut() {
         for (Target t : pending) if (t.forced) return true;
@@ -1354,6 +1373,7 @@ public class ClickService extends AccessibilityService {
                     updateWave(MobCounter.count(shot, screenW, screenH));
                 }
                 if (scanBuffs) targetSelected = MobCounter.targetSelected(shot, screenW, screenH);
+                updatePresenceCheck(Prompts.presenceCheck(shot, screenW, screenH));
                 // The whole row vanishing at once means something covered it (a menu, an effect),
                 // not that every buff ran out in the same second. Only believe it after a while.
                 // Judge by our own learned buffs: if none of them can be seen at once, the row is

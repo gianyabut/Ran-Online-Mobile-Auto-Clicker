@@ -23,7 +23,7 @@ final class Alerts {
     private Alerts() {
     }
 
-    static void question(Context context, String game) {
+    static void question(Context context, String game, String text) {
         NotificationManager nm = context.getSystemService(NotificationManager.class);
         if (nm == null) return;
         ensureChannel(nm);
@@ -35,7 +35,8 @@ final class Alerts {
                 : new Notification.Builder(context);
         b.setSmallIcon(android.R.drawable.stat_sys_warning)
                 .setContentTitle("Ran Online needs you")
-                .setContentText("The game is asking its question. Answer it to keep playing.")
+                .setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text))
                 .setCategory(Notification.CATEGORY_ALARM)
                 .setPriority(Notification.PRIORITY_MAX)
                 .setAutoCancel(true);
@@ -51,7 +52,7 @@ final class Alerts {
     private static void ensureChannel(NotificationManager nm) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || nm.getNotificationChannel(CHANNEL) != null) return;
         NotificationChannel ch = new NotificationChannel(CHANNEL, "Needs you", NotificationManager.IMPORTANCE_HIGH);
-        ch.setDescription("The game is waiting for you, e.g. its math question");
+        ch.setDescription("The game is waiting for you, e.g. its \"please click Confirm\" check");
         ch.enableVibration(true);
         ch.setVibrationPattern(new long[] {0, 600, 300, 600, 300, 600});
         ch.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM),
