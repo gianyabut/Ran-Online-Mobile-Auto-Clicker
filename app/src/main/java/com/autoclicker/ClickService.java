@@ -114,6 +114,8 @@ public class ClickService extends AccessibilityService {
     private static final int SMALL_WAVE_START_MOBS = 3;
     private static final int SMALL_WAVE_END_MOBS = 2;
     private int partySize = -1; // from the team list; -1 until seen
+    private long partySeenAt; // last reading at least partySize
+    private static final int PARTY_SHRINK_MS = 60_000;
     // Scans in a row below the end count before a wave counts as cleared (a dip mid-fight in a big
     // party lasted 3 scans; small parties want the buff sooner and a returning wave stops it anyway).
     private static final int WAVE_END_SCANS = 4;
@@ -931,7 +933,14 @@ public class ClickService extends AccessibilityService {
      */
     /** Party size from the team list; 0 (list hidden by a menu, or solo) keeps the last one seen. */
     private void updateParty(int members) {
-        if (members <= 0 || members == partySize) return;
+        if (members <= 0) return;
+        long now = SystemClock.uptimeMillis();
+        if (members >= partySize) partySeenAt = now;
+        if (members == partySize) return;
+        // Joining counts at once. A lower reading only after it has lasted PARTY_SHRINK_MS: dead or
+        // far-away members' bars can fail to read for a while (a party of 5 read 3 at 13:11:20).
+        if (members < partySize && now - partySeenAt < PARTY_SHRINK_MS) return;
+        partySeenAt = now;
         boolean first = partySize < 0;
         boolean wasBig = bigParty();
         partySize = members;
@@ -1012,7 +1021,7 @@ public class ClickService extends AccessibilityService {
         // a buff cast now would miss them. They get buffed when they bring the next wave down.
         Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff"
                 + (fullBuffOwed ? " (the one stopped when the wave came back)" : ""));
-        fullBuffOwed = false;
+        // fullBuff() reads and clears fullBuffOwed itself, to cast only the buffs it had dropped.
         fullBuff();
     }
 
