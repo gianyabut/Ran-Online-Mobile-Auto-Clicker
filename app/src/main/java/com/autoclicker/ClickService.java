@@ -106,14 +106,18 @@ public class ClickService extends AccessibilityService {
     // Waves (see updateWave). How big a lure gets depends on the party: 8 members bring 6-13 (on
     // screen; the count runs low in a crowd, ~12 reads 9-10), 3 members bring 2-4 and leave 0-1.
     // Big party: 6+ is a wave, fewer than 6 (nearly) cleared, the user's call. Small party: 3+ is
-    // a wave, 1 or fewer cleared (matched the user's own FB presses at 10:35-10:38 on 2026-10-02).
+    // a wave, 2 or fewer for 3 scans cleared ("FB once it's 3 or less", the count reading ~1 low).
+    // "1 or fewer" kept healing for 38 s after a wave: one leftover name flickered 1-2.
     private static final int BIG_PARTY = 5;
     private static final int WAVE_START_MOBS = 6;
     private static final int WAVE_END_MOBS = 5;
     private static final int SMALL_WAVE_START_MOBS = 3;
-    private static final int SMALL_WAVE_END_MOBS = 1;
+    private static final int SMALL_WAVE_END_MOBS = 2;
     private int partySize = -1; // from the team list; -1 until seen
+    // Scans in a row below the end count before a wave counts as cleared (a dip mid-fight in a big
+    // party lasted 3 scans; small parties want the buff sooner and a returning wave stops it anyway).
     private static final int WAVE_END_SCANS = 4;
+    private static final int SMALL_WAVE_END_SCANS = 3;
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
@@ -972,7 +976,7 @@ public class ClickService extends AccessibilityService {
         }
         if (!inWave) return;
         clearScans = mobs <= waveEndMobs() ? clearScans + 1 : 0;
-        if (clearScans < WAVE_END_SCANS) return;
+        if (clearScans < (bigParty() ? WAVE_END_SCANS : SMALL_WAVE_END_SCANS)) return;
         inWave = false;
         clearScans = 0;
         long lasted = now - waveStartedAt;
