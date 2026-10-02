@@ -126,6 +126,17 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
+    // TEST: a short joystick push every minute while running, alternating left and right.
+    private static final int TEST_MOVE_EVERY_MS = 60_000;
+    // Joystick push: 350 ms went too far, 150 ms still a bit far; 80 ms (the user's pick).
+    private static final int MOVE_MS = 80;
+    private static final int MOVE_SETTLE_MS = 300;
+    private static final float JOYSTICK_X = 250 / 2560f;
+    private static final float JOYSTICK_Y = 1258 / 1600f;
+    private static final float JOYSTICK_PUSH = 140 / 2560f;
+    private boolean moveLeft = true;
+    private boolean movePending;
+    private final Runnable testMoveTick = this::testMoveTick;
     private boolean presenceCheckShown;
     // After a wave, buffs at or below this are recast (the user's call). With a clear every ~2 min
     // (93-214 s on 2026-10-02) the ~4.5-5 min buffs sit at ~55-60% after one wave and well below
@@ -608,6 +619,8 @@ public class ClickService extends AccessibilityService {
         fullBuffOwed = false;
         backScans = 0;
         for (Target t : targets) t.owed = false;
+        movePending = false;
+        moveLeft = true;
         if (run) closeEditor();
 
         toggle.setText(run ? "■" : "▶");
@@ -627,6 +640,7 @@ public class ClickService extends AccessibilityService {
             if (run) handler.postDelayed(t.tick, 300);
         }
         if (run) handler.post(this::cooldownCheck);
+        if (run) handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
         // Clearing the handler above also dropped the "game back yet?" check.
         updateOverlayVisibility();
         // End Game starts the cycle like the support does by hand: buff the party first, but only
@@ -843,7 +857,7 @@ public class ClickService extends AccessibilityService {
     }
 
     private void pumpQueue() {
-        if (!running || pending.isEmpty()) return;
+        if (!running || (pending.isEmpty() && !movePending)) return;
         // While the game isn't in front (or the keyboard is up) hold everything as it is,
         // so no tap is sent, counted, or mistaken for one the game ignored.
         if (!gameInFront()) {
@@ -859,6 +873,14 @@ public class ClickService extends AccessibilityService {
             schedulePump(userTouchAt + USER_TOUCH_PAUSE_MS - now);
             return;
         }
+        if (movePending) {
+            // One touch at a time: the step goes between taps, then the queue carries on.
+            movePending = false;
+            testMove(now);
+            if (!pending.isEmpty()) schedulePump(busyUntil - now);
+            return;
+        }
+        if (pending.isEmpty()) return;
         // Buffs that came due together must still go ~20 s apart: send back to waiting any buff
         // that isn't urgent while another buff was tapped too recently. Its tick re-queues it.
         for (int i = pending.size() - 1; i >= 0; i--) {
@@ -1206,6 +1228,30 @@ public class ClickService extends AccessibilityService {
             if (pending.contains(o) && o.forcedRetries == 0) return true;
         }
         return false;
+    }
+
+    private void testMoveTick() {
+        movePending = true;
+        schedulePump(0);
+        handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
+    }
+
+    /** TEST: step 1-2 blocks sideways with a short joystick push, alternating left and right. */
+    private void testMove(long now) {
+        Log.i(TAG, "test move " + (moveLeft ? "left" : "right"));
+        float cx = screenW * JOYSTICK_X;
+        float cy = screenH * JOYSTICK_Y;
+        float dx = screenW * JOYSTICK_PUSH * (moveLeft ? -1 : 1);
+        moveLeft = !moveLeft;
+        Path path = new Path();
+        path.moveTo(cx, cy);
+        path.lineTo(cx + dx, cy);
+        GestureDescription g = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, MOVE_MS))
+                .build();
+        ownTapUntil = now + MOVE_MS + OWN_TAP_SLACK_MS;
+        busyUntil = now + MOVE_MS + MOVE_SETTLE_MS;
+        dispatchGesture(g, null, null);
     }
 
     private void schedulePump(long delayMs) {
