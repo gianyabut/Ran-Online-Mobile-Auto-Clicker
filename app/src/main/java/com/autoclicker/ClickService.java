@@ -126,6 +126,11 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
+    // After a wave, buffs at or below this are recast (the user's call). With a clear every ~2 min
+    // (93-214 s on 2026-10-02) the ~4.5-5 min buffs sit at ~55-60% after one wave and well below
+    // after two: recast every 2nd wave. Confusion Strike (~2 min) and Massive Haste (~40 s) every
+    // wave. 40% risked the long buffs running out when a short gap was followed by a long one.
+    private static final float WAVE_BUFF_AT = 0.5f;
     // A full buff was stopped because the wave came back; the next clear buffs regardless.
     private boolean fullBuffOwed;
     // Readings at the wave level in a row while a full buff is going out.
@@ -678,7 +683,7 @@ public class ClickService extends AccessibilityService {
 
     /**
      * Casts the buffs back to back. With onlyLow (after a wave), only the ones that are missing or
-     * at/below their recast %: the party kills a wave in 20-80 s and Fortify/Inspire/Revitalize
+     * at/below WAVE_BUFF_AT (50%): the party kills a wave in 20-80 s and Fortify/Inspire/Revitalize
      * last ~4-5 min, so a full buff every wave mostly recast buffs at 60-80% and cost ~12-15 s of
      * heals. Massive Haste (~40 s) is gone by then, so it always goes; the rest when low.
      */
@@ -705,7 +710,9 @@ public class ClickService extends AccessibilityService {
         } else if (onlyLow) {
             List<Target> low = new ArrayList<>();
             // Not read yet (e.g. right after a restart) counts as low: better one cast too many.
-            for (Target t : buffs) if (!t.isSmart() || !t.buffKnown || buffBelowRecast(t)) low.add(t);
+            for (Target t : buffs) {
+                if (!t.isSmart() || !t.buffKnown || !t.buffFound || t.buffFill <= WAVE_BUFF_AT) low.add(t);
+            }
             if (low.isEmpty()) {
                 Log.i(TAG, "wave buff: every buff is still above its %, nothing to cast");
                 lastFullBuffAt = 0;
