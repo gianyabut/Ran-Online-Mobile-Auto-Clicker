@@ -682,10 +682,10 @@ public class ClickService extends AccessibilityService {
     }
 
     /**
-     * Casts the buffs back to back. With onlyLow (after a wave), only the ones that are missing or
-     * at/below WAVE_BUFF_AT (50%): the party kills a wave in 20-80 s and Fortify/Inspire/Revitalize
-     * last ~4-5 min, so a full buff every wave mostly recast buffs at 60-80% and cost ~12-15 s of
-     * heals. Massive Haste (~40 s) is gone by then, so it always goes; the rest when low.
+     * Casts the buffs back to back. With onlyLow (after a wave): the full set if any long buff is at
+     * or below WAVE_BUFF_AT (50%), otherwise only the cast-last buff (Massive Haste). The party
+     * clears a wave every ~2 min and the long buffs last ~4.5-5 min, so that's a full buff about
+     * every 2nd wave and Massive Haste alone in between, instead of ~12-15 s without heals each wave.
      */
     private void fullBuff(boolean onlyLow) {
         List<Target> buffs = new ArrayList<>();
@@ -708,17 +708,26 @@ public class ClickService extends AccessibilityService {
             for (Target t : buffs) if (t.owed) rest.add(t);
             if (!rest.isEmpty()) buffs = rest;
         } else if (onlyLow) {
-            List<Target> low = new ArrayList<>();
-            // Not read yet (e.g. right after a restart) counts as low: better one cast too many.
+            // Always one of two groups, never a single long buff on its own (the user's rule):
+            // all of them if any long buff is low, otherwise just the cast-last one (Massive Haste,
+            // ~40 s, gone after every wave). Not read yet (e.g. after a restart) counts as low.
+            boolean anyLongLow = false;
+            List<Target> lastOnly = new ArrayList<>();
             for (Target t : buffs) {
-                if (!t.isSmart() || !t.buffKnown || !t.buffFound || t.buffFill <= WAVE_BUFF_AT) low.add(t);
+                if (t.castLast) {
+                    lastOnly.add(t);
+                } else if (!t.isSmart() || !t.buffKnown || !t.buffFound || t.buffFill <= WAVE_BUFF_AT) {
+                    anyLongLow = true;
+                }
             }
-            if (low.isEmpty()) {
-                Log.i(TAG, "wave buff: every buff is still above its %, nothing to cast");
-                lastFullBuffAt = 0;
-                return;
+            if (!anyLongLow) {
+                if (lastOnly.isEmpty()) {
+                    Log.i(TAG, "wave buff: every buff is still above " + Math.round(WAVE_BUFF_AT * 100) + "%, nothing to cast");
+                    lastFullBuffAt = 0;
+                    return;
+                }
+                buffs = lastOnly;
             }
-            buffs = low;
         }
         fullBuffOwed = false;
         for (Target t : targets) t.owed = false;
@@ -1054,7 +1063,7 @@ public class ClickService extends AccessibilityService {
         // No full buff between waves even when a buff runs low: the party is away luring then, and
         // a buff cast now would miss them. They get buffed when they bring the next wave down.
         Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), "
-                + (fullBuffOwed ? "resuming the full buff stopped when the wave came back" : "buffing what's low"));
+                + (fullBuffOwed ? "resuming the full buff stopped when the wave came back" : "full buff if any long buff is low, else Massive Haste"));
         // fullBuff() reads and clears fullBuffOwed itself (a resume casts only the dropped buffs);
         // otherwise only the buffs that are low: Massive Haste every wave, the rest when they need it.
         fullBuff(true);
