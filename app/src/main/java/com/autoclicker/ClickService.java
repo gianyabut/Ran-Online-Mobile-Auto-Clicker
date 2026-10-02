@@ -130,8 +130,8 @@ public class ClickService extends AccessibilityService {
     private static final float SPLASH_DROP = 0.15f;
     private static final float LOW_HP = 0.6f;
     private static final int DODGE_GAP_MS = 15_000;
-    // Joystick push: 350 ms went too far (2026-10-02); 150 ms for about 1 block.
-    private static final int DODGE_MS = 150;
+    // Joystick push: 350 ms went too far, 150 ms still a bit far; 80 ms (the user's pick).
+    private static final int DODGE_MS = 80;
     private static final int DODGE_SETTLE_MS = 300;
     private static final float JOYSTICK_X = 250 / 2560f;
     private static final float JOYSTICK_Y = 1258 / 1600f;
