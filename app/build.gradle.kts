@@ -14,3 +14,8 @@ android {
         versionName = "1.0"
     }
 }
+
+dependencies {
+    // On-device text reading for the math question: bundled into the APK, no network, no account.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+}

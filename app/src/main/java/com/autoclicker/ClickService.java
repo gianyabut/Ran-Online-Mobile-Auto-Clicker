@@ -8,6 +8,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.HardwareBuffer;
@@ -95,6 +96,14 @@ public class ClickService extends AccessibilityService {
     private static final int KEYBOARD_TOUCH_MS = 5000;
     private boolean keyboardAlerted;
     private boolean pausedForPortrait;
+    // Answering the math question itself (on-device OCR). Let the panel settle before the
+    // screenshot, stagger the key taps (the game rejects simultaneous touches), and don't re-try
+    // the same question in a tight loop. mathBusy stops a second attempt while one is in flight.
+    private static final int MATH_SETTLE_MS = 500;
+    private static final int MATH_TAP_GAP_MS = 250;
+    private static final int MATH_RETRY_MS = 15_000;
+    private boolean mathBusy;
+    private long lastMathAnswerAt = -MATH_RETRY_MS;
 
     // Manual mode (✋): no tapping and no rings in the way, so you play the game yourself.
     // Remembered so a restart after Android kills the service doesn't bring the rings back.
@@ -1338,6 +1347,8 @@ public class ClickService extends AccessibilityService {
             pausedForKeyboard = false;
             if (keyboardAlerted) Alerts.clearQuestion(this);
             keyboardAlerted = false;
+            mathBusy = false;
+            showRingsAfterMath();
         }
         // The game is landscape only. MIUI's "install via USB" screen turns the display to portrait
         // while the game still counts as the active window; rings tapped then hit that screen.
@@ -1364,8 +1375,8 @@ public class ClickService extends AccessibilityService {
 
     /**
      * The keyboard came up over the game. If you didn't touch the screen just before (so it isn't
-     * the chat you opened), the game opened it itself: that's the math question. Alert you on the
-     * tablet and on Telegram. Answering is up to you.
+     * the chat you opened), the game opened it itself: that's the math question. Try to answer it;
+     * if the question can't be read with confidence, fall back to alerting you.
      */
     private void keyboardOpened() {
         if (!running || manual) return;
@@ -1373,11 +1384,105 @@ public class ClickService extends AccessibilityService {
         if (now - userTouchAt < KEYBOARD_TOUCH_MS) return;
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         if (!game.equals(foregroundPackage())) return;
+        Log.w(TAG, "the game opened the keyboard by itself (math question?)");
+        answerMathQuestion(game);
+    }
+
+    /**
+     * Read the question with OCR, work out the answer, and tap it in. It only acts when it's sure:
+     * a clear "A op B", every digit key found on the keyboard, and a submit button. Anything
+     * missing and it just alerts you (as before), never typing a guess.
+     */
+    private void answerMathQuestion(String game) {
+        long now = SystemClock.uptimeMillis();
+        if (mathBusy || now - lastMathAnswerAt < MATH_RETRY_MS || !canReadScreen()) {
+            if (!canReadScreen()) alertMathQuestion(game);
+            return;
+        }
+        Rect kb = keyboardBounds();
+        if (kb == null) {
+            alertMathQuestion(game);
+            return;
+        }
+        mathBusy = true;
+        int keyboardTop = kb.top;
+        // Hide our own ring overlays so OCR doesn't read their digit labels as keyboard keys, then
+        // give the panel a moment to finish drawing before the screenshot.
+        hideRingsForMath();
+        handler.postDelayed(() -> captureForOcr(shot -> Ocr.read(shot, (lines, words) -> {
+            mathBusy = false;
+            showRingsAfterMath();
+            if (!running || !keyboardShowing()) return;     // you handled it, or it's gone
+            MathQuestion.Plan plan = MathQuestion.solve(lines, words, keyboardTop);
+            if (plan == null) {
+                Log.w(TAG, "couldn't read the math question (" + describeWords(words) + "); alerting you");
+                alertMathQuestion(game);
+                return;
+            }
+            lastMathAnswerAt = SystemClock.uptimeMillis();
+            Log.i(TAG, "answering the math question: " + plan.answer);
+            typeAnswer(plan);
+            Telegram.send(this, "🧮 Ran Online asked a math question; I answered " + plan.answer
+                    + ". Double-check it if you can.");
+        })), MATH_SETTLE_MS);
+    }
+
+    /** Taps each digit key in turn (never two at once), then the submit button. */
+    private void typeAnswer(MathQuestion.Plan plan) {
+        long delay = 0;
+        for (Rect key : plan.digitKeys) {
+            Rect k = key;
+            handler.postDelayed(() -> tapAt(k.exactCenterX(), k.exactCenterY(), "math key"), delay);
+            delay += MATH_TAP_GAP_MS;
+        }
+        Rect submit = plan.submit;
+        handler.postDelayed(() -> tapAt(submit.exactCenterX(), submit.exactCenterY(), "math submit"),
+                delay + MATH_TAP_GAP_MS);
+    }
+
+    /** Hide the target rings so OCR (and the math taps) don't catch their digit labels. */
+    private void hideRingsForMath() {
+        for (Target t : targets) if (t.root != null) t.root.setVisibility(View.GONE);
+    }
+
+    /** Bring the rings back after answering, unless we're in manual or off the game. */
+    private void showRingsAfterMath() {
+        if (manual || overlaysHidden) return;
+        for (Target t : targets) if (t.root != null) t.root.setVisibility(View.VISIBLE);
+    }
+
+    private void alertMathQuestion(String game) {
         keyboardAlerted = true;
-        Log.w(TAG, "the game opened the keyboard by itself (math question?): alerting you");
+        Log.w(TAG, "math question: alerting you");
         Alerts.question(this, game, "The game is asking a question (an answer box is open). Answer it in the game.");
         Telegram.send(this, "⚠️ Ran Online: a math question is waiting for you (an answer box opened). "
                 + "Answer it in the game.");
+    }
+
+    /** Where the on-screen keyboard sits (screen pixels), or null if it isn't up. */
+    private Rect keyboardBounds() {
+        try {
+            for (AccessibilityWindowInfo w : getWindows()) {
+                if (w.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    Rect r = new Rect();
+                    w.getBoundsInScreen(r);
+                    return r;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // windows changed while asking
+        }
+        return null;
+    }
+
+    /** The words OCR read, for the log when a question couldn't be parsed. */
+    private static String describeWords(List<MathQuestion.Word> words) {
+        StringBuilder sb = new StringBuilder();
+        for (MathQuestion.Word w : words) {
+            sb.append(w.text).append('|');
+            if (sb.length() > 200) break;
+        }
+        return sb.toString();
     }
 
     private void tap(Target t) {
@@ -1613,6 +1718,40 @@ public class ClickService extends AccessibilityService {
 
     private void captureScreen(Consumer<Bitmap> onShot) {
         captureScreen(onShot, false);
+    }
+
+    /**
+     * A full-screen readable copy for OCR. Unlike captureScreen it does NOT recycle the bitmap:
+     * reading is asynchronous, so ownership passes to the callback (Ocr recycles it when done).
+     * onShot gets null if a screenshot couldn't be taken.
+     */
+    private void captureForOcr(Consumer<Bitmap> onShot) {
+        if (!canReadScreen()) {
+            onShot.accept(null);
+            return;
+        }
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult result) {
+                HardwareBuffer buffer = result.getHardwareBuffer();
+                Bitmap hw = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
+                buffer.close();
+                if (hw == null) {
+                    onShot.accept(null);
+                    return;
+                }
+                screenW = hw.getWidth();
+                screenH = hw.getHeight();
+                Bitmap shot = hw.copy(Bitmap.Config.ARGB_8888, false);
+                hw.recycle();
+                onShot.accept(shot);
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                onShot.accept(null);
+            }
+        });
     }
 
     /**

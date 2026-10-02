@@ -20,6 +20,9 @@ Built and tuned on a Xiaomi Pad 5 (Android 11, MIUI).
 - **✋ Manual mode.** Stops tapping and hides the rings so you can play normally. Tap
   **AUTO** to show the rings and start auto clicking again.
 - **Game only.** It only taps while the game is in front, and pauses while the keyboard is open.
+- **Answers the math check.** When the game pops its "what is 10 + 1" verification, it reads the
+  question with on-device OCR (no network), works out the answer, taps it in and presses OK. If it
+  can't read the question for certain, it leaves it alone and alerts you instead of guessing.
 - **Survives memory kills.** If Android kills the app to free memory, a watchdog restarts
   the service within about 20 seconds and it carries on where it left off.
 
