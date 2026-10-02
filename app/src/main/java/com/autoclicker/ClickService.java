@@ -101,9 +101,14 @@ public class ClickService extends AccessibilityService {
     // the same question in a tight loop. mathBusy stops a second attempt while one is in flight.
     private static final int MATH_SETTLE_MS = 500;
     private static final int MATH_TAP_GAP_MS = 250;
-    private static final int MATH_RETRY_MS = 15_000;
+    private static final int MATH_GAP_MS = 15_000;
+    // A heads-up notification lands over the question text at the top and hides it for a second or
+    // two; the question itself stays ~25 s. So if the first read fails, try a few more times a
+    // short wait apart before giving up and alerting.
+    private static final int MATH_MAX_ATTEMPTS = 4;
+    private static final int MATH_RETRY_MS = 1500;
     private boolean mathBusy;
-    private long lastMathAnswerAt = -MATH_RETRY_MS;
+    private long lastMathAnswerAt = -MATH_GAP_MS;
 
     // Manual mode (✋): no tapping and no rings in the way, so you play the game yourself.
     // Remembered so a restart after Android kills the service doesn't bring the rings back.
@@ -146,18 +151,46 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
-    // TEST: a short joystick push every 3 minutes while running, alternating left and right. It goes
-    // just before the next heal, never during a heal's ticks, a buff cast or a full buff.
+    // TEST: a tiny in-place joystick jiggle every 3 minutes while running. It goes just before the
+    // next heal, never during a heal's ticks, a buff cast or a full buff. Each jiggle is out-and-back
+    // (a push one way then the same push the other way). It's deliberately tiny: even out-and-back
+    // leaves a small leftover when terrain/asymmetry stops one side, and over many 3-min cycles that
+    // leftover added up and the character wandered off; a tiny push keeps the leftover negligible.
     private static final int TEST_MOVE_EVERY_MS = 3 * 60_000;
-    // Joystick push: 350 ms went too far, 150 ms still a bit far; 80 ms (the user's pick).
+    // A brief push, long enough to register a clear left/right step. (50 ms / ~0.3 block was so small
+    // it fell in the joystick deadzone and just twitched "forward".)
     private static final int MOVE_MS = 80;
+    // Gap between the out push and the return push, so the game reads them as two separate nudges.
+    private static final int MOVE_RETURN_GAP_MS = 60;
     private static final int MOVE_SETTLE_MS = 300;
+    // Centre of the on-screen joystick. Found live by pushing at different heights: at y=1190 a
+    // horizontal push goes due west/east, but lower down (1210/1258/1288) it carried a SOUTH
+    // component (left -> SW, right -> SE), so left-then-right cancelled east/west yet kept adding
+    // south and the character crept south every cycle. Centred on y=1190, left and right cancel and
+    // it stays put.
     private static final float JOYSTICK_X = 250 / 2560f;
-    private static final float JOYSTICK_Y = 1258 / 1600f;
-    private static final float JOYSTICK_PUSH = 140 / 2560f;
-    private boolean moveLeft = true;
+    private static final float JOYSTICK_Y = 1190 / 1600f;
+    // ~120 px each way: clearly registers as a left/right step (40 px was below the deadzone). Being
+    // centred, not small, is what stops the drift, so the step can be visible and still return.
+    private static final float JOYSTICK_PUSH = 120 / 2560f;
     private boolean movePending;
     private final Runnable testMoveTick = this::testMoveTick;
+    // Chat-triggered full buff: OCR the chat log; when a new message asks for buffs, cast FB. The
+    // chat sits bottom-centre (below the All/Hide/Expand bar, above the timestamp); crop to that so
+    // OCR is quick and the joystick/skill buttons don't get read. fullBuff() has its own 15 s
+    // cooldown, so repeats while a request lingers are harmless.
+    private static final int CHAT_SCAN_MS = 1000;
+    private static final float CHAT_L = 0.28f, CHAT_T = 0.74f, CHAT_W = 0.44f, CHAT_H = 0.20f;
+    // A message counts as a buff request if it contains any of these (plus "fb" as its own word).
+    private static final String[] CHAT_FB_WORDS = {"full buff", "pa buff", "pabuff", "buffs"};
+    private final Runnable chatScanTick = this::chatScanTick;
+    // Fire FB once when a buff request first appears, not every scan it stays on screen. Re-arm only
+    // after the request has been gone a few scans, so OCR missing a line for one frame doesn't
+    // re-trigger it. (Comparing the OCR text between scans failed: the same line reads slightly
+    // differently each second, so every scan looked "new" and it spammed FB every cooldown.)
+    private static final int CHAT_REARM_SCANS = 3;
+    private boolean chatArmed = true;
+    private int chatAbsentScans;
     private boolean presenceCheckShown;
     // After a wave, buffs at or below this are recast (the user's call). With a clear every ~2 min
     // (93-214 s on 2026-10-02) the ~4.5-5 min buffs sit at ~55-60% after one wave and well below
@@ -641,7 +674,8 @@ public class ClickService extends AccessibilityService {
         backScans = 0;
         for (Target t : targets) t.owed = false;
         movePending = false;
-        moveLeft = true;
+        chatArmed = true;
+        chatAbsentScans = 0;
         if (run) closeEditor();
 
         toggle.setText(run ? "■" : "▶");
@@ -662,6 +696,7 @@ public class ClickService extends AccessibilityService {
         }
         if (run) handler.post(this::cooldownCheck);
         if (run) handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
+        if (run) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);
         // Clearing the handler above also dropped the "game back yet?" check.
         updateOverlayVisibility();
         // End Game starts the cycle like the support does by hand: buff the party first, but only
@@ -1258,22 +1293,76 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
     }
 
-    /** TEST: step 1-2 blocks sideways with a short joystick push, alternating left and right. */
+    /** TEST: a tiny left-then-right jiggle, so the character ends where it started. */
     private void testMove(long now) {
-        Log.i(TAG, "test move " + (moveLeft ? "left" : "right") + ", " + (now - lastPriorityTapAt)
+        Log.i(TAG, "test move: left then right (in place), " + (now - lastPriorityTapAt)
                 + " ms after the last heal, " + (now - lastAnyTapAt) + " ms after the last cast");
+        float dx = screenW * JOYSTICK_PUSH;
+        // Cover the whole left + gap + right window, so the heal waits for it and our own pushes
+        // aren't mistaken for your touch.
+        long window = 2L * MOVE_MS + MOVE_RETURN_GAP_MS;
+        ownTapUntil = now + window + OWN_TAP_SLACK_MS;
+        busyUntil = now + window + MOVE_SETTLE_MS;
+        joystickPush(-dx);                                              // left
+        handler.postDelayed(() -> joystickPush(dx), MOVE_MS + MOVE_RETURN_GAP_MS);  // right, back to the spot
+    }
+
+    /** Every few seconds: read the chat log; if a new message asks for buffs, cast a full buff. */
+    private void chatScanTick() {
+        if (!running) return;
+        handler.postDelayed(chatScanTick, CHAT_SCAN_MS);
+        if (manual || !canReadScreen() || keyboardShowing()) return;   // typing/math owns the screen
+        if (gamePackage != null && !gamePackage.equals(foregroundPackage())) return;
+        // Copy only the chat corner (~1.4 MB), not the whole 16 MB screen, so scanning often is cheap.
+        captureRegionForOcr(CHAT_L, CHAT_T, CHAT_W, CHAT_H, chat -> {
+            if (chat != null) Ocr.read(chat, (lines, words) -> checkChatForBuffRequest(lines));
+        });
+    }
+
+    private void checkChatForBuffRequest(List<MathQuestion.Line> lines) {
+        if (!running) return;
+        String hit = null;
+        for (MathQuestion.Line line : lines) {
+            String norm = line.text.toLowerCase(java.util.Locale.ROOT).trim();
+            if (!norm.isEmpty() && asksForBuffs(norm)) {
+                hit = line.text;
+                break;
+            }
+        }
+        if (hit != null) {
+            chatAbsentScans = 0;
+            if (chatArmed) {                 // rising edge: a request just appeared
+                chatArmed = false;
+                Log.i(TAG, "chat asked for a full buff: \"" + hit + "\" -> FB");
+                fullBuff();
+            }
+        } else if (++chatAbsentScans >= CHAT_REARM_SCANS) {
+            chatArmed = true;                // the request has cleared; ready for the next one
+        }
+    }
+
+    /** True if a chat line is asking for buffs: one of the phrases, or "fb" as its own word. */
+    private static boolean asksForBuffs(String lower) {
+        for (String w : CHAT_FB_WORDS) if (lower.contains(w)) return true;
+        for (int i = lower.indexOf("fb"); i >= 0; i = lower.indexOf("fb", i + 1)) {
+            boolean leftFree = i == 0 || !Character.isLetterOrDigit(lower.charAt(i - 1));
+            boolean rightFree = i + 2 >= lower.length() || !Character.isLetterOrDigit(lower.charAt(i + 2));
+            if (leftFree && rightFree) return true;
+        }
+        return false;
+    }
+
+    /** One brief joystick push from the centre by dx pixels, then released. */
+    private void joystickPush(float dx) {
+        if (!running) return;
         float cx = screenW * JOYSTICK_X;
         float cy = screenH * JOYSTICK_Y;
-        float dx = screenW * JOYSTICK_PUSH * (moveLeft ? -1 : 1);
-        moveLeft = !moveLeft;
         Path path = new Path();
         path.moveTo(cx, cy);
         path.lineTo(cx + dx, cy);
         GestureDescription g = new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, MOVE_MS))
                 .build();
-        ownTapUntil = now + MOVE_MS + OWN_TAP_SLACK_MS;
-        busyUntil = now + MOVE_MS + MOVE_SETTLE_MS;
         dispatchGesture(g, null, null);
     }
 
@@ -1395,7 +1484,7 @@ public class ClickService extends AccessibilityService {
      */
     private void answerMathQuestion(String game) {
         long now = SystemClock.uptimeMillis();
-        if (mathBusy || now - lastMathAnswerAt < MATH_RETRY_MS || !canReadScreen()) {
+        if (mathBusy || now - lastMathAnswerAt < MATH_GAP_MS || !canReadScreen()) {
             if (!canReadScreen()) alertMathQuestion(game);
             return;
         }
@@ -1405,26 +1494,42 @@ public class ClickService extends AccessibilityService {
             return;
         }
         mathBusy = true;
-        int keyboardTop = kb.top;
-        // Hide our own ring overlays so OCR doesn't read their digit labels as keyboard keys, then
-        // give the panel a moment to finish drawing before the screenshot.
+        tryReadMath(game, kb.top, 1);
+    }
+
+    /**
+     * One read attempt. Hides our ring overlays (so OCR doesn't read their digit labels), waits for
+     * the panel (and any notification banner over it) to settle, screenshots, and reads. On a clean
+     * read it taps the answer; if it can't read it, it tries again a few times before alerting.
+     */
+    private void tryReadMath(String game, int keyboardTop, int attempt) {
         hideRingsForMath();
+        long wait = attempt == 1 ? MATH_SETTLE_MS : MATH_RETRY_MS;
         handler.postDelayed(() -> captureForOcr(shot -> Ocr.read(shot, (lines, words) -> {
-            mathBusy = false;
             showRingsAfterMath();
-            if (!running || !keyboardShowing()) return;     // you handled it, or it's gone
-            MathQuestion.Plan plan = MathQuestion.solve(lines, words, keyboardTop);
-            if (plan == null) {
-                Log.w(TAG, "couldn't read the math question (" + describeWords(words) + "); alerting you");
-                alertMathQuestion(game);
+            if (!running || !keyboardShowing()) {           // you handled it, or it's gone
+                mathBusy = false;
                 return;
             }
+            MathQuestion.Plan plan = MathQuestion.solve(lines, words, keyboardTop);
+            if (plan == null) {
+                if (attempt < MATH_MAX_ATTEMPTS) {
+                    Log.i(TAG, "math read " + attempt + " failed (" + describeWords(words) + "), retrying");
+                    tryReadMath(game, keyboardTop, attempt + 1);
+                } else {
+                    mathBusy = false;
+                    Log.w(TAG, "couldn't read the math question after " + attempt + " tries; alerting you");
+                    alertMathQuestion(game);
+                }
+                return;
+            }
+            mathBusy = false;
             lastMathAnswerAt = SystemClock.uptimeMillis();
-            Log.i(TAG, "answering the math question: " + plan.answer);
+            Log.i(TAG, "answering the math question: " + plan.answer + " (read " + attempt + ")");
             typeAnswer(plan);
             Telegram.send(this, "🧮 Ran Online asked a math question; I answered " + plan.answer
                     + ". Double-check it if you can.");
-        })), MATH_SETTLE_MS);
+        })), wait);
     }
 
     /** Taps each digit key in turn (never two at once), then the submit button. */
@@ -1743,6 +1848,52 @@ public class ClickService extends AccessibilityService {
                 screenW = hw.getWidth();
                 screenH = hw.getHeight();
                 Bitmap shot = hw.copy(Bitmap.Config.ARGB_8888, false);
+                hw.recycle();
+                onShot.accept(shot);
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                onShot.accept(null);
+            }
+        });
+    }
+
+    /**
+     * Like captureForOcr, but copies only a fractional region of the screen (l,t,w,h as 0..1), so a
+     * small area like the chat log is cheap to grab often. The callback owns the bitmap (OCR recycles
+     * it), or gets null if nothing could be read.
+     */
+    private void captureRegionForOcr(float fl, float ft, float fw, float fh, Consumer<Bitmap> onShot) {
+        if (!canReadScreen()) {
+            onShot.accept(null);
+            return;
+        }
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult result) {
+                HardwareBuffer buffer = result.getHardwareBuffer();
+                Bitmap hw = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
+                buffer.close();
+                if (hw == null) {
+                    onShot.accept(null);
+                    return;
+                }
+                screenW = hw.getWidth();
+                screenH = hw.getHeight();
+                Bitmap shot = null;
+                try {
+                    int x = Math.round(screenW * fl), y = Math.round(screenH * ft);
+                    int w = Math.min(Math.round(screenW * fw), screenW - x);
+                    int h = Math.min(Math.round(screenH * fh), screenH - y);
+                    if (x >= 0 && y >= 0 && w > 0 && h > 0) {
+                        Bitmap part = Bitmap.createBitmap(hw, x, y, w, h);
+                        shot = part.copy(Bitmap.Config.ARGB_8888, false);
+                        if (part != hw) part.recycle();
+                    }
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "couldn't copy the region: " + e);
+                }
                 hw.recycle();
                 onShot.accept(shot);
             }
