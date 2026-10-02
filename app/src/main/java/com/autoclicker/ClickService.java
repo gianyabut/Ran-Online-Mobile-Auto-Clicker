@@ -123,6 +123,8 @@ public class ClickService extends AccessibilityService {
     private boolean inWave;
     // A full buff was stopped because the wave came back; the next clear buffs regardless.
     private boolean fullBuffOwed;
+    // Readings at the wave level in a row while a full buff is going out.
+    private int backScans;
     // ▶ in End Game: full buff on the first monster count if fewer than this are on screen,
     // otherwise heal first and buff once they're down (the user's call).
     private boolean startBuffPending;
@@ -239,6 +241,8 @@ public class ClickService extends AccessibilityService {
         int forcedRetries;
         // Goes after every other buff that's due (and last in a full buff).
         boolean castLast;
+        // Dropped from a full buff that a returning wave stopped; cast when it resumes.
+        boolean owed;
         long queuedAt;
         int recastsWithoutOk;
         // Recast when the buff's timer is at or below this share (70% default, per buff).
@@ -591,6 +595,8 @@ public class ClickService extends AccessibilityService {
         inWave = false;
         clearScans = 0;
         fullBuffOwed = false;
+        backScans = 0;
+        for (Target t : targets) t.owed = false;
         if (run) closeEditor();
 
         toggle.setText(run ? "■" : "▶");
@@ -675,7 +681,15 @@ public class ClickService extends AccessibilityService {
             return;
         }
         lastFullBuffAt = now;
+        // A full buff stopped by a returning wave resumes with the buffs it hadn't cast yet:
+        // the ones that went out a moment ago don't need casting again.
+        if (fullBuffOwed) {
+            List<Target> rest = new ArrayList<>();
+            for (Target t : buffs) if (t.owed) rest.add(t);
+            if (!rest.isEmpty()) buffs = rest;
+        }
         fullBuffOwed = false;
+        for (Target t : targets) t.owed = false;
         // Start first: starting clears all timers, including the one that resets the button.
         if (!running) setRunning(true, "button");
         showFullBuffActive();
@@ -966,6 +980,12 @@ public class ClickService extends AccessibilityService {
         }
         if (mobs >= waveStartMobs()) {
             clearScans = 0;
+            if (!inWave && fullBuffGoingOut() && mobs == waveStartMobs() && ++backScans < 2) {
+                // Mid full buff, one reading right at the wave level is often a flicker (small
+                // party: 2-3-2): only stop the buffs once the wave is clearly back.
+                return;
+            }
+            backScans = 0;
             if (!inWave) {
                 inWave = true;
                 waveStartedAt = now;
@@ -974,6 +994,7 @@ public class ClickService extends AccessibilityService {
             }
             return;
         }
+        backScans = 0;
         if (!inWave) return;
         clearScans = mobs <= waveEndMobs() ? clearScans + 1 : 0;
         if (clearScans < (bigParty() ? WAVE_END_SCANS : SMALL_WAVE_END_SCANS)) return;
@@ -1005,6 +1026,7 @@ public class ClickService extends AccessibilityService {
             Target t = pending.get(i);
             if (!t.forced) continue;
             t.forced = false;
+            t.owed = true;
             pending.remove(i);
             handler.removeCallbacks(t.tick);
             handler.postDelayed(t.tick, SMART_RECHECK_MS);
@@ -1019,6 +1041,12 @@ public class ClickService extends AccessibilityService {
         resetFullBuffButton.run();
         Log.i(TAG, "wave is back: full buff stopped (" + dropped + " buffs not cast), healing");
         schedulePump(0);
+    }
+
+    /** Buffs of a full buff are still waiting to go out. */
+    private boolean fullBuffGoingOut() {
+        for (Target t : pending) if (t.forced) return true;
+        return false;
     }
 
     private static boolean buffBelowRecast(Target t) {
