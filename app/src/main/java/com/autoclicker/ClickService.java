@@ -103,10 +103,16 @@ public class ClickService extends AccessibilityService {
     // Cooldown check. Android allows roughly one accessibility screenshot per 333 ms.
     private static final int SCREENSHOT_EVERY_MS = 350;
     private static final int BUFF_SCAN_EVERY_MS = 2000;
-    // Waves (see updateWave): 6+ on screen is a wave, fewer than 6 means it's (nearly) cleared,
-    // the user's call. The count runs low in a crowd (~12 reads 9-10) and can read 1 on graffiti.
+    // Waves (see updateWave). How big a lure gets depends on the party: 8 members bring 6-13 (on
+    // screen; the count runs low in a crowd, ~12 reads 9-10), 3 members bring 2-4 and leave 0-1.
+    // Big party: 6+ is a wave, fewer than 6 (nearly) cleared, the user's call. Small party: 3+ is
+    // a wave, 1 or fewer cleared (matched the user's own FB presses at 10:35-10:38 on 2026-10-02).
+    private static final int BIG_PARTY = 5;
     private static final int WAVE_START_MOBS = 6;
     private static final int WAVE_END_MOBS = 5;
+    private static final int SMALL_WAVE_START_MOBS = 3;
+    private static final int SMALL_WAVE_END_MOBS = 1;
+    private int partySize = -1; // from the team list; -1 until seen
     private static final int WAVE_END_SCANS = 4;
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
@@ -901,10 +907,36 @@ public class ClickService extends AccessibilityService {
     /**
      * Party farming in waves: the party lures a crowd onto the support, who only heals until it's
      * nearly dead, then full-buffs everyone for the next lure.
-     * A wave starts at WAVE_START_MOBS on screen and ends once WAVE_END_MOBS or fewer show for
+     * A wave starts at waveStartMobs() on screen and ends once waveEndMobs() or fewer show for
      * WAVE_END_SCANS scans in a row (spell effects can hide names for a moment mid-fight).
      * Nothing is cast between waves: the party is away luring.
      */
+    /** Party size from the team list; 0 (list hidden by a menu, or solo) keeps the last one seen. */
+    private void updateParty(int members) {
+        if (members <= 0 || members == partySize) return;
+        boolean first = partySize < 0;
+        boolean wasBig = bigParty();
+        partySize = members;
+        // A member walking out of range can flicker the count by one; only say so when it matters.
+        if (first || bigParty() != wasBig) {
+            Log.i(TAG, "party of " + members + ": wave at " + waveStartMobs() + "+ monsters, cleared at "
+                    + waveEndMobs() + " or fewer");
+        }
+    }
+
+    /** Big until a small party has been seen, so it behaves as before until the list is read. */
+    private boolean bigParty() {
+        return partySize < 0 || partySize >= BIG_PARTY;
+    }
+
+    private int waveStartMobs() {
+        return bigParty() ? WAVE_START_MOBS : SMALL_WAVE_START_MOBS;
+    }
+
+    private int waveEndMobs() {
+        return bigParty() ? WAVE_END_MOBS : SMALL_WAVE_END_MOBS;
+    }
+
     private void updateWave(int mobs) {
         if (mobs < 0) return;
         long now = SystemClock.uptimeMillis();
@@ -928,7 +960,7 @@ public class ClickService extends AccessibilityService {
             Log.i(TAG, "start: ~" + mobs + " monsters, healing first, full buff once they're down");
             return;
         }
-        if (mobs >= WAVE_START_MOBS) {
+        if (mobs >= waveStartMobs()) {
             clearScans = 0;
             if (!inWave) {
                 inWave = true;
@@ -939,7 +971,7 @@ public class ClickService extends AccessibilityService {
             return;
         }
         if (!inWave) return;
-        clearScans = mobs <= WAVE_END_MOBS ? clearScans + 1 : 0;
+        clearScans = mobs <= waveEndMobs() ? clearScans + 1 : 0;
         if (clearScans < WAVE_END_SCANS) return;
         inWave = false;
         clearScans = 0;
@@ -1214,6 +1246,7 @@ public class ClickService extends AccessibilityService {
                 // per BUFF_SCAN_EVERY_MS is plenty.
                 if (endGame && scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
                     lastMobCountAt = now;
+                    updateParty(MobCounter.partySize(shot, screenW, screenH));
                     updateWave(MobCounter.count(shot, screenW, screenH));
                 }
                 if (scanBuffs) targetSelected = MobCounter.targetSelected(shot, screenW, screenH);

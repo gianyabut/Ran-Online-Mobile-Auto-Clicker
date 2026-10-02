@@ -41,6 +41,61 @@ final class MobCounter {
         return Math.round(redPixels / (float) PIXELS_PER_NAME);
     }
 
+    /**
+     * Members in the "Team" list at the top left (0 if it isn't showing). Each member is an HP bar
+     * (red, or grey/black where HP is missing) with a near-black divider above and below; names
+     * are written over the middle. Checked on 17 screenshots: parties of 3, 4 and 6-8 read right
+     * (a member out of range, with a dark bar, can end the count one early).
+     */
+    static int partySize(Bitmap shot, int screenW, int screenH) {
+        if (shot.getWidth() < screenW || shot.getHeight() < screenH) return 0;
+        int n = 0;
+        for (int k = 0; k < 8; k++) {
+            int c = (int) (screenH * (0.2456f + k * 0.02906f));
+            int good = 0;
+            int total = 0;
+            for (int x = (int) (screenW * 0.07f); x < screenW * 0.172f; x += Math.max(1, (int) (screenW * 0.006f))) {
+                total++;
+                if (darkest(shot, x, c - 27, c - 17) < 45 && darkest(shot, x, c + 16, c + 26) < 45
+                        && barHighlight(shot, x, c - 16, c + 16) && neutralOrRed(shot, x, c - 3, c + 3)) {
+                    good++;
+                }
+            }
+            if (good * 10 < total * 6) break;
+            n++;
+        }
+        return n;
+    }
+
+    /** The darkest pixel's brightest channel in a column stretch. */
+    private static int darkest(Bitmap shot, int x, int y0, int y1) {
+        int best = 255;
+        for (int y = y0; y <= y1; y++) {
+            int c = shot.getPixel(x, y);
+            best = Math.min(best, Math.max(Color.red(c), Math.max(Color.green(c), Color.blue(c))));
+        }
+        return best;
+    }
+
+    /** A bar's bright stripe: grey (no HP) or pinkish red, never the olive/brown of the ground. */
+    private static boolean barHighlight(Bitmap shot, int x, int y0, int y1) {
+        for (int y = y0; y <= y1; y++) {
+            int c = shot.getPixel(x, y);
+            int g = Color.green(c);
+            int b = Color.blue(c);
+            if (Math.max(Color.red(c), Math.max(g, b)) > 140 && g >= b - 10 && Math.abs(g - b) < 16) return true;
+        }
+        return false;
+    }
+
+    private static boolean neutralOrRed(Bitmap shot, int x, int y0, int y1) {
+        for (int y = y0; y <= y1; y += 3) {
+            int c = shot.getPixel(x, y);
+            if (Math.abs(Color.green(c) - Color.blue(c)) >= 16) return false;
+        }
+        return true;
+    }
+
     // The selected target's bar at the top centre: its ✕ close button, and the start of its HP bar.
     static final float CLOSE_X = 0.7055f;
     static final float CLOSE_Y = 0.0825f;
