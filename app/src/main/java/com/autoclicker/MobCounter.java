@@ -96,6 +96,30 @@ final class MobCounter {
         return true;
     }
 
+    /**
+     * Your own HP, 0..1, from the red HP bar at the top left (x 304-602 on 2560x1600, red where
+     * there's HP, grey where it's missing, the number written on top); -1 if it can't be seen.
+     */
+    static float selfHp(Bitmap shot, int screenW, int screenH) {
+        if (shot.getWidth() < screenW || shot.getHeight() < screenH) return -1;
+        int x0 = Math.round(screenW * 304 / 2560f);
+        int x1 = Math.round(screenW * 602 / 2560f);
+        int right = -1;
+        boolean startRed = false;
+        for (int y = Math.round(screenH * 14 / 1600f); y <= screenH * 37 / 1600f; y += 3) {
+            for (int x = x0; x <= x1; x += 2) {
+                int c = shot.getPixel(x, y);
+                if (Color.red(c) > 150 && Color.green(c) < 80 && Color.blue(c) < 80) {
+                    if (x < x0 + 20) startRed = true;
+                    right = Math.max(right, x);
+                }
+            }
+        }
+        // No red at the bar's left end: the bar isn't showing (menu, loading) or HP is 0.
+        if (!startRed) return -1;
+        return Math.min(1f, (right - x0) / (float) (x1 - x0));
+    }
+
     // The selected target's bar at the top centre: its ✕ close button, and the start of its HP bar.
     static final float CLOSE_X = 0.7055f;
     static final float CLOSE_Y = 0.0825f;
