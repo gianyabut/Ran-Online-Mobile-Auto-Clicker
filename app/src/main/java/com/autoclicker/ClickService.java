@@ -89,6 +89,11 @@ public class ClickService extends AccessibilityService {
     private String lastForeground;
     private boolean pausedForOtherApp;
     private boolean pausedForKeyboard;
+    // The math question ("Please verify this simple questions, what is 10 + 1") opens the number
+    // keyboard by itself (2026-10-02 20:13:50, no touch before it). A keyboard you didn't open
+    // while the auto clicker runs is taken for it (see keyboardOpened).
+    private static final int KEYBOARD_TOUCH_MS = 5000;
+    private boolean keyboardAlerted;
     private boolean pausedForPortrait;
 
     // Manual mode (✋): no tapping and no rings in the way, so you play the game yourself.
@@ -132,9 +137,9 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
-    // TEST: a short joystick push every minute while running, alternating left and right. It goes
+    // TEST: a short joystick push every 3 minutes while running, alternating left and right. It goes
     // just before the next heal, never during a heal's ticks, a buff cast or a full buff.
-    private static final int TEST_MOVE_EVERY_MS = 60_000;
+    private static final int TEST_MOVE_EVERY_MS = 3 * 60_000;
     // Joystick push: 350 ms went too far, 150 ms still a bit far; 80 ms (the user's pick).
     private static final int MOVE_MS = 80;
     private static final int MOVE_SETTLE_MS = 300;
@@ -1321,13 +1326,18 @@ public class ClickService extends AccessibilityService {
      */
     private boolean gameInFront() {
         if (keyboardShowing()) {
-            if (!pausedForKeyboard) Log.i(TAG, "paused: keyboard is open");
+            if (!pausedForKeyboard) {
+                Log.i(TAG, "paused: keyboard is open");
+                keyboardOpened();
+            }
             pausedForKeyboard = true;
             return false;
         }
         if (pausedForKeyboard) {
             Log.i(TAG, "keyboard closed, tapping again");
             pausedForKeyboard = false;
+            if (keyboardAlerted) Alerts.clearQuestion(this);
+            keyboardAlerted = false;
         }
         // The game is landscape only. MIUI's "install via USB" screen turns the display to portrait
         // while the game still counts as the active window; rings tapped then hit that screen.
@@ -1350,6 +1360,24 @@ public class ClickService extends AccessibilityService {
                     : "paused: " + lastForeground + " is in front, not " + gamePackage);
         }
         return inFront;
+    }
+
+    /**
+     * The keyboard came up over the game. If you didn't touch the screen just before (so it isn't
+     * the chat you opened), the game opened it itself: that's the math question. Alert you on the
+     * tablet and on Telegram. Answering is up to you.
+     */
+    private void keyboardOpened() {
+        if (!running || manual) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - userTouchAt < KEYBOARD_TOUCH_MS) return;
+        String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+        if (!game.equals(foregroundPackage())) return;
+        keyboardAlerted = true;
+        Log.w(TAG, "the game opened the keyboard by itself (math question?): alerting you");
+        Alerts.question(this, game, "The game is asking a question (an answer box is open). Answer it in the game.");
+        Telegram.send(this, "⚠️ Ran Online: a math question is waiting for you (an answer box opened). "
+                + "Answer it in the game.");
     }
 
     private void tap(Target t) {
