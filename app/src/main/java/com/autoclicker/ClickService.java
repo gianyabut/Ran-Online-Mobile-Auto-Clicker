@@ -673,6 +673,16 @@ public class ClickService extends AccessibilityService {
      * rings with Smart buff on, so new buffs are included once they are set up that way.
      */
     private void fullBuff() {
+        fullBuff(false);
+    }
+
+    /**
+     * Casts the buffs back to back. With onlyLow (after a wave), only the ones that are missing or
+     * at/below their recast %: the party kills a wave in 20-80 s and Fortify/Inspire/Revitalize
+     * last ~4-5 min, so a full buff every wave mostly recast buffs at 60-80% and cost ~12-15 s of
+     * heals. Massive Haste (~40 s) is gone by then, so it always goes; the rest when low.
+     */
+    private void fullBuff(boolean onlyLow) {
         List<Target> buffs = new ArrayList<>();
         for (Target t : targets) if (!t.priority && t.smartBuff) buffs.add(t);
         if (buffs.isEmpty()) {
@@ -692,6 +702,16 @@ public class ClickService extends AccessibilityService {
             List<Target> rest = new ArrayList<>();
             for (Target t : buffs) if (t.owed) rest.add(t);
             if (!rest.isEmpty()) buffs = rest;
+        } else if (onlyLow) {
+            List<Target> low = new ArrayList<>();
+            // Not read yet (e.g. right after a restart) counts as low: better one cast too many.
+            for (Target t : buffs) if (!t.isSmart() || !t.buffKnown || buffBelowRecast(t)) low.add(t);
+            if (low.isEmpty()) {
+                Log.i(TAG, "wave buff: every buff is still above its %, nothing to cast");
+                lastFullBuffAt = 0;
+                return;
+            }
+            buffs = low;
         }
         fullBuffOwed = false;
         for (Target t : targets) t.owed = false;
@@ -705,7 +725,9 @@ public class ClickService extends AccessibilityService {
                 buffs.remove(i);
             }
         }
-        Log.i(TAG, "full buff: casting " + buffs.size() + " buffs back to back");
+        StringBuilder which = new StringBuilder();
+        for (Target t : buffs) which.append(which.length() > 0 ? "," : "").append(targets.indexOf(t) + 1);
+        Log.i(TAG, "full buff: casting " + buffs.size() + " buffs back to back (targets " + which + ")");
         for (Target t : buffs) {
             t.forced = true;
             t.forcedRetries = 0;
@@ -1024,10 +1046,11 @@ public class ClickService extends AccessibilityService {
         }
         // No full buff between waves even when a buff runs low: the party is away luring then, and
         // a buff cast now would miss them. They get buffed when they bring the next wave down.
-        Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), full buff"
-                + (fullBuffOwed ? " (the one stopped when the wave came back)" : ""));
-        // fullBuff() reads and clears fullBuffOwed itself, to cast only the buffs it had dropped.
-        fullBuff();
+        Log.i(TAG, "wave cleared after " + lasted / 1000 + " s (~" + mobs + " left), "
+                + (fullBuffOwed ? "resuming the full buff stopped when the wave came back" : "buffing what's low"));
+        // fullBuff() reads and clears fullBuffOwed itself (a resume casts only the dropped buffs);
+        // otherwise only the buffs that are low: Massive Haste every wave, the rest when they need it.
+        fullBuff(true);
     }
 
     /**
