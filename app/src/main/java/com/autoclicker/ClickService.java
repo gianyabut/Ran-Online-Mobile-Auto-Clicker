@@ -113,6 +113,10 @@ public class ClickService extends AccessibilityService {
     private boolean inWave;
     // A full buff was stopped because the wave came back; the next clear buffs regardless.
     private boolean fullBuffOwed;
+    // ▶ in End Game: full buff on the first monster count if fewer than this are on screen,
+    // otherwise heal first and buff once they're down (the user's call).
+    private boolean startBuffPending;
+    private static final int START_BUFF_MAX_MOBS = 5;
     // A player or monster is selected (bar at the top centre), as of the latest screenshot.
     private boolean targetSelected;
     // After tapping its ✕, give the game a moment before the buff goes out.
@@ -598,12 +602,11 @@ public class ClickService extends AccessibilityService {
         if (run) handler.post(this::cooldownCheck);
         // Clearing the handler above also dropped the "game back yet?" check.
         updateOverlayVisibility();
-        // End Game starts the cycle like the support does by hand: buff the party first. Skipped
-        // when this start came from a full buff (FB or the EG switch while stopped).
-        if (run && endGame && why.equals("button")
-                && SystemClock.uptimeMillis() - lastFullBuffAt >= FULL_BUFF_COOLDOWN_MS) {
-            handler.post(this::fullBuff);
-        }
+        // End Game starts the cycle like the support does by hand: buff the party first, but only
+        // if no fight is on (decided on the first monster count, see updateWave). Skipped when
+        // this start came from a full buff (FB or the EG switch while stopped).
+        startBuffPending = run && endGame && why.equals("button")
+                && SystemClock.uptimeMillis() - lastFullBuffAt >= FULL_BUFF_COOLDOWN_MS;
     }
 
     /**
@@ -909,6 +912,21 @@ public class ClickService extends AccessibilityService {
             // For tuning: what the counter read whenever it changes.
             Log.d(TAG, "monsters: ~" + mobs);
             lastMobCount = mobs;
+        }
+        if (startBuffPending) {
+            startBuffPending = false;
+            if (mobs < START_BUFF_MAX_MOBS) {
+                Log.i(TAG, "start: ~" + mobs + " monsters, full buff");
+                fullBuff();
+                return;
+            }
+            // A fight is on: heal first, and buff as soon as it's cleared, however short.
+            inWave = true;
+            waveStartedAt = now;
+            clearScans = 0;
+            fullBuffOwed = true;
+            Log.i(TAG, "start: ~" + mobs + " monsters, healing first, full buff once they're down");
+            return;
         }
         if (mobs >= WAVE_START_MOBS) {
             clearScans = 0;
