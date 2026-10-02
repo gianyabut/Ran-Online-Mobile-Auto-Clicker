@@ -108,9 +108,12 @@ public class ClickService extends AccessibilityService {
     // Big party: 6+ is a wave, fewer than 6 (nearly) cleared, the user's call. Small party: 3+ is
     // a wave, 2 or fewer for 3 scans cleared ("FB once it's 3 or less", the count reading ~1 low).
     // "1 or fewer" kept healing for 38 s after a wave: one leftover name flickered 1-2.
-    private static final int BIG_PARTY = 5;
+    // A party of 5 brings ~5 at most: small-party clearing, but a wave only from 4 so the 1-3
+    // flicker between lures doesn't keep starting short ones.
+    private static final int BIG_PARTY = 6;
     private static final int WAVE_START_MOBS = 6;
     private static final int WAVE_END_MOBS = 5;
+    private static final int PARTY_OF_5_WAVE_START_MOBS = 4;
     private static final int SMALL_WAVE_START_MOBS = 3;
     private static final int SMALL_WAVE_END_MOBS = 2;
     private int partySize = -1; // from the team list; -1 until seen
@@ -467,7 +470,7 @@ public class ClickService extends AccessibilityService {
         barParams.y = dp(200);
         makeDraggable(toggle, bar, barParams, () -> setRunning(!running, "button"), null);
         makeDraggable(add, bar, barParams, this::addTargetFromBar, null);
-        makeDraggable(fullBuffButton, bar, barParams, this::fullBuff, null);
+        makeDraggable(fullBuffButton, bar, barParams, this::onFullBuffButton, null);
         makeDraggable(manualButton, bar, barParams, () -> setManual(!manual, "button"), null);
         makeDraggable(modeButton, bar, barParams, () -> setEndGame(!endGame, "button"), null);
         if (!safeAdd(bar, barParams)) {
@@ -717,7 +720,7 @@ public class ClickService extends AccessibilityService {
         b.animate().scaleX(0.75f).scaleY(0.75f).setDuration(80)
                 .withEndAction(() -> b.animate().scaleX(1f).scaleY(1f).setDuration(160).start())
                 .start();
-        fullBuffButton.setText("…");
+        fullBuffButton.setText("✕"); // tap again to stop it
         fullBuffButton.setBackground(circle(Color.rgb(40, 170, 70)));
         handler.removeCallbacks(resetFullBuffButton);
         handler.postDelayed(resetFullBuffButton, FULL_BUFF_COOLDOWN_MS);
@@ -942,10 +945,11 @@ public class ClickService extends AccessibilityService {
         if (members < partySize && now - partySeenAt < PARTY_SHRINK_MS) return;
         partySeenAt = now;
         boolean first = partySize < 0;
-        boolean wasBig = bigParty();
+        int oldStart = waveStartMobs();
+        int oldEnd = waveEndMobs();
         partySize = members;
-        // A member walking out of range can flicker the count by one; only say so when it matters.
-        if (first || bigParty() != wasBig) {
+        // Only say so when the numbers it goes by change.
+        if (first || waveStartMobs() != oldStart || waveEndMobs() != oldEnd) {
             Log.i(TAG, "party of " + members + ": wave at " + waveStartMobs() + "+ monsters, cleared at "
                     + waveEndMobs() + " or fewer");
         }
@@ -957,7 +961,8 @@ public class ClickService extends AccessibilityService {
     }
 
     private int waveStartMobs() {
-        return bigParty() ? WAVE_START_MOBS : SMALL_WAVE_START_MOBS;
+        if (bigParty()) return WAVE_START_MOBS;
+        return partySize == BIG_PARTY - 1 ? PARTY_OF_5_WAVE_START_MOBS : SMALL_WAVE_START_MOBS;
     }
 
     private int waveEndMobs() {
@@ -1030,26 +1035,45 @@ public class ClickService extends AccessibilityService {
      * the buffs still in line so the heal gets its slots again. The next clear buffs again.
      */
     private void stopFullBuff() {
+        int dropped = dropFullBuff(true);
+        if (dropped == 0) return;
+        // Let the next clear start a full buff right away, not "already in progress", however
+        // short the rest of the wave turns out to be.
+        fullBuffOwed = true;
+        Log.i(TAG, "wave is back: full buff stopped (" + dropped + " buffs not cast), healing");
+    }
+
+    /** FB button: starts a full buff, or stops the one going out (nothing is owed then). */
+    private void onFullBuffButton() {
+        if (!fullBuffGoingOut()) {
+            fullBuff();
+            return;
+        }
+        int dropped = dropFullBuff(false);
+        fullBuffOwed = false;
+        for (Target t : targets) t.owed = false;
+        Log.i(TAG, "full buff stopped (button), " + dropped + " buffs not cast, healing");
+    }
+
+    /** Takes the full buff's buffs still in line out of it; returns how many. */
+    private int dropFullBuff(boolean owe) {
         int dropped = 0;
         for (int i = pending.size() - 1; i >= 0; i--) {
             Target t = pending.get(i);
             if (!t.forced) continue;
             t.forced = false;
-            t.owed = true;
+            if (owe) t.owed = true;
             pending.remove(i);
             handler.removeCallbacks(t.tick);
             handler.postDelayed(t.tick, SMART_RECHECK_MS);
             dropped++;
         }
-        if (dropped == 0) return;
-        // Let the next clear start a full buff right away, not "already in progress", however
-        // short the rest of the wave turns out to be.
+        if (dropped == 0) return 0;
         lastFullBuffAt = 0;
-        fullBuffOwed = true;
         handler.removeCallbacks(resetFullBuffButton);
         resetFullBuffButton.run();
-        Log.i(TAG, "wave is back: full buff stopped (" + dropped + " buffs not cast), healing");
         schedulePump(0);
+        return dropped;
     }
 
     /** Buffs of a full buff are still waiting to go out. */
