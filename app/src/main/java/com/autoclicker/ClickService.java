@@ -79,6 +79,12 @@ public class ClickService extends AccessibilityService {
     private static final String DEFAULT_GAME = "com.ranpinas.client";
     private boolean overlaysHidden;
     private static final int VISIBILITY_RECHECK_MS = 1000;
+    // Telegram when the game is gone (see checkGameGone, checkGameDialog).
+    private static final int GAME_GONE_ALERT_MS = 60_000;
+    private static final int GAME_ALERT_GAP_MS = 5 * 60_000;
+    private long gameHiddenSince;
+    private boolean gameGoneAlerted;
+    private long lastGameAlertAt = -GAME_ALERT_GAP_MS;
     private String gamePackage;
     private String lastForeground;
     private boolean pausedForOtherApp;
@@ -126,7 +132,8 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
-    // TEST: a short joystick push every minute while running, alternating left and right.
+    // TEST: a short joystick push every minute while running, alternating left and right. It goes
+    // just before the next heal, never during a heal's ticks, a buff cast or a full buff.
     private static final int TEST_MOVE_EVERY_MS = 60_000;
     // Joystick push: 350 ms went too far, 150 ms still a bit far; 80 ms (the user's pick).
     private static final int MOVE_MS = 80;
@@ -857,7 +864,7 @@ public class ClickService extends AccessibilityService {
     }
 
     private void pumpQueue() {
-        if (!running || (pending.isEmpty() && !movePending)) return;
+        if (!running || pending.isEmpty()) return;
         // While the game isn't in front (or the keyboard is up) hold everything as it is,
         // so no tap is sent, counted, or mistaken for one the game ignored.
         if (!gameInFront()) {
@@ -871,13 +878,6 @@ public class ClickService extends AccessibilityService {
         }
         if (now - userTouchAt < USER_TOUCH_PAUSE_MS) {
             schedulePump(userTouchAt + USER_TOUCH_PAUSE_MS - now);
-            return;
-        }
-        if (movePending) {
-            // One touch at a time: the step goes between taps, then the queue carries on.
-            movePending = false;
-            testMove(now);
-            if (!pending.isEmpty()) schedulePump(busyUntil - now);
             return;
         }
         if (pending.isEmpty()) return;
@@ -913,6 +913,14 @@ public class ClickService extends AccessibilityService {
                 schedulePump(waitMs);
                 return;
             }
+        }
+        if (movePending && next.priority && !fullBuffGoingOut()) {
+            // The step waits for the moment the heal is due: the last heal's 3 ticks and any buff
+            // cast are done by then, so moving cancels nothing. The heal goes right after it.
+            movePending = false;
+            testMove(now);
+            schedulePump(busyUntil - now);
+            return;
         }
         if (next.smartBuff && targetSelected && gameInFront()) {
             // With a player selected, the game casts buffs on that player instead of us and the
@@ -1238,7 +1246,8 @@ public class ClickService extends AccessibilityService {
 
     /** TEST: step 1-2 blocks sideways with a short joystick push, alternating left and right. */
     private void testMove(long now) {
-        Log.i(TAG, "test move " + (moveLeft ? "left" : "right"));
+        Log.i(TAG, "test move " + (moveLeft ? "left" : "right") + ", " + (now - lastPriorityTapAt)
+                + " ms after the last heal, " + (now - lastAnyTapAt) + " ms after the last cast");
         float cx = screenW * JOYSTICK_X;
         float cy = screenH * JOYSTICK_Y;
         float dx = screenW * JOYSTICK_PUSH * (moveLeft ? -1 : 1);
@@ -2042,7 +2051,82 @@ public class ClickService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) updateOverlayVisibility();
+        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+        checkGameDialog(event);
+        updateOverlayVisibility();
+    }
+
+    /**
+     * Disconnect and crash dialogs are plain Android dialogs, so their text can be read. The kick
+     * after an unanswered presence check (2026-10-02 14:12) showed "DGames Mobile: The game had to
+     * stop. Please close the app and reopen it." over the game; Android's own crash dialog says
+     * "... keeps stopping" or "... has stopped".
+     */
+    private void checkGameDialog(AccessibilityEvent event) {
+        String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+        CharSequence pkg = event.getPackageName();
+        if (pkg == null) return;
+        boolean fromGame = pkg.toString().equals(game);
+        // lastForeground is still the app in front before this window (updated right after).
+        boolean overGame = fromGame || game.equals(lastForeground);
+        if (!overGame) return;
+        String text = windowText(event).trim();
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        String what;
+        if (fromGame && (lower.contains("had to stop") || lower.contains("reopen") || lower.contains("disconnect"))) {
+            what = "🔴 Ran Online disconnected: \"" + text + "\" Reopen it and log in again.";
+        } else if (lower.contains("keeps stopping") || lower.contains("has stopped") || lower.contains("isn't responding")) {
+            what = "🔴 Ran Online crashed: \"" + text + "\" Reopen it.";
+        } else {
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (now - lastGameAlertAt < GAME_ALERT_GAP_MS) return;
+        lastGameAlertAt = now;
+        Log.w(TAG, "game dialog (" + pkg + "): " + text + ", telling you on Telegram");
+        Telegram.send(this, what);
+    }
+
+    /** The text of the window an event came from: its own text plus the first nodes of the window. */
+    private String windowText(AccessibilityEvent event) {
+        StringBuilder sb = new StringBuilder();
+        for (CharSequence c : event.getText()) sb.append(c).append(' ');
+        try {
+            AccessibilityNodeInfo src = event.getSource();
+            if (src != null) collectText(src, sb, new int[]{60});
+        } catch (RuntimeException ignored) {
+            // the window went away while reading it
+        }
+        return sb.toString();
+    }
+
+    private static void collectText(AccessibilityNodeInfo node, StringBuilder sb, int[] budget) {
+        if (node == null || budget[0]-- <= 0) return;
+        if (node.getText() != null) sb.append(node.getText()).append(' ');
+        for (int i = 0; i < node.getChildCount(); i++) collectText(node.getChild(i), sb, budget);
+    }
+
+    /**
+     * The game closed, crashed or was switched away from while the auto clicker was running (not
+     * in ✋ manual): after a minute without it on screen, say so on Telegram. Android doesn't tell
+     * an app whether another app is closed or just in the background, so the message says both.
+     */
+    private void checkGameGone() {
+        long now = SystemClock.uptimeMillis();
+        if (!overlaysHidden || !running || manual) {
+            gameHiddenSince = 0;
+            gameGoneAlerted = false;
+            return;
+        }
+        if (gameHiddenSince == 0) gameHiddenSince = now;
+        if (gameGoneAlerted || now - gameHiddenSince < GAME_GONE_ALERT_MS) return;
+        gameGoneAlerted = true;
+        // A disconnect dialog was just reported: the game closing after it is no news.
+        if (now - lastGameAlertAt < GAME_ALERT_GAP_MS) return;
+        lastGameAlertAt = now;
+        Log.w(TAG, "game gone for a minute (" + lastForeground + " in front), telling you on Telegram");
+        Telegram.send(this, "🟠 Ran Online has been off the screen for 1 min (closed, crashed, or another app "
+                + "is in front: " + lastForeground + "). The auto clicker is paused.");
     }
 
     /**
@@ -2065,6 +2149,7 @@ public class ClickService extends AccessibilityService {
                 Log.i(TAG, show ? "game in front: showing the bar" : "hidden while " + front + " is in front");
             }
         }
+        checkGameGone();
         // Not every way back to the game sends an event (e.g. closing the notification shade).
         if (overlaysHidden) handler.postDelayed(visibilityCheck, VISIBILITY_RECHECK_MS);
     }
