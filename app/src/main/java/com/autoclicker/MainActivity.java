@@ -91,6 +91,39 @@ public class MainActivity extends Activity {
         });
         root.addView(save);
 
+        // Telegram alerts: the bot token and chat id stay on this tablet only.
+        // From a computer: adb shell am start -n com.autoclicker/.MainActivity --es tg_token TOKEN --es tg_chat ID
+        Intent start = getIntent();
+        if (start != null && start.hasExtra(Telegram.KEY_TOKEN) && start.hasExtra(Telegram.KEY_CHAT)) {
+            prefs.edit().putString(Telegram.KEY_TOKEN, start.getStringExtra(Telegram.KEY_TOKEN))
+                    .putString(Telegram.KEY_CHAT, start.getStringExtra(Telegram.KEY_CHAT)).apply();
+        }
+        TextView tgLabel = new TextView(this);
+        tgLabel.setTextSize(14);
+        tgLabel.setText("\nTelegram alerts (your own bot)\n"
+                + "When the game asks if you're there, the alert also goes to Telegram. "
+                + "Bot token from @BotFather, and your chat id.");
+        root.addView(tgLabel);
+        EditText tgToken = new EditText(this);
+        tgToken.setHint("Bot token");
+        tgToken.setSingleLine(true);
+        tgToken.setText(prefs.getString(Telegram.KEY_TOKEN, ""));
+        root.addView(tgToken, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        EditText tgChat = new EditText(this);
+        tgChat.setHint("Chat id");
+        tgChat.setSingleLine(true);
+        tgChat.setText(prefs.getString(Telegram.KEY_CHAT, ""));
+        root.addView(tgChat, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button tgSave = new Button(this);
+        tgSave.setText("Save and send a test");
+        tgSave.setOnClickListener(v -> {
+            prefs.edit().putString(Telegram.KEY_TOKEN, tgToken.getText().toString().trim())
+                    .putString(Telegram.KEY_CHAT, tgChat.getText().toString().trim()).apply();
+            Telegram.send(this, "✅ Auto Clicker: Telegram alerts are on.");
+            Toast.makeText(this, "Saved. A test message is on its way.", Toast.LENGTH_SHORT).show();
+        });
+        root.addView(tgSave);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
         setContentView(scroll);

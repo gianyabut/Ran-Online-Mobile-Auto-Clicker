@@ -1128,6 +1128,8 @@ public class ClickService extends AccessibilityService {
             Log.w(TAG, "the game is asking if you're there (Move button): alerting you");
             Alerts.question(this, gamePackage != null ? gamePackage : DEFAULT_GAME,
                     "The game is checking if you're there. Tap Move within ~25 s or it disconnects you.");
+            Telegram.send(this, "⚠️ Ran Online: the game is checking if you're there. "
+                    + "Tap Move within ~25 s or it disconnects you.");
         } else {
             Log.i(TAG, "presence check gone");
             Alerts.clearQuestion(this);
