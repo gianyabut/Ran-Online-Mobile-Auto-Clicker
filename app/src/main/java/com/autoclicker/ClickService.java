@@ -126,20 +126,6 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_WAVE_MS = 15_000;
     private int lastMobCount = -1;
     private boolean inWave;
-    // Splash dodge (see checkSplash).
-    private static final float SPLASH_DROP = 0.15f;
-    private static final float LOW_HP = 0.6f;
-    private static final int DODGE_GAP_MS = 15_000;
-    // Joystick push: 350 ms went too far, 150 ms still a bit far; 80 ms (the user's pick).
-    private static final int DODGE_MS = 80;
-    private static final int DODGE_SETTLE_MS = 300;
-    private static final float JOYSTICK_X = 250 / 2560f;
-    private static final float JOYSTICK_Y = 1258 / 1600f;
-    private static final float JOYSTICK_PUSH = 140 / 2560f;
-    private float lastHp = -1;
-    private long lastDodgeAt;
-    private boolean dodgeLeft = true;
-    private boolean dodgePending;
     private boolean presenceCheckShown;
     // After a wave, buffs at or below this are recast (the user's call). With a clear every ~2 min
     // (93-214 s on 2026-10-02) the ~4.5-5 min buffs sit at ~55-60% after one wave and well below
@@ -622,8 +608,6 @@ public class ClickService extends AccessibilityService {
         fullBuffOwed = false;
         backScans = 0;
         for (Target t : targets) t.owed = false;
-        lastHp = -1;
-        dodgePending = false;
         if (run) closeEditor();
 
         toggle.setText(run ? "■" : "▶");
@@ -859,7 +843,7 @@ public class ClickService extends AccessibilityService {
     }
 
     private void pumpQueue() {
-        if (!running || (pending.isEmpty() && !dodgePending)) return;
+        if (!running || pending.isEmpty()) return;
         // While the game isn't in front (or the keyboard is up) hold everything as it is,
         // so no tap is sent, counted, or mistaken for one the game ignored.
         if (!gameInFront()) {
@@ -875,14 +859,6 @@ public class ClickService extends AccessibilityService {
             schedulePump(userTouchAt + USER_TOUCH_PAUSE_MS - now);
             return;
         }
-        if (dodgePending) {
-            // One touch at a time: the step goes between taps, then the queue carries on.
-            dodgePending = false;
-            dodge(now);
-            if (!pending.isEmpty()) schedulePump(busyUntil - now);
-            return;
-        }
-        if (pending.isEmpty()) return;
         // Buffs that came due together must still go ~20 s apart: send back to waiting any buff
         // that isn't urgent while another buff was tapped too recently. Its tick re-queues it.
         for (int i = pending.size() - 1; i >= 0; i--) {
@@ -1160,38 +1136,6 @@ public class ClickService extends AccessibilityService {
         }
     }
 
-    /**
-     * Splash damage: when a hit takes 15%+ of your HP between two scans (~2 s), or HP falls below
-     * 60%, step 1-2 blocks to the side with a short joystick push, alternating left and right so
-     * you stay on your spot. At most once per DODGE_GAP_MS. Reacts to hits only, never to a timer.
-     */
-    private void checkSplash(float hp, long now) {
-        if (hp < 0) return;
-        boolean hit = lastHp >= 0 && (lastHp - hp >= SPLASH_DROP || (hp < LOW_HP && lastHp >= LOW_HP));
-        lastHp = hp;
-        if (!hit || now - lastDodgeAt < DODGE_GAP_MS) return;
-        Log.i(TAG, "hit (HP ~" + Math.round(hp * 100) + "%), stepping " + (dodgeLeft ? "left" : "right"));
-        dodgePending = true;
-        schedulePump(0);
-    }
-
-    private void dodge(long now) {
-        lastDodgeAt = now;
-        float cx = screenW * JOYSTICK_X;
-        float cy = screenH * JOYSTICK_Y;
-        float dx = screenW * JOYSTICK_PUSH * (dodgeLeft ? -1 : 1);
-        dodgeLeft = !dodgeLeft;
-        Path path = new Path();
-        path.moveTo(cx, cy);
-        path.lineTo(cx + dx, cy);
-        GestureDescription g = new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, DODGE_MS))
-                .build();
-        ownTapUntil = now + DODGE_MS + OWN_TAP_SLACK_MS;
-        busyUntil = now + DODGE_MS + DODGE_SETTLE_MS;
-        dispatchGesture(g, null, null);
-    }
-
     /** Buffs of a full buff are still waiting to go out. */
     private boolean fullBuffGoingOut() {
         for (Target t : pending) if (t.forced) return true;
@@ -1432,7 +1376,6 @@ public class ClickService extends AccessibilityService {
                 }
                 if (scanBuffs) targetSelected = MobCounter.targetSelected(shot, screenW, screenH);
                 updatePresenceCheck(Prompts.presenceCheck(shot, screenW, screenH));
-                checkSplash(MobCounter.selfHp(shot, screenW, screenH), now);
                 // The whole row vanishing at once means something covered it (a menu, an effect),
                 // not that every buff ran out in the same second. Only believe it after a while.
                 // Judge by our own learned buffs: if none of them can be seen at once, the row is
