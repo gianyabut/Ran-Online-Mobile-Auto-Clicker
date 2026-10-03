@@ -121,6 +121,17 @@ public class ClickService extends AccessibilityService {
     private static final String KEY_END_GAME = "end_game";
     private boolean endGame = true;
     private boolean manual;
+    // Booster mode (BOOST on the mode button): the character just stands there to be carried. No
+    // rings, heals, buffs, FB or chat-FB; the only two things it does are the left-right jiggle every
+    // 3 min (to keep it from going idle) and answering the math question. Disconnect/crash/presence
+    // alerts still run. Picked on the mode button, which cycles EG -> LL -> BOOST.
+    private static final String KEY_BOOSTER = "booster";
+    private boolean booster;
+    // In booster there's no tap loop to notice the keyboard, so a light tick watches for it; and the
+    // presence check (reused from cooldownCheck) runs slower since nothing else needs a screenshot.
+    private static final int KEYBOARD_WATCH_MS = 800;
+    private static final int BOOSTER_PRESENCE_MS = 3000;
+    private final Runnable keyboardWatchTick = this::keyboardWatchTick;
     private int refusedInARow;
     // The connected service, for the watchdog's health check (it runs in this same process).
     private static volatile ClickService instance;
@@ -244,6 +255,7 @@ public class ClickService extends AccessibilityService {
     private TextView manualButton;
     private TextView modeButton;
     private View editor;
+    private View modeChooser;
     private boolean running;
     private long busyUntil;
     private long lastAnyTapAt;
@@ -539,11 +551,11 @@ public class ClickService extends AccessibilityService {
         barParams = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
         barParams.x = dp(8);
         barParams.y = dp(200);
-        makeDraggable(toggle, bar, barParams, () -> setRunning(!running, "button"), null);
+        makeDraggable(toggle, bar, barParams, this::onToggle, null);
         makeDraggable(add, bar, barParams, this::addTargetFromBar, null);
         makeDraggable(fullBuffButton, bar, barParams, this::onFullBuffButton, null);
-        makeDraggable(manualButton, bar, barParams, () -> setManual(!manual, "button"), null);
-        makeDraggable(modeButton, bar, barParams, () -> setEndGame(!endGame, "button"), null);
+        makeDraggable(manualButton, bar, barParams, this::onManualButton, null);
+        makeDraggable(modeButton, bar, barParams, this::onModeButton, null);
         if (!safeAdd(bar, barParams)) {
             // Half connected (switched back on too soon after a crash): nothing will work until
             // the service is turned off and on again.
@@ -557,6 +569,7 @@ public class ClickService extends AccessibilityService {
         // this service. If you had pressed ▶, carry on where it left off.
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         setEndGame(prefs.getBoolean(KEY_END_GAME, true), "restored");
+        setBooster(prefs.getBoolean(KEY_BOOSTER, false), "restored");
         if (prefs.getBoolean(KEY_MANUAL, false)) {
             setManual(true, "restored");
         } else {
@@ -602,6 +615,7 @@ public class ClickService extends AccessibilityService {
         pending.clear();
         busyUntil = 0;
         closeEditor();
+        closeModeChooser();
         for (Target t : targets) safeRemove(t.root);
         targets.clear();
         if (bar != null) safeRemove(bar);
@@ -692,17 +706,18 @@ public class ClickService extends AccessibilityService {
             t.neededStreak = 0;
             t.forced = false;
             t.setTouchable(!run);
-            if (run) handler.postDelayed(t.tick, 300);
+            if (run && !booster) handler.postDelayed(t.tick, 300);   // no target taps in booster
         }
-        if (run) handler.post(this::cooldownCheck);
+        if (run) handler.post(this::cooldownCheck);                  // booster path does presence only
         if (run) handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
-        if (run) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);
+        if (run && !booster) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // no chat-FB in booster
+        if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
         // Clearing the handler above also dropped the "game back yet?" check.
         updateOverlayVisibility();
         // End Game starts the cycle like the support does by hand: buff the party first, but only
         // if no fight is on (decided on the first monster count, see updateWave). Skipped when
         // this start came from a full buff (FB or the EG switch while stopped).
-        startBuffPending = run && endGame && why.equals("button")
+        startBuffPending = run && endGame && !booster && why.equals("button")
                 && SystemClock.uptimeMillis() - lastFullBuffAt >= FULL_BUFF_COOLDOWN_MS;
     }
 
@@ -723,13 +738,14 @@ public class ClickService extends AccessibilityService {
         for (Target t : targets) {
             // Untouchable as well as hidden, so no invisible window swallows a tap meant for the game.
             t.setTouchable(!on);
-            t.root.setVisibility(on || overlaysHidden ? View.GONE : View.VISIBLE);
+            t.root.setVisibility(on || overlaysHidden || booster ? View.GONE : View.VISIBLE);
         }
         int others = on ? View.GONE : View.VISIBLE;
         toggle.setVisibility(others);
         add.setVisibility(others);
-        fullBuffButton.setVisibility(others);
-        modeButton.setVisibility(others);
+        // FB and EG/LL have no meaning in booster.
+        fullBuffButton.setVisibility(on || booster ? View.GONE : View.VISIBLE);
+        modeButton.setVisibility(on || booster ? View.GONE : View.VISIBLE);
         LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) manualButton.getLayoutParams();
         lp.topMargin = on ? 0 : dp(8);
         manualButton.setLayoutParams(lp);
@@ -739,7 +755,6 @@ public class ClickService extends AccessibilityService {
         manualButton.setBackground(circle(on ? Color.rgb(40, 150, 60) : Color.rgb(120, 70, 170)));
         if (changed && why.equals("button")) {
             shake(manualButton);
-            if (!on) setRunning(true, "button");
         }
     }
 
@@ -1236,8 +1251,7 @@ public class ClickService extends AccessibilityService {
         }
         inWave = false;
         clearScans = 0;
-        modeButton.setText(on ? "EG" : "LL");
-        modeButton.setBackground(circle(on ? Color.rgb(170, 40, 40) : Color.rgb(40, 130, 130)));
+        refreshModeButton();
         for (Target t : targets) t.refreshLabel();
         if (changed && why.equals("button")) {
             shake(modeButton);
@@ -1245,6 +1259,120 @@ public class ClickService extends AccessibilityService {
             // party first, then they go lure. (Starts tapping too, like the FB button.)
             if (on) fullBuff();
         }
+    }
+
+    /** The mode button's label/colour for the current mode (EG, LL, or BOOST). */
+    private void refreshModeButton() {
+        if (booster) {
+            modeButton.setText("BOOST");
+            modeButton.setTextSize(11);
+            modeButton.setBackground(circle(Color.rgb(150, 90, 30)));
+        } else {
+            modeButton.setText(endGame ? "EG" : "LL");
+            modeButton.setTextSize(15);
+            modeButton.setBackground(circle(endGame ? Color.rgb(170, 40, 40) : Color.rgb(40, 130, 130)));
+        }
+    }
+
+    /** Mode button (FS only): toggle End Game / Low Level. BOOST is chosen on the ▶/AUTO chooser. */
+    private void onModeButton() {
+        setEndGame(!endGame, "button");
+    }
+
+    /** ▶/AUTO: when stopped, ask which mode to start in; when running, stop. */
+    private void onToggle() {
+        if (running) setRunning(false, "button");
+        else showModeChooser();
+    }
+
+    /** ✋/AUTO: go manual, or (from manual) pick a mode to start in. */
+    private void onManualButton() {
+        if (manual) showModeChooser();          // startInMode turns manual off and starts
+        else setManual(true, "button");
+    }
+
+    /** A small overlay with FS and BOOST; the one tapped starts the clicker in that mode. */
+    private void showModeChooser() {
+        closeModeChooser();
+        closeEditor();
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setGravity(Gravity.CENTER);
+        panel.setPadding(dp(22), dp(18), dp(22), dp(18));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.rgb(28, 28, 28));
+        bg.setCornerRadius(dp(18));
+        bg.setStroke(dp(1), Color.rgb(90, 90, 90));
+        panel.setBackground(bg);
+
+        TextView title = new TextView(this);
+        title.setText("Start as");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(16);
+        title.setGravity(Gravity.CENTER);
+        panel.addView(title);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        TextView fs = pillButton("FS", Color.rgb(170, 40, 40), () -> startInMode(false));
+        TextView boost = pillButton("BOOST", Color.rgb(150, 90, 30), () -> startInMode(true));
+        for (TextView b : new TextView[] {fs, boost}) {
+            b.setTextSize(18);
+            b.setTypeface(Typeface.DEFAULT_BOLD);
+            b.setPadding(dp(30), dp(16), dp(30), dp(16));
+        }
+        LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        bl.setMargins(dp(10), dp(14), dp(10), 0);
+        row.addView(fs, bl);
+        row.addView(boost, bl);
+        panel.addView(row);
+
+        WindowManager.LayoutParams p = overlayParams(
+                WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
+        p.gravity = Gravity.CENTER;
+        p.flags |= WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
+        panel.setOnTouchListener((v, e) -> {
+            if (e.getActionMasked() == MotionEvent.ACTION_OUTSIDE) closeModeChooser();
+            return false;
+        });
+        if (safeAdd(panel, p)) modeChooser = panel;
+    }
+
+    private void startInMode(boolean boostMode) {
+        closeModeChooser();
+        setBooster(boostMode, "button");            // sets ring/FB/mode-button visibility for the mode
+        if (manual) setManual(false, "chooser");
+        setRunning(true, "button");
+    }
+
+    private void closeModeChooser() {
+        if (modeChooser != null) {
+            safeRemove(modeChooser);
+            modeChooser = null;
+        }
+    }
+
+    /**
+     * Booster mode on/off. Hides the rings and FB (no taps, no buffs), updates the button, and if
+     * it's running re-starts the loop so the right ticks are scheduled for the new mode.
+     */
+    private void setBooster(boolean on, String why) {
+        boolean changed = booster != on;
+        booster = on;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_BOOSTER, on).apply();
+        if (changed || !why.equals("restored")) {
+            Log.i(TAG, "booster mode " + (on ? "on: jiggle + math only, no rings/buffs" : "off") + " (" + why + ")");
+        }
+        refreshModeButton();
+        if (!manual) {
+            fullBuffButton.setVisibility(on ? View.GONE : View.VISIBLE);
+            modeButton.setVisibility(on ? View.GONE : View.VISIBLE);
+        }
+        for (Target t : targets) {
+            t.root.setVisibility(on || manual || overlaysHidden ? View.GONE : View.VISIBLE);
+        }
+        if (changed && running) setRunning(true, "mode");   // reschedule ticks for the new mode
     }
 
     private boolean buffNeeded(Target t) {
@@ -1288,9 +1416,47 @@ public class ClickService extends AccessibilityService {
     }
 
     private void testMoveTick() {
+        handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
+        if (!running) return;
+        if (booster) {
+            // No heals to coordinate with: jiggle straight away, if the game's in front and the
+            // keyboard isn't up (don't jiggle into the keyboard or another app).
+            if (boosterCanAct()) testMove(SystemClock.uptimeMillis());
+            return;
+        }
         movePending = true;
         schedulePump(0);
-        handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
+    }
+
+    /** In booster: the game is in front, in landscape, and no keyboard is up. */
+    private boolean boosterCanAct() {
+        if (keyboardShowing()) return false;
+        DisplayMetrics real = new DisplayMetrics();
+        wm.getDefaultDisplay().getRealMetrics(real);
+        if (real.widthPixels < real.heightPixels) return false;   // portrait (e.g. the install screen)
+        if (gamePackage == null) return true;
+        String front = foregroundPackage();
+        return front == null || gamePackage.equals(front);
+    }
+
+    /**
+     * Booster only: with no tap loop to notice the keyboard, watch for it here. When the game opens
+     * it by itself (the math question), answer it; clear state when it closes.
+     */
+    private void keyboardWatchTick() {
+        if (!running || !booster) return;
+        handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);
+        boolean kb = keyboardShowing();
+        if (kb && !pausedForKeyboard) {
+            pausedForKeyboard = true;
+            Log.i(TAG, "booster: keyboard opened");
+            keyboardOpened();
+        } else if (!kb && pausedForKeyboard) {
+            pausedForKeyboard = false;
+            if (keyboardAlerted) Alerts.clearQuestion(this);
+            keyboardAlerted = false;
+            mathBusy = false;
+        }
     }
 
     /** TEST: a tiny left-then-right jiggle, so the character ends where it started. */
@@ -1469,11 +1635,12 @@ public class ClickService extends AccessibilityService {
      */
     private void keyboardOpened() {
         if (!running || manual) return;
-        long now = SystemClock.uptimeMillis();
-        if (now - userTouchAt < KEYBOARD_TOUCH_MS) return;
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         if (!game.equals(foregroundPackage())) return;
-        Log.w(TAG, "the game opened the keyboard by itself (math question?)");
+        // Always read it: a math question must be answered even while you're touching the screen
+        // (e.g. chatting in town). Whether it's really a question is decided by the OCR, not by a
+        // "did you touch recently" guess — that guard used to block real questions in booster.
+        Log.i(TAG, "keyboard up over the game: checking for a math question");
         answerMathQuestion(game);
     }
 
@@ -1513,6 +1680,14 @@ public class ClickService extends AccessibilityService {
             }
             MathQuestion.Plan plan = MathQuestion.solve(lines, words, keyboardTop);
             if (plan == null) {
+                // No question found. If you opened the keyboard yourself (touched recently), it's
+                // your chat, not a math question: stop quietly, no retry, no alert. Otherwise the
+                // game opened it, so a notification may be hiding the question - retry, then alert.
+                if (SystemClock.uptimeMillis() - userTouchAt < KEYBOARD_TOUCH_MS) {
+                    mathBusy = false;
+                    Log.i(TAG, "keyboard up, no question, you touched recently - leaving it (your chat)");
+                    return;
+                }
                 if (attempt < MATH_MAX_ATTEMPTS) {
                     Log.i(TAG, "math read " + attempt + " failed (" + describeWords(words) + "), retrying");
                     tryReadMath(game, keyboardTop, attempt + 1);
@@ -1550,9 +1725,9 @@ public class ClickService extends AccessibilityService {
         for (Target t : targets) if (t.root != null) t.root.setVisibility(View.GONE);
     }
 
-    /** Bring the rings back after answering, unless we're in manual or off the game. */
+    /** Bring the rings back after answering, unless we're in manual, booster, or off the game. */
     private void showRingsAfterMath() {
-        if (manual || overlaysHidden) return;
+        if (manual || booster || overlaysHidden) return;
         for (Target t : targets) if (t.root != null) t.root.setVisibility(View.VISIBLE);
     }
 
@@ -1640,6 +1815,19 @@ public class ClickService extends AccessibilityService {
     /** Repeats while running: one screenshot updates the ready state of every watching target. */
     private void cooldownCheck() {
         if (!running) return;
+        if (booster) {
+            // Booster does no buff/cooldown work; the only screenshot it needs is the presence check
+            // (the "are you there? / Move" panel), and it can be slow.
+            if (canReadScreen()) {
+                captureScreen(shot -> {
+                    if (!running || !booster) return;
+                    if (keyboardShowing() || (gamePackage != null && !gamePackage.equals(foregroundPackage()))) return;
+                    updatePresenceCheck(Prompts.presenceCheck(shot, screenW, screenH));
+                });
+            }
+            handler.postDelayed(this::cooldownCheck, BOOSTER_PRESENCE_MS);
+            return;
+        }
         boolean anyCooldown = false;
         boolean anySmart = false;
         for (Target t : targets) {
@@ -2463,7 +2651,7 @@ public class ClickService extends AccessibilityService {
                 overlaysHidden = !show;
                 if (!show) closeEditor();
                 bar.setVisibility(show ? View.VISIBLE : View.GONE);
-                for (Target t : targets) t.root.setVisibility(show && !manual ? View.VISIBLE : View.GONE);
+                for (Target t : targets) t.root.setVisibility(show && !manual && !booster ? View.VISIBLE : View.GONE);
                 Log.i(TAG, show ? "game in front: showing the bar" : "hidden while " + front + " is in front");
             }
         }
