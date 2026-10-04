@@ -207,7 +207,7 @@ public class ClickService extends AccessibilityService {
     // dropped once the target reads below LURE_HIT_HP or after LURE_PULL_MAX_MS. Luring starts
     // LURE_START_IDLE_MS after the last fight and gives up after LURE_MAX_MS.
     private static final int LURE_COUNT = 3;
-    private static final float LURE_NEAR_W = 0.15f, LURE_FAR_W = 0.6f, LURE_BODY_BELOW = 2f, LURE_HIT_HP = 0.97f;
+    private static final float LURE_NEAR_W = 0.25f, LURE_FAR_W = 0.6f, LURE_BODY_BELOW = 2f, LURE_HIT_HP = 0.97f;
     private static final float FIST_X = 2362 / 2560f, FIST_Y = 1386 / 1600f;
     private static final int LURE_PULL_GAP_MS = 2500, LURE_SELECT_SETTLE_MS = 300, LURE_PULL_MAX_MS = 4000;
     private static final int LURE_START_IDLE_MS = 3000, LURE_MAX_MS = 30_000;   // incl. walking to find them
@@ -218,6 +218,7 @@ public class ClickService extends AccessibilityService {
     private final java.util.Set<String> knownMonsters = new java.util.HashSet<>();
     private static final String KEY_MONSTERS = "farm_monsters";
     private long lureStartedAt, lastPullAt, pullingSince;
+    private int lureHits;   // pulls that landed this round
     private static final String[] FARM_SKIP_NAMES = {"caloyski"};
     private int refusedInARow;
     // The connected service, for the watchdog's health check (it runs in this same process).
@@ -859,6 +860,7 @@ public class ClickService extends AccessibilityService {
         if (run) farmMobsSeenAt = farmProgressAt = SystemClock.uptimeMillis();   // a moment before walking
         luring = run && lureMode;                                  // LURE: start by gathering a group
         lureStartedAt = SystemClock.uptimeMillis();
+        lureHits = 0;
         pullingSince = 0;
         lootStartedAt = 0;                                          // its tap tick was cleared above
         startBuffPending = run && eg() && why.equals("button")
@@ -1454,6 +1456,7 @@ public class ClickService extends AccessibilityService {
         Log.i(TAG, "farmer: " + (on ? "LURE mode, gathering " + LURE_COUNT + " before each fight" : "KILL mode"));
         luring = on && running;
         lureStartedAt = SystemClock.uptimeMillis();
+        lureHits = 0;
         pullingSince = 0;
         if (!on) busyUntil = SystemClock.uptimeMillis();
         refreshModeButton();
@@ -1758,6 +1761,7 @@ public class ClickService extends AccessibilityService {
         if (lureMode && !luring && !target && lootStartedAt == 0 && now - farmMobsSeenAt >= LURE_START_IDLE_MS) {
             luring = true;
             lureStartedAt = now;
+            lureHits = 0;
             Log.i(TAG, "farmer: fight over, luring the next " + LURE_COUNT);
         }
         // A kill (the bar went away): hold attacks a moment and look again for the loot hand.
@@ -1873,6 +1877,10 @@ public class ClickService extends AccessibilityService {
                 pullDist = d;
             }
         }
+        // A monster we hit chases us: count landed pulls too. Followers bunch up around the
+        // character, where their tags overlap ours and the pet's and read as garbage ("Skating
+        // BY iger"), so a round of 3 good pulls once ended "lured 0 (time up)" (14:47).
+        followers = Math.max(followers, lureHits);
         boolean timeUp = now - lureStartedAt >= LURE_MAX_MS;
         if (followers >= LURE_COUNT || timeUp) {
             luring = false;
@@ -1916,7 +1924,8 @@ public class ClickService extends AccessibilityService {
         if (!hit && now - pullingSince < LURE_PULL_MAX_MS) return;
         pullingSince = 0;
         if (targetHp >= 0) tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
-        Log.i(TAG, "farmer: pull " + (hit ? "hit it" : "timed out") + ", dropped the target");
+        if (hit) lureHits++;
+        Log.i(TAG, "farmer: pull " + (hit ? "hit it (" + lureHits + " pulled)" : "timed out") + ", dropped the target");
     }
 
     /** Drop the selected target (its bar's ✕) and walk a step, so the game picks another monster. */
