@@ -2431,7 +2431,9 @@ public class ClickService extends AccessibilityService {
         // Each screenshot is a full-screen copy (~16 MB). Buff timers change slowly, so smart
         // buffs only need one a second; the fast rate is for rings watching a cooldown shade.
         handler.postDelayed(this::cooldownCheck,
-                anyCooldown ? SCREENSHOT_EVERY_MS : farmer ? farmScanMs() : BUFF_SCAN_EVERY_MS);
+                // Farmer never goes faster, even with cooldown rings: screenshots every 0.35 s would
+                // risk the memory freeze Android had at 11:43 and 12:37.
+                farmer ? farmScanMs() : anyCooldown ? SCREENSHOT_EVERY_MS : BUFF_SCAN_EVERY_MS);
     }
 
     /** For the log: each icon as x,y size fill%. */
