@@ -220,7 +220,7 @@ public class ClickService extends AccessibilityService {
     // Buffs wait while fighting: a target bar on the last scan, a monster name close by in the
     // last NEAR_TAG_FIGHT_MS, a pickup or the post-kill pause. After FARM_BUFF_HOLD_MAX_MS of
     // fighting in a row they get a FARM_BUFF_WINDOW_MS window, so stragglers can't starve them.
-    private static final int NEAR_TAG_FIGHT_MS = 5000, FARM_BUFF_HOLD_MAX_MS = 45_000, FARM_BUFF_WINDOW_MS = 4000;
+    private static final int NEAR_TAG_FIGHT_MS = 5000, FARM_BUFF_HOLD_MAX_MS = 45_000, FARM_BUFF_WINDOW_MS = 12_000;
     private long buffsHeldSince, buffWindowUntil, nearTagAt;
     // When a fight ends: a full buff - every buff at or below FARM_TOPUP_AT (or gone) back to back,
     // so all of them start the next fight well above the 20% recast line (the user, 2026-10-05:
@@ -2192,6 +2192,9 @@ public class ClickService extends AccessibilityService {
         buffsHeldSince = 0;
         buffWindowUntil = now + FARM_BUFF_WINDOW_MS;
         Log.i(TAG, "farmer: fighting for " + FARM_BUFF_HOLD_MAX_MS / 1000 + " s straight, letting buffs go");
+        // Nonstop fights (a party on a busy map) never "end", so the window tops up every low
+        // buff too - otherwise only the ones already at 20% went, one per window (00:06).
+        handler.post(this::farmFullBuff);
         return false;
     }
 
