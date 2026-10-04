@@ -174,6 +174,14 @@ public class ClickService extends AccessibilityService {
     // A skill still animating ignores other input; give it this long after the last attack tap.
     private static final int LOOT_AFTER_SKILL_MS = 700;
     private long lootStartedAt, lootIgnoreUntil;
+    // Taps allowed per screenshot that shows the hand (0.7 s apart, inside the 2 s scan).
+    private static final int LOOT_TAPS_PER_LOOK = 2;
+    private int lootTapsLeft;
+    // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
+    // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
+    private static final float KILL_SOON_HP = 0.4f;
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 1300;
+    private long postKillUntil;
     private final Runnable lootTapTick = this::lootTapTick;
     // Text reading (the anti-bot question) on every 2nd fight-check screenshot, from the play area.
     private static final int FARM_OCR_MS = 4000;
@@ -1657,6 +1665,13 @@ public class ClickService extends AccessibilityService {
         if (mobs != lastMobCount) Log.d(TAG, "monsters: ~" + mobs);
         lastMobCount = mobs;
         boolean target = targetHp >= 0;
+        // A kill (the bar went away): hold attacks a moment and look again for the loot hand.
+        // Attacking on straight away auto-targeted the next monster and ran off from the drop,
+        // and the hand then walked the character all the way back (the user, 12:55).
+        if (!target && farmTargetHp >= 0 && lootStartedAt == 0) {
+            postKillUntil = now + POST_KILL_HOLD_MS;
+            busyUntil = Math.max(busyUntil, postKillUntil);
+        }
         // Stuck: the game keeps going for a monster it can't reach (behind a wall: "no clear line
         // ... walking in", 2026-10-04 11:29), so its HP never drops. Any HP change, a new target or
         // no target at all counts as progress.
@@ -1772,7 +1787,17 @@ public class ClickService extends AccessibilityService {
     private void farmLootCheck(boolean handShowing, long now) {
         if (lootStartedAt > 0) {                            // a pickup is under way
             boolean gaveUp = now - lootStartedAt >= LOOT_MAX_PAUSE_MS;
-            if (handShowing && !gaveUp) return;
+            if (handShowing && !gaveUp) {
+                // Still there: two more taps, then wait for the next screenshot to say it's still
+                // showing. Tapping on blind hit the ground once it was gone ("empty-ground tap ->
+                // target cleared", five times in a minute, 12:41).
+                if (lootTapsLeft <= 0) {
+                    lootTapsLeft = LOOT_TAPS_PER_LOOK;
+                    handler.removeCallbacks(lootTapTick);
+                    handler.post(lootTapTick);
+                }
+                return;
+            }
             Log.i(TAG, "farmer: " + (handShowing ? "couldn't pick it up in " + LOOT_MAX_PAUSE_MS / 1000
                     + " s, leaving it" : "picked up") + ", attacking again");
             if (handShowing) lootIgnoreUntil = now + LOOT_IGNORE_MS;
@@ -1788,17 +1813,23 @@ public class ClickService extends AccessibilityService {
         busyUntil = farmHoldUntil = now + LOOT_MAX_PAUSE_MS;    // no attacks, no walking meanwhile
         long wait = Math.max(0, lastAnyTapAt + TAP_MS + LOOT_AFTER_SKILL_MS - now);
         Log.i(TAG, "farmer: item nearby, pausing attacks to loot it");
+        lootTapsLeft = LOOT_TAPS_PER_LOOK;
         handler.removeCallbacks(lootTapTick);
         handler.postDelayed(lootTapTick, wait);
     }
 
+    /** Every 2 s; every second near a kill (low target HP, or just after one) to catch the loot. */
     private int farmScanMs() {
-        return lootStartedAt > 0 ? LOOT_SCAN_MS : FARM_SCAN_MS;
+        if (lootStartedAt > 0) return LOOT_SCAN_MS;
+        long now = SystemClock.uptimeMillis();
+        boolean nearKill = now < postKillUntil || (farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP);
+        return nearKill ? KILL_SCAN_MS : FARM_SCAN_MS;
     }
 
     /** Taps the hand, and again every LOOT_RETAP_MS while the pickup is under way. */
     private void lootTapTick() {
-        if (!running || !farmer || lootStartedAt == 0) return;
+        if (!running || !farmer || lootStartedAt == 0 || lootTapsLeft <= 0) return;
+        lootTapsLeft--;
         tapAt(screenW * LOOT_HAND_X, screenH * LOOT_HAND_Y, "loot hand");
         handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
     }
