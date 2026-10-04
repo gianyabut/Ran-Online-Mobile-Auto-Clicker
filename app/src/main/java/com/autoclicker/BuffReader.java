@@ -63,7 +63,12 @@ final class BuffReader {
                 run = 0;
                 // A top edge of the right length, with matching left and right edges below it.
                 if (len < MIN_ICON || len > MAX_ICON || y + len >= h || left + len + len / 3 >= w) continue;
-                if (!isEdge(w, left, y, len) || !isEdge(w, left + len - 1, y, len)) continue;
+                // Both sides framed, or one clean side with the other partly there: a bright icon can
+                // tint its own frame (the Brawler's golden buff turned the right edge yellow, 156,134,90,
+                // so only 15 of 57 px read grey and the whole row was lost, 2026-10-04).
+                int leftEdge = edgeCount(w, left, y, len), rightEdge = edgeCount(w, left + len - 1, y, len);
+                int full = len * 65 / 100, part = len * 20 / 100;
+                if (!(leftEdge >= full && rightEdge >= part) && !(rightEdge >= full && leftEdge >= part)) continue;
                 if (overlaps(icons, left, y)) continue;
                 Icon icon = new Icon();
                 icon.x = left;
@@ -212,17 +217,17 @@ final class BuffReader {
     }
 
     /**
-     * A vertical frame line at column x running down from y for most of len pixels.
-     * Player names floating over the row can hide part of an edge, so 65% is enough.
+     * How many of the len pixels down from y at column x are frame-grey (a vertical frame line).
+     * Player names floating over the row can hide part of an edge, so 65% counts as framed.
      */
-    private static boolean isEdge(int w, int x, int y, int len) {
+    private static int edgeCount(int w, int x, int y, int len) {
         int count = 0;
         for (int yy = y; yy < y + len; yy++) {
             if (isGrey(px[yy * w + x]) || isGrey(px[yy * w + Math.max(0, x - 1)]) || isGrey(px[yy * w + Math.min(w - 1, x + 1)])) {
                 count++;
             }
         }
-        return count >= len * 65 / 100;
+        return count;
     }
 
     private static boolean overlaps(List<Icon> icons, int x, int y) {
