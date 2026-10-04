@@ -215,7 +215,7 @@ public class ClickService extends AccessibilityService {
     // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
     // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
     private static final float KILL_SOON_HP = 0.4f;
-    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 1300;
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 2500;
     private long postKillUntil;
     // Buffs wait while fighting: a target bar on the last scan, a monster name close by in the
     // last NEAR_TAG_FIGHT_MS, a pickup or the post-kill pause. After FARM_BUFF_HOLD_MAX_MS of
@@ -1256,7 +1256,9 @@ public class ClickService extends AccessibilityService {
      * tapping a buff just before the heal is due would push the heal back further.
      */
     private long buffWait(Target t, long now) {
-        if (t.forced) {
+        // Farmer full buffs use Farmer's own spacing below: forced casts 1.5 s apart had Power Up
+        // swallowed twice right after Blood Lust (00:14:26).
+        if (t.forced && !farmer) {
             // Full buff: go as soon as the previous skill's lock is over (busyUntil). Right after
             // the heal the lock can last ~4 s in a fight, so wait at least that long then.
             boolean afterHeal = lastPriorityTapAt > 0 && lastPriorityTapAt == lastAnyTapAt;
@@ -2416,6 +2418,9 @@ public class ClickService extends AccessibilityService {
             return;
         }
         if (!handShowing || now < lootIgnoreUntil || questionSeen || !canFarmMove(now)) return;
+        // A new fight already started (its target bar is up): finish it first, then loot. Going for
+        // the hand mid-fight ran back to the item and out to the monster again (the user, 00:19).
+        if (farmTargetHp >= 0) return;
         lootStartedAt = now;
         busyUntil = farmHoldUntil = now + LOOT_MAX_PAUSE_MS;    // no attacks, no walking meanwhile
         long wait = Math.max(0, lastAnyTapAt + TAP_MS + LOOT_AFTER_SKILL_MS - now);
