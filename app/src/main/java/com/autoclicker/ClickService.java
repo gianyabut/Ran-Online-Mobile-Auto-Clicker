@@ -228,8 +228,28 @@ public class ClickService extends AccessibilityService {
     // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
     // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
     private static final float KILL_SOON_HP = 0.4f;
-    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 5500;
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 3000;
     private long postKillUntil;
+    // The drop lands where the monster died, sometimes just outside the hand's reach: the hand only
+    // showed ~2.5 s after attacks resumed, as the character ran past it (07:01-07:07). So the
+    // target's name tag is read near the end of a fight, and with no hand LOOT_STEP_AFTER_MS after
+    // the kill the character steps to that spot first.
+    private float killSpotX, killSpotY;
+    private long killSpotAt, killAt;
+    private boolean killStepDone;
+    private static final int LOOT_STEP_AFTER_MS = 1500, KILL_SPOT_FRESH_MS = 5000;
+    // Loot report: the chat box prints "Pick up item 'X'." and "Gained 'N' gold."; read it from the
+    // fight screenshot and send a Telegram summary every LOOT_REPORT_MS (the user, 2026-10-05).
+    private static final float LOOT_CHAT_L = 0.255f, LOOT_CHAT_T = 0.745f, LOOT_CHAT_W = 0.38f, LOOT_CHAT_H = 0.225f;
+    private static final int LOOT_REPORT_MS = 5 * 60_000;
+    private final java.util.LinkedHashMap<String, Integer> lootItems = new java.util.LinkedHashMap<>();
+    private long lootGold, lootReportFrom;
+    private List<String> lastChatLines = new ArrayList<>();
+    private final Runnable lootReportTick = this::lootReportTick;
+    private static final java.util.regex.Pattern PICKUP_LINE =
+            java.util.regex.Pattern.compile("pick\\s*up\\s*item\\s*\\W*(.+?)\\W*$", java.util.regex.Pattern.CASE_INSENSITIVE);
+    private static final java.util.regex.Pattern GOLD_LINE =
+            java.util.regex.Pattern.compile("gained\\W*([\\d,.]+)\\W*gold", java.util.regex.Pattern.CASE_INSENSITIVE);
     // Buffs wait while fighting: a target bar on the last scan, a monster name close by in the
     // last NEAR_TAG_FIGHT_MS, a pickup or the post-kill pause. After FARM_BUFF_HOLD_MAX_MS of
     // fighting in a row they get a FARM_BUFF_WINDOW_MS window, so stragglers can't starve them.
@@ -935,6 +955,13 @@ public class ClickService extends AccessibilityService {
         if (run) handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
         if (run && fsMode()) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // chat-FB is FS only
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
+        if (run && farmer) {
+            lootGold = 0;
+            lootItems.clear();
+            lastChatLines = new ArrayList<>();
+            lootReportFrom = System.currentTimeMillis();
+            handler.postDelayed(lootReportTick, LOOT_REPORT_MS);
+        }
         if (run && follow) {
             leaderKey = null;
             leaderSeenAt = SystemClock.uptimeMillis();
@@ -1926,6 +1953,26 @@ public class ClickService extends AccessibilityService {
         if (!target && farmTargetHp >= 0 && lootStartedAt == 0 && now >= lootIgnoreUntil) {
             postKillUntil = now + POST_KILL_HOLD_MS;
             busyUntil = Math.max(busyUntil, postKillUntil);
+            killAt = now;
+            killStepDone = false;
+        }
+        // No hand yet: step to where the monster died, so the drop comes into reach.
+        if (!target && now < postKillUntil && lootStartedAt == 0 && !killStepDone
+                && now - killAt >= LOOT_STEP_AFTER_MS && now - killSpotAt < KILL_SPOT_FRESH_MS && canFarmMove(now)) {
+            killStepDone = true;
+            float dx = killSpotX - screenW * 0.5f, dy = killSpotY - screenH * 0.53f;
+            float d = (float) Math.hypot(dx, dy);
+            if (d > screenW * 0.04f) {
+                int ms = (int) Math.max(300, Math.min(1200, d * 1000f / LURE_RUN_PX_PER_S));
+                float push = screenW * FARM_PUSH;
+                long window = FARM_PUSH_MS + ms;
+                ownTapUntil = now + window + OWN_TAP_SLACK_MS;
+                busyUntil = farmHoldUntil = now + window + FARM_WALK_SETTLE_MS;
+                postKillUntil = Math.max(postKillUntil, now + window + 1600);
+                busyUntil = Math.max(busyUntil, postKillUntil);
+                Log.i(TAG, "farmer: no loot hand yet, stepping " + ms + " ms to where the monster died");
+                joystickHold(dx / d * push, dy / d * push, ms);
+            }
         }
         // The game locked the next monster by itself during the pause: the character is off to it
         // already, so waiting for the drop gains nothing.
@@ -2253,6 +2300,121 @@ public class ClickService extends AccessibilityService {
         return false;
     }
 
+    /** Where the selected target stands: its name tag (matching the target bar title), body below. */
+    private void noteKillSpot(List<MathQuestion.Line> lines) {
+        if (farmTargetHp < 0) return;
+        String key = null;
+        for (MathQuestion.Line l : lines) {
+            float mid = l.box.exactCenterX();
+            if (l.box.bottom <= screenH * TARGET_NAME_MAX_Y && mid > screenW * 0.3f && mid < screenW * 0.7f) {
+                key = monsterKey(l.text);
+                break;
+            }
+        }
+        if (key == null || key.length() < 4) return;
+        Rect best = null;
+        float bestD = screenW * 0.4f;
+        for (MathQuestion.Line l : lines) {
+            if (l.box.bottom <= screenH * HUD_TOP_H) continue;
+            String k = monsterKey(l.text);
+            if (k.length() < 4 || !(k.equals(key) || k.contains(key) || key.contains(k) && k.length() >= 6)) continue;
+            float d = fromCharacter(l.box);
+            if (d < bestD) {
+                bestD = d;
+                best = l.box;
+            }
+        }
+        if (best == null) return;
+        killSpotX = best.exactCenterX();
+        killSpotY = best.bottom + best.height() * LURE_BODY_BELOW;
+        killSpotAt = SystemClock.uptimeMillis();
+    }
+
+    /** Reads the chat box for pickups and gold; each line counted once as the chat scrolls. */
+    private void farmChatRead(Bitmap shot) {
+        int x = Math.round(screenW * LOOT_CHAT_L), y = Math.round(screenH * LOOT_CHAT_T);
+        int w = Math.min(Math.round(screenW * LOOT_CHAT_W), shot.getWidth() - x);
+        int h = Math.min(Math.round(screenH * LOOT_CHAT_H), shot.getHeight() - y);
+        if (w <= 0 || h <= 0) return;
+        Bitmap crop;
+        try {
+            crop = Bitmap.createBitmap(shot, x, y, w, h);
+        } catch (RuntimeException | OutOfMemoryError e) {
+            return;
+        }
+        Ocr.read(crop, (lines, words) -> {
+            List<MathQuestion.Line> sorted = new ArrayList<>(lines);
+            sorted.sort((a, b) -> Integer.compare(a.box.top, b.box.top));
+            List<String> cur = new ArrayList<>();
+            for (MathQuestion.Line l : sorted) {
+                String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
+                if (k.length() >= 4) cur.add(l.text.trim());
+            }
+            if (cur.isEmpty()) return;                       // chat hidden or empty
+            // New lines are the ones after the longest overlap with the last read (oldest scroll off the top).
+            int overlap = 0;
+            for (int k = Math.min(lastChatLines.size(), cur.size()); k > 0; k--) {
+                boolean same = true;
+                for (int i = 0; i < k && same; i++) {
+                    same = chatKey(lastChatLines.get(lastChatLines.size() - k + i)).equals(chatKey(cur.get(i)));
+                }
+                if (same) {
+                    overlap = k;
+                    break;
+                }
+            }
+            boolean firstRead = lastChatLines.isEmpty();
+            lastChatLines = cur;
+            if (firstRead) return;                           // what's already there isn't ours to count
+            for (int i = overlap; i < cur.size(); i++) countLootLine(cur.get(i));
+        });
+    }
+
+    private static String chatKey(String line) {
+        return line.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
+    }
+
+    private void countLootLine(String line) {
+        java.util.regex.Matcher g = GOLD_LINE.matcher(line);
+        if (g.find()) {
+            try {
+                long n = Long.parseLong(g.group(1).replaceAll("[^0-9]", ""));
+                if (n > 0 && n < 10_000_000) lootGold += n;
+                Log.i(TAG, "loot: +" + n + " gold");
+            } catch (NumberFormatException ignored) {
+            }
+            return;
+        }
+        java.util.regex.Matcher m = PICKUP_LINE.matcher(line);
+        if (!m.find()) return;
+        String item = m.group(1).trim();
+        if (item.length() < 3) return;
+        lootItems.merge(item, 1, Integer::sum);
+        Log.i(TAG, "loot: " + item);
+    }
+
+    /** Every LOOT_REPORT_MS while farming: what was picked up, to Telegram. */
+    private void lootReportTick() {
+        handler.postDelayed(lootReportTick, LOOT_REPORT_MS);
+        if (!running || !farmer) return;
+        long now = System.currentTimeMillis();
+        if (lootGold == 0 && lootItems.isEmpty()) {
+            lootReportFrom = now;
+            return;
+        }
+        java.text.SimpleDateFormat hm = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.ROOT);
+        StringBuilder sb = new StringBuilder("\uD83C\uDF92 Loot " + hm.format(new java.util.Date(lootReportFrom))
+                + "-" + hm.format(new java.util.Date(now)) + "\nGold: " + String.format(java.util.Locale.ROOT, "%,d", lootGold));
+        for (java.util.Map.Entry<String, Integer> e : lootItems.entrySet()) {
+            sb.append("\n").append(e.getValue()).append(" x ").append(e.getKey());
+        }
+        Telegram.send(this, sb.toString());
+        Log.i(TAG, "loot report sent: " + sb.toString().replace('\n', '|'));
+        lootGold = 0;
+        lootItems.clear();
+        lootReportFrom = now;
+    }
+
     private boolean canFarmMove(long now) {
         // Not mid-walk/loot, and not during an attack tap (a new gesture would cancel it). The
         // attack lock (busyUntil) is ignored: attacks come so often it would never let go.
@@ -2412,6 +2574,7 @@ public class ClickService extends AccessibilityService {
                 checkForQuestion(game, lines);
                 lastOcrResultAt = SystemClock.uptimeMillis();
                 checkTargetName(lines);
+                noteKillSpot(lines);
                 long seen = SystemClock.uptimeMillis();
                 List<Rect> tags = monsterTags(lines, crop, x, y);
                 noteMonstersSeen(tags, seen);
@@ -2468,9 +2631,8 @@ public class ClickService extends AccessibilityService {
             return;
         }
         if (!handShowing || now < lootIgnoreUntil || questionSeen || !canFarmMove(now)) return;
-        // A new fight already started (its target bar is up): finish it first, then loot. Going for
-        // the hand mid-fight ran back to the item and out to the monster again (the user, 00:19).
-        if (farmTargetHp >= 0) return;
+        // The hand always wins, fight or not: no skill and no walking while it shows (the user's rule,
+        // 12:15 and again 2026-10-05 07:10 - holding it back for the fight left drops behind).
         lootStartedAt = now;
         busyUntil = farmHoldUntil = now + LOOT_MAX_PAUSE_MS;    // no attacks, no walking meanwhile
         long wait = Math.max(0, lastAnyTapAt + TAP_MS + LOOT_AFTER_SKILL_MS - now);
@@ -3114,7 +3276,9 @@ public class ClickService extends AccessibilityService {
                     farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
                     farmCheck(MobCounter.count(shot, screenW, screenH),
                             MobCounter.targetHp(shot, screenW, screenH), now);
-                    if (luring || now - lastFarmOcrAt >= FARM_OCR_MS - 100) {   // every scan while luring
+                    farmChatRead(shot);
+                    boolean nearKill = farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP;   // to see where it dies
+                    if (luring || nearKill || now - lastFarmOcrAt >= FARM_OCR_MS - 100) {   // every scan while luring
                         lastFarmOcrAt = now;
                         farmOcr(shot);
                     }
