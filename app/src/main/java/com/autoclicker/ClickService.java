@@ -171,6 +171,14 @@ public class ClickService extends AccessibilityService {
     private long monstersSeenFarAt;
     private int exploreSteps;
     private static final int LURE_SEEN_FRESH_MS = 15_000, LURE_EXPLORE_TURN_STEPS = 3;
+    // Search steps are short: a 4 s leg toward a monster overshot it and ran into walls (the
+    // user, 17:58). A step toward one only has to bring it into tappable space; a heading that
+    // hit a wall is avoided for LURE_BLOCKED_MS.
+    private static final int LURE_TOWARD_MS = 1500, LURE_EXPLORE_MS = 2500, LURE_BLOCKED_MS = 15_000;
+    private static final int WALL_SCENE_DIFF_SHORT = 6;
+    private float walkDirX, walkDirY, blockedDirX, blockedDirY;
+    private long blockedUntil;
+    private boolean lastWalkShort;
     private static final int WALL_SCENE_DIFF = 8;
     private long farmMobsSeenAt;
     // Target HP not dropping this long = stuck on a monster it can't reach.
@@ -209,6 +217,11 @@ public class ClickService extends AccessibilityService {
     private static final float KILL_SOON_HP = 0.4f;
     private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 1300;
     private long postKillUntil;
+    // Buffs wait while fighting: a target bar on the last scan, a monster name close by in the
+    // last NEAR_TAG_FIGHT_MS, a pickup or the post-kill pause. After FARM_BUFF_HOLD_MAX_MS of
+    // fighting in a row they get a FARM_BUFF_WINDOW_MS window, so stragglers can't starve them.
+    private static final int NEAR_TAG_FIGHT_MS = 5000, FARM_BUFF_HOLD_MAX_MS = 45_000, FARM_BUFF_WINDOW_MS = 4000;
+    private long buffsHeldSince, buffWindowUntil, nearTagAt;
     // Attacks going out but no target bar for this long: the game keeps aiming at a monster it
     // can't lock (every skill "auto -> 2:348", never a lock, 20 min standing still at 15:52). The
     // names around kept the idle walk from starting, so step away and let it pick another.
@@ -1152,6 +1165,10 @@ public class ClickService extends AccessibilityService {
             }
         }
         if (pending.isEmpty()) return;
+        if (farmer && farmBuffsHeld(now) && pending.stream().allMatch(Target::isSmart)) {
+            schedulePump(1000);                         // only buffs waiting, and a fight is on
+            return;
+        }
         Target next = pickNext(now);
         // A buff that waited in line may have been refreshed meanwhile; don't waste the slot.
         while (next.isSmart() && !next.forced && !buffNeeded(next)) {
@@ -1663,7 +1680,15 @@ public class ClickService extends AccessibilityService {
     private Target pickNext(long now) {
         // Farmer: a buff that came due goes before the attacks waiting in line; queued behind six
         // attack rings it lost a whole rotation (~8 s) and the short eye buff ran out (12:35:28).
-        if (farmer) for (Target t : pending) if (t.isSmart()) return t;
+        // But not mid-fight: buffs wait until the monsters on us are dead (the user, 17:58 -
+        // five buffs back to back stalled a fight ~15 s while the target healed).
+        if (farmer) {
+            if (farmBuffsHeld(now)) {
+                for (Target t : pending) if (!t.isSmart()) return t;
+            } else {
+                for (Target t : pending) if (t.isSmart()) return t;
+            }
+        }
         // Full buff in progress: its buffs go back to back and the heal waits until the last one
         // is out (~12 s). It comes when the wave is cleared, right after a heal, and the party
         // gets every buff ~4 s sooner, before heading off to lure.
@@ -1961,7 +1986,7 @@ public class ClickService extends AccessibilityService {
         float fx = x / screenW, fy = y / screenH;
         if (fx < 0.08f || fx > 0.74f || fy < 0.17f || fy > 0.80f) return false;
         if (fx < 0.22f && fy > 0.58f) return false;                      // joystick
-        if (fx > 0.58f && fy > 0.45f) return false;                      // skill rings, Stop
+        if (fx > 0.63f && fy > 0.44f) return false;                      // skill rings, Z, Q/W/E, Stop
         return true;
     }
 
@@ -2116,6 +2141,23 @@ public class ClickService extends AccessibilityService {
         }
     }
 
+    /** Farmer: hold buff casts while a fight is on. */
+    private boolean farmBuffsHeld(long now) {
+        boolean fighting = running && farmer && (farmTargetHp >= 0 || now - nearTagAt < NEAR_TAG_FIGHT_MS
+                || lootStartedAt > 0 || now < postKillUntil);
+        if (!fighting) {
+            buffsHeldSince = 0;
+            return false;
+        }
+        if (now < buffWindowUntil) return false;
+        if (buffsHeldSince == 0) buffsHeldSince = now;
+        if (now - buffsHeldSince < FARM_BUFF_HOLD_MAX_MS) return true;
+        buffsHeldSince = 0;
+        buffWindowUntil = now + FARM_BUFF_WINDOW_MS;
+        Log.i(TAG, "farmer: fighting for " + FARM_BUFF_HOLD_MAX_MS / 1000 + " s straight, letting buffs go");
+        return false;
+    }
+
     private boolean canFarmMove(long now) {
         // Not mid-walk/loot, and not during an attack tap (a new gesture would cancel it). The
         // attack lock (busyUntil) is ignored: attacks come so often it would never let go.
@@ -2132,6 +2174,7 @@ public class ClickService extends AccessibilityService {
         // then start small again so it doesn't wander off for good.
         int[] dir = FARM_WALK_DIRS[farmWalkStep];
         walkStartThumb = lastSceneThumb;
+        lastWalkShort = false;
         if (++farmLegDone >= farmLegLen) {
             farmLegDone = 0;
             farmWalkStep = (farmWalkStep + 1) % FARM_WALK_DIRS.length;
@@ -2186,11 +2229,16 @@ public class ClickService extends AccessibilityService {
     /** Luring, none in range: walk toward the last monsters seen, or straight on to explore. */
     private void lureSearchWalk(int followers, long now) {
         float push = screenW * FARM_PUSH;
-        float dx, dy;
+        boolean blocked = now < blockedUntil;
+        boolean seenFresh = now - monstersSeenFarAt < LURE_SEEN_FRESH_MS
+                && !(blocked && seenDirX * blockedDirX + seenDirY * blockedDirY > 0.7f);   // within ~45 deg
+        float ux, uy;
+        int walkMs;
         String where;
-        if (now - monstersSeenFarAt < LURE_SEEN_FRESH_MS) {
-            dx = seenDirX * push;
-            dy = seenDirY * push;
+        if (seenFresh) {
+            ux = seenDirX;
+            uy = seenDirY;
+            walkMs = LURE_TOWARD_MS;
             where = "toward monsters seen " + (now - monstersSeenFarAt) / 1000 + " s ago";
             monstersSeenFarAt = 0;                  // once; then explore if they're gone
         } else {
@@ -2199,27 +2247,43 @@ public class ClickService extends AccessibilityService {
                 farmWalkStep = (farmWalkStep + 1) % FARM_WALK_DIRS.length;
             }
             int[] dir = FARM_WALK_DIRS[farmWalkStep];
-            dx = dir[0] * push;
-            dy = dir[1] * push;
+            if (blocked && dir[0] * blockedDirX + dir[1] * blockedDirY > 0.7f) {
+                farmWalkStep = (farmWalkStep + 1) % FARM_WALK_DIRS.length;     // not into that wall again
+                exploreSteps = 1;
+                dir = FARM_WALK_DIRS[farmWalkStep];
+            }
+            ux = dir[0];
+            uy = dir[1];
+            walkMs = LURE_EXPLORE_MS;
             where = "exploring " + "ENWS".charAt(farmWalkStep);
         }
         Log.i(TAG, "farmer: luring (" + followers + " following), none in range, walking " + where);
         walkStartThumb = lastSceneThumb;
+        walkDirX = ux;
+        walkDirY = uy;
+        lastWalkShort = true;
         farmMobsSeenAt = now;
-        long window = FARM_PUSH_MS + FARM_WALK_MS;
+        long window = FARM_PUSH_MS + walkMs;
         ownTapUntil = now + window + OWN_TAP_SLACK_MS;
         busyUntil = farmHoldUntil = now + window + FARM_WALK_SETTLE_MS;
-        joystickHold(dx, dy, FARM_WALK_MS);
+        joystickHold(ux * push, uy * push, walkMs);
     }
 
     /** After a walk: if the scene barely changed, a wall stopped it - turn (twice in a row: go back). */
     private void farmWallCheck(int diff) {
-        if (diff >= WALL_SCENE_DIFF) {
+        boolean shortWalk = lastWalkShort;
+        lastWalkShort = false;
+        if (diff >= (shortWalk ? WALL_SCENE_DIFF_SHORT : WALL_SCENE_DIFF)) {
             Log.d(TAG, "farmer: walk moved the scene by " + diff);
             wallsInARow = 0;
             return;
         }
         wallsInARow++;
+        if (shortWalk) {                                // a lure step: avoid that heading a while
+            blockedDirX = walkDirX;
+            blockedDirY = walkDirY;
+            blockedUntil = SystemClock.uptimeMillis() + LURE_BLOCKED_MS;
+        }
         int turn = wallsInARow >= 2 ? 2 : 1;
         farmWalkStep = (farmWalkStep + turn) % FARM_WALK_DIRS.length;
         farmLegDone = 0;
@@ -2256,7 +2320,7 @@ public class ClickService extends AccessibilityService {
                 long seen = SystemClock.uptimeMillis();
                 List<Rect> tags = monsterTags(lines, crop, x, y);
                 noteMonstersSeen(tags, seen);
-                for (Rect tag : tags) if (fromCharacter(tag) <= screenW * MONSTER_NEAR_W) farmMobsSeenAt = seen;
+                for (Rect tag : tags) if (fromCharacter(tag) <= screenW * MONSTER_NEAR_W) farmMobsSeenAt = nearTagAt = seen;
                 lureStep(tags, seen);
             } finally {
                 crop.recycle();
