@@ -138,6 +138,19 @@ public class ClickService extends AccessibilityService {
     // attack skills itself. When no monster names show for FARM_IDLE_MS it walks a step to find
     // more, turning E, N, W, S so it circles its spot rather than drifting off.
     private static final String KEY_FARMER = "farmer";
+    // Follow mode (the user, 2026-10-05; the game has no follow of its own): no skills, just stay
+    // close to the party master - the first row (M) of the Team list - by finding their name tag
+    // on screen and walking toward it. Rides on BOOST mode (no rings, math answered, jiggle).
+    private static final String KEY_FOLLOW = "follow";
+    private boolean follow;
+    private static final int FOLLOW_TICK_MS = 2000, FOLLOW_LOST_ALERT_MS = 60_000, FOLLOW_LOST_STEPS = 4;
+    private static final float FOLLOW_NEAR_W = 0.12f;          // "close": ~3-4 character widths
+    private final Runnable followTick = this::followTick;
+    private String leaderKey, leaderShown;
+    private long followHoldUntil, leaderSeenAt, lastFollowWalkAt;
+    private float leaderDirX, leaderDirY, lastWalkLeaderDist;
+    private int followLostSteps, followSideSign = 1;
+    private boolean followLostAlerted, followNoPartyLogged;
     private static final String KEY_TARGETS_FARM = "targets_farm";
     private boolean farmer;
     // Kills leave gaps (a dead monster stays "selected" a few seconds), so wait well past them.
@@ -714,6 +727,7 @@ public class ClickService extends AccessibilityService {
         removeOverlays("connect");
         // Farmer keeps its own rings: load the layout of the mode it was last in.
         farmer = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FARMER, false);
+        follow = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FOLLOW, false);
         lureMode = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_LURE, false);
         knownMonsters.clear();
         knownMonsters.addAll(getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -921,6 +935,14 @@ public class ClickService extends AccessibilityService {
         if (run) handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
         if (run && fsMode()) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // chat-FB is FS only
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
+        if (run && follow) {
+            leaderKey = null;
+            leaderSeenAt = SystemClock.uptimeMillis();
+            followLostSteps = 0;
+            followLostAlerted = followNoPartyLogged = false;
+            followHoldUntil = 0;
+            handler.postDelayed(followTick, 1000);
+        }
         // Clearing the handler above also dropped the "game back yet?" check.
         updateOverlayVisibility();
         // End Game starts the cycle like the support does by hand: buff the party first, but only
@@ -1569,10 +1591,14 @@ public class ClickService extends AccessibilityService {
         TextView farm = roundButton("FARM");
         farm.setTextSize(10);
         farm.setBackground(circle(Color.rgb(60, 120, 40)));
-        TextView[] choices = {fs, boost, farm};
-        fs.setOnClickListener(v -> startInMode(false, false));
-        boost.setOnClickListener(v -> startInMode(true, false));
-        farm.setOnClickListener(v -> startInMode(false, true));
+        TextView fol = roundButton("FOLLOW");
+        fol.setTextSize(8);
+        fol.setBackground(circle(Color.rgb(40, 90, 160)));
+        TextView[] choices = {fs, boost, farm, fol};
+        fs.setOnClickListener(v -> startInMode(false, false, false));
+        boost.setOnClickListener(v -> startInMode(true, false, false));
+        farm.setOnClickListener(v -> startInMode(false, true, false));
+        fol.setOnClickListener(v -> startInMode(true, false, true));
         for (int i = 0; i < choices.length; i++) {
             choices[i].setTypeface(Typeface.DEFAULT_BOLD);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
@@ -1597,12 +1623,22 @@ public class ClickService extends AccessibilityService {
         if (safeAdd(panel, p)) modeChooser = panel;
     }
 
-    private void startInMode(boolean boostMode, boolean farmMode) {
+    private void startInMode(boolean boostMode, boolean farmMode, boolean followMode) {
         closeModeChooser();
+        setFollow(followMode, "button");
         setFarmer(farmMode, "button");              // swaps in that mode's rings
         setBooster(boostMode, "button");            // sets ring/FB/mode-button visibility for the mode
         if (manual) setManual(false, "chooser");
         setRunning(true, "button");
+    }
+
+    private void setFollow(boolean on, String why) {
+        boolean changed = follow != on;
+        follow = on;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_FOLLOW, on).apply();
+        if (changed || !why.equals("restored")) {
+            Log.i(TAG, "follow mode " + (on ? "on: staying close to the party master, no skills" : "off") + " (" + why + ")");
+        }
     }
 
     private void closeModeChooser() {
@@ -1733,6 +1769,8 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
         if (!running) return;
         if (booster) {
+            // Following already moves the character; no jiggle on top of a walk.
+            if (follow && SystemClock.uptimeMillis() - lastFollowWalkAt < TEST_MOVE_EVERY_MS) return;
             // No heals to coordinate with: jiggle straight away, if the game's in front and the
             // keyboard isn't up (don't jiggle into the keyboard or another app).
             if (boosterCanAct()) testMove(SystemClock.uptimeMillis());
@@ -2706,9 +2744,145 @@ public class ClickService extends AccessibilityService {
     }
 
     /** Every few seconds while the game is in front: is the (new, 4-button) math question up? */
+    /** Follow: every FOLLOW_TICK_MS read the Team list and the play area, then step toward the leader. */
+    private void followTick() {
+        handler.postDelayed(followTick, FOLLOW_TICK_MS);
+        long now = SystemClock.uptimeMillis();
+        if (!running || !follow || manual || questionSeen || now < followHoldUntil || !boosterCanAct()) return;
+        if (now - userTouchAt < USER_TOUCH_PAUSE_MS) return;
+        String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+        // One region from the top-left corner (OCR boxes are screen pixels): Team list + play area.
+        captureRegionForOcr(0f, 0f, 0.92f, 0.74f, shot -> {
+            if (shot != null) Ocr.read(shot, (lines, words) -> {
+                checkForQuestion(game, lines);              // the math check, from the same read
+                if (running && follow && !questionSeen) followStep(lines);
+            });
+        });
+    }
+
+    private void followStep(List<MathQuestion.Line> lines) {
+        long now = SystemClock.uptimeMillis();
+        // The party master: the first name under "Team" at the top left (the M row).
+        MathQuestion.Line first = null;
+        for (MathQuestion.Line l : lines) {
+            if (!inTeamList(l.box) || l.text.toLowerCase(java.util.Locale.ROOT).contains("team")) continue;
+            if (nameKey(stripRowMark(l.text)).length() < 3) continue;
+            if (first == null || l.box.top < first.box.top) first = l;
+        }
+        if (first != null) {
+            String name = stripRowMark(first.text);
+            String key = nameKey(name);
+            if (!key.equals(leaderKey)) {
+                leaderKey = key;
+                leaderShown = name;
+                Log.i(TAG, "follow: party master is \"" + name + "\"");
+            }
+            followNoPartyLogged = false;
+        } else if (leaderKey == null) {
+            if (!followNoPartyLogged) Log.i(TAG, "follow: no Team list on screen, nobody to follow");
+            followNoPartyLogged = true;
+            return;
+        }
+        // Their name tag in the world (not the Team list, the top strip or the minimap).
+        Rect tag = null;
+        float tagDist = Float.MAX_VALUE;
+        for (MathQuestion.Line l : lines) {
+            if (inTeamList(l.box) || l.box.bottom <= screenH * HUD_TOP_H
+                    || (l.box.right > screenW * 0.76f && l.box.top < screenH * 0.32f)) continue;
+            if (!sameName(nameKey(l.text), leaderKey)) continue;
+            float d = fromCharacter(l.box);
+            if (d < tagDist) {
+                tag = l.box;
+                tagDist = d;
+            }
+        }
+        float push = screenW * FARM_PUSH;
+        if (tag != null) {
+            leaderSeenAt = now;
+            followLostSteps = 0;
+            followLostAlerted = false;
+            leaderDirX = (tag.exactCenterX() - screenW * 0.5f) / Math.max(1f, tagDist);
+            leaderDirY = (tag.exactCenterY() - screenH * 0.53f) / Math.max(1f, tagDist);
+            if (tagDist <= screenW * FOLLOW_NEAR_W) return;            // close enough (or it's us)
+            // Didn't get closer on the last walk: something's in the way, step sideways a moment.
+            boolean blocked = lastWalkLeaderDist > 0 && tagDist > lastWalkLeaderDist * 0.85f
+                    && now - lastFollowWalkAt < FOLLOW_TICK_MS * 3;
+            float dx = leaderDirX, dy = leaderDirY;
+            int ms = (int) Math.max(400, Math.min(2000, tagDist * 1000f / LURE_RUN_PX_PER_S * 0.8f));
+            if (blocked) {
+                followSideSign = -followSideSign;
+                dx = -leaderDirY * followSideSign;
+                dy = leaderDirX * followSideSign;
+                ms = 900;
+            }
+            lastWalkLeaderDist = blocked ? 0 : tagDist;
+            Log.i(TAG, "follow: " + leaderShown + " is " + Math.round(tagDist) + " px away, "
+                    + (blocked ? "blocked, stepping aside" : "walking " + ms + " ms toward them"));
+            followWalk(dx * push, dy * push, ms, now);
+            return;
+        }
+        // Not on screen: head the way they were last seen for a few steps, then wait and say so.
+        lastWalkLeaderDist = 0;
+        if (followLostSteps < FOLLOW_LOST_STEPS && now - leaderSeenAt < FOLLOW_LOST_ALERT_MS) {
+            followLostSteps++;
+            Log.i(TAG, "follow: " + leaderShown + " not on screen, walking where they were last seen ("
+                    + followLostSteps + "/" + FOLLOW_LOST_STEPS + ")");
+            followWalk(leaderDirX * push, leaderDirY * push, 1500, now);
+        } else if (now - leaderSeenAt >= FOLLOW_LOST_ALERT_MS && !followLostAlerted) {
+            followLostAlerted = true;
+            Log.w(TAG, "follow: lost " + leaderShown + " for " + (now - leaderSeenAt) / 1000 + " s");
+            Telegram.send(this, "\uD83E\uDDED Ran Online: lost the party master (" + leaderShown
+                    + ") for a minute. Follow is waiting where it is.");
+        }
+    }
+
+    private void followWalk(float dx, float dy, int ms, long now) {
+        lastFollowWalkAt = now;
+        followHoldUntil = now + FARM_PUSH_MS + ms + 300;
+        ownTapUntil = now + FARM_PUSH_MS + ms + OWN_TAP_SLACK_MS;
+        joystickHold(dx, dy, ms);
+    }
+
+    /** The Team list at the top left: under the portrait/buffs, left of ~0.2 of the width. */
+    private boolean inTeamList(Rect box) {
+        return box.left < screenW * 0.2f && box.top > screenH * 0.17f && box.bottom < screenH * 0.42f;
+    }
+
+    /** "M kYjheLe26" / "2 VANGIELYNROSE" -> the name without the row mark. */
+    private static String stripRowMark(String text) {
+        return text.trim().replaceFirst("^(?:[Mm]|\\d{1,2})\\s+", "");
+    }
+
+    /** Lower-case letters and digits only: "-kYjheLe26-" and "kYjheLe26" are the same name. */
+    private static String nameKey(String text) {
+        return text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
+    }
+
+    /** Same player name, allowing a couple of OCR slips on longer names. */
+    private static boolean sameName(String a, String b) {
+        if (a.length() < 3 || b == null || b.length() < 3) return false;
+        if (a.equals(b)) return true;
+        if (Math.min(a.length(), b.length()) >= 5 && (a.contains(b) || b.contains(a))) return true;
+        int allowed = Math.max(1, b.length() / 5);
+        if (Math.abs(a.length() - b.length()) > allowed) return false;
+        int[] prev = new int[b.length() + 1], cur = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) prev[j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            cur[0] = i;
+            for (int j = 1; j <= b.length(); j++) {
+                cur[j] = Math.min(Math.min(cur[j - 1], prev[j]) + 1,
+                        prev[j - 1] + (a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1));
+            }
+            int[] t = prev;
+            prev = cur;
+            cur = t;
+        }
+        return prev[b.length()] <= allowed;
+    }
+
     private void questionWatchTick() {
         watchHandler.postDelayed(questionWatchTick, QUESTION_WATCH_MS);
-        if (running && farmer) return;           // Farmer reads it from its own screenshots
+        if (running && (farmer || follow)) return;   // Farmer/Follow read it from their own screenshots
         if (!canReadScreen()) return;
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         if (!game.equals(foregroundPackage())) return;
