@@ -1853,6 +1853,8 @@ public class ClickService extends AccessibilityService {
     /** Letters only, lower case: "Brute Punk" and an OCR "Brute Punk." match. */
     private static String monsterKey(String text) {
         // OCR mixes up look-alikes ("Lo0se Halogen"): read 0 as o, 1 as l, 5 as s before matching.
+        // Accents too: OCR read "Skațing Boy" (14:58), whose ț would otherwise vanish.
+        text = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFD);
         return text.toLowerCase(java.util.Locale.ROOT).replace('0', 'o').replace('1', 'l').replace('5', 's')
                 .replaceAll("[^a-z]", "");
     }
