@@ -238,6 +238,13 @@ public class ClickService extends AccessibilityService {
     private long killSpotAt, killAt;
     private boolean killStepDone;
     private long lastHandSeenAt;
+    // Camera: one-finger drag across empty ground turns it (the user; a 400 px drag turned the view
+    // ~60-90 deg, 07:23). Turned when buildings hide things: the target's name tag unreadable
+    // CAMERA_TAG_MISSES reads in a row, or two walks in a row into walls.
+    private static final float CAMERA_DRAG_W = 300 / 2560f, CAMERA_DRAG_Y = 0.26f, CAMERA_DRAG_X = 0.40f;
+    private static final int CAMERA_DRAG_MS = 400, CAMERA_TURN_GAP_MS = 20_000, CAMERA_TAG_MISSES = 3;
+    private long lastCameraTurnAt;
+    private int tagMissStreak;
     private static final int LOOT_STEP_AFTER_MS = 1500, KILL_SPOT_FRESH_MS = 5000;
     // Loot report: the chat box prints "Pick up item 'X'." and "Gained 'N' gold."; read it from the
     // fight screenshot and send a Telegram summary every LOOT_REPORT_MS (the user, 2026-10-05).
@@ -2304,6 +2311,22 @@ public class ClickService extends AccessibilityService {
         return false;
     }
 
+    /** One drag across empty ground (upper middle) turns the camera. */
+    private void turnCamera(String why) {
+        long now = SystemClock.uptimeMillis();
+        if (!running || !farmer || now - lastCameraTurnAt < CAMERA_TURN_GAP_MS || !canFarmMove(now)) return;
+        lastCameraTurnAt = now;
+        float x0 = screenW * CAMERA_DRAG_X, y = screenH * CAMERA_DRAG_Y;
+        Path drag = new Path();
+        drag.moveTo(x0, y);
+        drag.lineTo(x0 + screenW * CAMERA_DRAG_W, y);
+        ownTapUntil = now + CAMERA_DRAG_MS + OWN_TAP_SLACK_MS;
+        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + CAMERA_DRAG_MS + 300);
+        Log.i(TAG, "farmer: turning the camera (" + why + ")");
+        dispatchGesture(new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(drag, 0, CAMERA_DRAG_MS)).build(), null, null);
+    }
+
     /** Where the selected target stands: its name tag (matching the target bar title), body below. */
     private void noteKillSpot(List<MathQuestion.Line> lines) {
         if (farmTargetHp < 0) return;
@@ -2330,8 +2353,13 @@ public class ClickService extends AccessibilityService {
         }
         if (best == null) {
             Log.d(TAG, "farmer: target \"" + key + "\" - its name tag not found on screen");
+            if (++tagMissStreak >= CAMERA_TAG_MISSES) {
+                tagMissStreak = 0;
+                turnCamera("the target's name tag is hidden");
+            }
             return;
         }
+        tagMissStreak = 0;
         killSpotX = best.exactCenterX();
         killSpotY = best.bottom + best.height() * LURE_BODY_BELOW;
         killSpotAt = SystemClock.uptimeMillis();
@@ -2553,6 +2581,7 @@ public class ClickService extends AccessibilityService {
             return;
         }
         wallsInARow++;
+        if (wallsInARow >= 2) turnCamera("walls in the way");
         if (shortWalk) {                                // a lure step: avoid that heading a while
             blockedDirX = walkDirX;
             blockedDirY = walkDirY;
