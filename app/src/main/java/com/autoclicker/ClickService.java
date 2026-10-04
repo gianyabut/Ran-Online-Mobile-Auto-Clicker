@@ -157,6 +157,13 @@ public class ClickService extends AccessibilityService {
     // into a wall (the user, 15:19: lure walks pushed into one for a whole round), so turn.
     private int[] lastSceneThumb, walkStartThumb;
     private int wallsInARow;
+    // Luring with nothing in range: head for where monsters were last seen (names at the screen
+    // edge, e.g. during the fight), else explore in straight lines - the spiral kept going back
+    // over the same empty ground ("just random walks", the user, 15:28).
+    private float seenDirX, seenDirY;
+    private long monstersSeenFarAt;
+    private int exploreSteps;
+    private static final int LURE_SEEN_FRESH_MS = 15_000, LURE_EXPLORE_TURN_STEPS = 3;
     private static final int WALL_SCENE_DIFF = 8;
     private long farmMobsSeenAt;
     // Target HP not dropping this long = stuck on a monster it can't reach.
@@ -679,6 +686,11 @@ public class ClickService extends AccessibilityService {
         knownMonsters.clear();
         knownMonsters.addAll(getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getStringSet(KEY_MONSTERS, java.util.Collections.emptySet()));
+        // Drop junk learned before the filters: "hodel" (a place label) and short OCR fragments.
+        if (knownMonsters.removeIf(k -> !learnableMonster(k))) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putStringSet(KEY_MONSTERS, new java.util.HashSet<>(knownMonsters)).apply();
+        }
         loadTargets();
         refusedInARow = 0;
         instance = this;
@@ -1868,7 +1880,8 @@ public class ClickService extends AccessibilityService {
             // Not the HUD: the top strip (target bar title) and the top-left panel ("Lv. 148",
             // "MMR", the buff row) are white on dark too - the first lure kept pulling "531,195".
             if (line.box.bottom <= screenH * HUD_TOP_H
-                    || (line.box.left < screenW * HUD_LEFT_W && line.box.top < screenH * HUD_LEFT_H)) continue;
+                    || (line.box.left < screenW * HUD_LEFT_W && line.box.top < screenH * HUD_LEFT_H)
+                    || (line.box.right > screenW * 0.76f && line.box.top < screenH * 0.32f)) continue;   // minimap
             int l = Math.max(0, line.box.left - ox), t = Math.max(0, line.box.top - oy);
             int r = Math.min(crop.getWidth(), line.box.right - ox), b = Math.min(crop.getHeight(), line.box.bottom - oy);
             int white = 0, total = 0;
@@ -1906,9 +1919,33 @@ public class ClickService extends AccessibilityService {
 
     private boolean isKnownMonster(String text) {
         String key = monsterKey(text);
-        if (key.length() < 4) return false;
+        if (key.length() < 4 || !learnableMonster(key)) return false;
         for (String m : knownMonsters) if (key.equals(m) || key.contains(m) || m.contains(key) && key.length() >= 6) return true;
         return false;
+    }
+
+    // Not monsters: "Hodel" is a place label (on the minimap and under the target bar), and it got
+    // learned - so the lure tapped the minimap and opened the map (the user, 15:29).
+    private static final String[] FARM_NOT_MONSTERS = {"hode"};
+
+    /** A name worth learning/matching: long enough to be a real name, and not a known non-monster. */
+    private static boolean learnableMonster(String key) {
+        if (key.length() < 6) return false;
+        for (String n : FARM_NOT_MONSTERS) if (key.contains(n)) return false;
+        return true;
+    }
+
+    /**
+     * Where a lure tap is safe: open ground, not the minimap, the top buttons, the skill rings,
+     * the joystick, our own button bar or the chat - taps there opened the map and other panels,
+     * which stop everything until closed (the user, 15:29).
+     */
+    private boolean safeToTap(float x, float y) {
+        float fx = x / screenW, fy = y / screenH;
+        if (fx < 0.08f || fx > 0.74f || fy < 0.17f || fy > 0.80f) return false;
+        if (fx < 0.22f && fy > 0.58f) return false;                      // joystick
+        if (fx > 0.58f && fy > 0.45f) return false;                      // skill rings, Stop
+        return true;
     }
 
     /** How far a name tag is from the character (screen pixels). */
@@ -1932,7 +1969,8 @@ public class ClickService extends AccessibilityService {
             float d = fromCharacter(tag);
             if (d <= screenW * LURE_NEAR_W) {
                 followers++;
-            } else if (d <= screenW * LURE_FAR_W && d < pullDist) {
+            } else if (d <= screenW * LURE_FAR_W && d < pullDist
+                    && safeToTap(tag.exactCenterX(), tag.bottom + tag.height() * LURE_BODY_BELOW)) {
                 pull = tag;
                 pullDist = d;
             }
@@ -1955,11 +1993,9 @@ public class ClickService extends AccessibilityService {
             return;
         }
         busyUntil = Math.max(busyUntil, now + FARM_SCAN_MS + 500);     // no attacks while luring
-        // Nothing in pull range: go and find more (the spiral walk; followers come along).
+        // Nothing in pull range: go and find more (followers come along).
         if (pull == null && pullingSince == 0 && canFarmMove(now)) {
-            Log.i(TAG, "farmer: luring (" + followers + " following), none in range, walking "
-                    + "ENWS".charAt(farmWalkStep));
-            farmWalk(now);
+            lureSearchWalk(followers, now);
             return;
         }
         if (pull != null) farmMobsSeenAt = now;                         // monsters in range: no walking off
@@ -2046,7 +2082,7 @@ public class ClickService extends AccessibilityService {
             float mid = line.box.exactCenterX();
             String key = monsterKey(line.text);
             boolean skipped = java.util.Arrays.stream(FARM_SKIP_NAMES).anyMatch(key::contains);   // never lure Caloyski
-            if (!skipped && mid > screenW * 0.3f && mid < screenW * 0.7f && key.length() >= 4 && knownMonsters.add(key)) {
+            if (!skipped && mid > screenW * 0.3f && mid < screenW * 0.7f && learnableMonster(key) && knownMonsters.add(key)) {
                 Log.i(TAG, "farmer: learned monster name \"" + line.text.trim() + "\"");
                 // Kept across restarts and installs, so luring works from the first fight.
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
@@ -2092,6 +2128,48 @@ public class ClickService extends AccessibilityService {
         joystickHold(dir[0] * push, dir[1] * push, FARM_WALK_MS);
     }
 
+    /** Remembers which way the nearest monster beyond the followers is, for lureSearchWalk. */
+    private void noteMonstersSeen(List<Rect> tags, long now) {
+        float best = Float.MAX_VALUE;
+        for (Rect tag : tags) {
+            float d = fromCharacter(tag);
+            if (d <= screenW * LURE_NEAR_W || d >= best) continue;
+            best = d;
+            seenDirX = (tag.exactCenterX() - screenW * 0.5f) / d;
+            seenDirY = (tag.exactCenterY() - screenH * 0.53f) / d;
+        }
+        if (best < Float.MAX_VALUE) monstersSeenFarAt = now;
+    }
+
+    /** Luring, none in range: walk toward the last monsters seen, or straight on to explore. */
+    private void lureSearchWalk(int followers, long now) {
+        float push = screenW * FARM_PUSH;
+        float dx, dy;
+        String where;
+        if (now - monstersSeenFarAt < LURE_SEEN_FRESH_MS) {
+            dx = seenDirX * push;
+            dy = seenDirY * push;
+            where = "toward monsters seen " + (now - monstersSeenFarAt) / 1000 + " s ago";
+            monstersSeenFarAt = 0;                  // once; then explore if they're gone
+        } else {
+            if (++exploreSteps > LURE_EXPLORE_TURN_STEPS) {
+                exploreSteps = 1;
+                farmWalkStep = (farmWalkStep + 1) % FARM_WALK_DIRS.length;
+            }
+            int[] dir = FARM_WALK_DIRS[farmWalkStep];
+            dx = dir[0] * push;
+            dy = dir[1] * push;
+            where = "exploring " + "ENWS".charAt(farmWalkStep);
+        }
+        Log.i(TAG, "farmer: luring (" + followers + " following), none in range, walking " + where);
+        walkStartThumb = lastSceneThumb;
+        farmMobsSeenAt = now;
+        long window = FARM_PUSH_MS + FARM_WALK_MS;
+        ownTapUntil = now + window + OWN_TAP_SLACK_MS;
+        busyUntil = farmHoldUntil = now + window + FARM_WALK_SETTLE_MS;
+        joystickHold(dx, dy, FARM_WALK_MS);
+    }
+
     /** After a walk: if the scene barely changed, a wall stopped it - turn (twice in a row: go back). */
     private void farmWallCheck(int diff) {
         if (diff >= WALL_SCENE_DIFF) {
@@ -2103,6 +2181,7 @@ public class ClickService extends AccessibilityService {
         int turn = wallsInARow >= 2 ? 2 : 1;
         farmWalkStep = (farmWalkStep + turn) % FARM_WALK_DIRS.length;
         farmLegDone = 0;
+        exploreSteps = 0;
         Log.i(TAG, "farmer: walk barely moved the scene (" + diff + "), a wall? turning to "
                 + "ENWS".charAt(farmWalkStep));
     }
@@ -2133,6 +2212,7 @@ public class ClickService extends AccessibilityService {
                 checkTargetName(lines);
                 long seen = SystemClock.uptimeMillis();
                 List<Rect> tags = monsterTags(lines, crop, x, y);
+                noteMonstersSeen(tags, seen);
                 for (Rect tag : tags) if (fromCharacter(tag) <= screenW * MONSTER_NEAR_W) farmMobsSeenAt = seen;
                 lureStep(tags, seen);
             } finally {
