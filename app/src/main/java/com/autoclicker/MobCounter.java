@@ -175,6 +175,18 @@ final class MobCounter {
      */
     static boolean hudHidden(Bitmap shot, int screenW, int screenH) {
         if (shot.getWidth() < screenW || shot.getHeight() < screenH) return false;
+        // A real panel leaves our red HP bar at the top left (~40% red under the map and the
+        // Server List); a black/broken game screen or the login screen has none (0%) - no X there
+        // (23:30: the game failed to redraw after Messenger and X was tapped on a broken screen).
+        int red = 0, n = 0;
+        for (int y = (int) (screenH * 0.011f); y < screenH * 0.025f; y += 2) {
+            for (int x = (int) (screenW * 0.121f); x < screenW * 0.23f; x += 4) {
+                int c = shot.getPixel(x, y);
+                n++;
+                if (Color.red(c) > 150 && Color.green(c) < 80 && Color.blue(c) < 80) red++;
+            }
+        }
+        if (n == 0 || red * 100 < n * 15) return false;
         return brightShare(shot, screenW * 0.7375f, screenH * 0.572f, screenW * 0.0176f) < 0.03f
                 && brightShare(shot, screenW * 0.956f, screenH * 0.389f, screenW * 0.0156f) < 0.02f;
     }
