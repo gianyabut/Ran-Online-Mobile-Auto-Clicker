@@ -168,6 +168,7 @@ public class ClickService extends AccessibilityService {
     // Buffs in Farmer: hold attacks this long after a buff so its cast isn't cancelled; wait at most
     // FARM_BUFF_MAX_WAIT_MS before one; a cast that didn't take is retried after FARM_BUFF_RETRY_MS.
     private static final int FARM_AFTER_BUFF_MS = 1500, FARM_BUFF_MAX_WAIT_MS = 1500, FARM_BUFF_RETRY_MS = 15_000;
+    private static final int FARM_BUFF_AFTER_BUFF_MS = 2500;
     // Loot: the hand button beside F1 picks up everything nearby (the user's pick, 2026-10-04,
     // after walking to gold labels kept stopping short and attacks pulled the character away).
     // While the hand shows, attacks pause until it's picked up (farmLootCheck).
@@ -1171,6 +1172,11 @@ public class ClickService extends AccessibilityService {
         // extra wait), or it lands mid-animation and is ignored (12:32-12:33).
         if (farmer) {
             long extra = t.isSmart() ? Math.min(t.extraGapMs, FARM_BUFF_MAX_WAIT_MS) : 0;   // never stall attacks long
+            // Right after another buff the game's lock is longer: Blood Lust 1.8 s after Power Kick
+            // was swallowed twice (14:17-14:18).
+            if (t.isSmart() && lastBuffTapAt > 0 && lastBuffTapAt == lastAnyTapAt) {
+                extra = Math.max(extra, FARM_BUFF_AFTER_BUFF_MS - tapGapMs);
+            }
             return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + extra - now);
         }
         if (!anyPriority) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + t.extraGapMs - now);
