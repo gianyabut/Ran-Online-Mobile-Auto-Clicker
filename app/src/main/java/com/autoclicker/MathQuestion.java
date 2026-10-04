@@ -5,6 +5,8 @@ import android.graphics.Rect;
 import java.util.List;
 import java.util.Locale;
 import java.util.ArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Reads the game's "Please verify this simple questions, what is 4 + 3" out of the text an OCR pass
@@ -79,6 +81,63 @@ final class MathQuestion {
         Rect submit = submitButton(words);
         if (submit == null) return null;                // nothing we're sure will send it
         return new Plan((int) answer, keys, submit);
+    }
+
+    /** The button to tap on the 4-choice panel, and what it says. */
+    static final class Choice {
+        final long answer;
+        final String label;
+        final Rect button;
+
+        Choice(long answer, String label, Rect button) {
+            this.answer = answer;
+            this.label = label;
+            this.button = button;
+        }
+    }
+
+    // "A) 18", "b ) 9", "C. 12"; or just the number when OCR splits the letter off.
+    private static final Pattern OPTION = Pattern.compile("^\\s*(?:[A-Da-d]\\s*[).:]\\s*)?(\\d{1,5})\\s*$");
+
+    /**
+     * The anti-bot panel since 2026-10-04: "Please verify this simple questions, what is 6 + 6",
+     * then "Tap the correct answer:" over four buttons "A) 18" "B) 9" "C) 12" "D) 22". Works out the
+     * answer and returns the one button showing it. Null unless it's sure: the question read, at
+     * least 3 options seen below it, and exactly one of them equal to the answer.
+     */
+    static Choice solveChoice(List<Line> lines) {
+        Line question = null;
+        long answer = -1;
+        for (Line line : lines) {
+            if (!isQuestionLine(line.text)) continue;
+            answer = equationIn(line.text);
+            if (answer >= 0) {
+                question = line;
+                break;
+            }
+        }
+        if (question == null) return null;
+        // The buttons sit a few line-heights under the question (~7 and ~11 on the panel).
+        int reach = Math.max(1, question.box.height()) * 16;
+        int options = 0;
+        Choice match = null;
+        for (Line line : lines) {
+            if (line == question || line.box.top < question.box.bottom
+                    || line.box.top > question.box.bottom + reach) continue;
+            Matcher m = OPTION.matcher(line.text);
+            if (!m.matches()) continue;
+            options++;
+            if (Long.parseLong(m.group(1)) != answer) continue;
+            if (match != null) return null;             // two buttons say it: don't guess
+            match = new Choice(answer, line.text.trim(), line.box);
+        }
+        return options >= 3 ? match : null;
+    }
+
+    private static boolean isQuestionLine(String text) {
+        String lower = text.toLowerCase(Locale.ROOT);
+        for (String marker : QUESTION_MARKERS) if (lower.contains(marker)) return true;
+        return false;
     }
 
     /** -1 when the question line couldn't be found or read as a single "A op B". */

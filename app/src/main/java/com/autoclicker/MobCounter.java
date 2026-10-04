@@ -130,6 +130,44 @@ final class MobCounter {
         return red * 100 >= total * 25;
     }
 
+    /**
+     * How full the selected target's HP bar is (0..1), or -1 if none is selected. The bar runs
+     * from ~0.31W to ~0.69W at 0.0825H: red for the HP left, grey for what's gone.
+     */
+    static float targetHp(Bitmap shot, int screenW, int screenH) {
+        if (!targetSelected(shot, screenW, screenH)) return -1;
+        int left = (int) (screenW * 0.31f), right = (int) (screenW * 0.69f);
+        int lastRed = -1;
+        for (int x = left; x < right; x += 2) {
+            int red = 0;
+            for (int y = (int) (screenH * 0.076f); y < screenH * 0.090f; y += 3) {
+                int c = shot.getPixel(x, y);
+                if (Color.red(c) > 150 && Color.green(c) < 70 && Color.blue(c) < 70) red++;
+            }
+            if (red >= 2) lastRed = x;
+        }
+        return lastRed < 0 ? 0f : (lastRed - left) / (float) (right - left);
+    }
+
+    /**
+     * The loot hand beside F1, which only shows while an item lies nearby. It has tan/skin
+     * highlights the grey floor never has: 29-61 such samples with the hand, 0 without, 10-17 when
+     * the chat or a panel half covers it (25 screenshots, 2026-10-04).
+     */
+    static boolean lootHandShowing(Bitmap shot, int screenW, int screenH) {
+        if (shot.getWidth() < screenW || shot.getHeight() < screenH) return false;
+        int tan = 0;
+        int total = 0;
+        for (int y = (int) (screenH * 0.856f); y < screenH * 0.931f; y += 3) {
+            for (int x = (int) (screenW * 0.656f); x < screenW * 0.707f; x += 3) {
+                int c = shot.getPixel(x, y);
+                total++;
+                if (Color.red(c) > 150 && Color.red(c) - Color.blue(c) > 60 && Color.green(c) > 90) tan++;
+            }
+        }
+        return total > 0 && tan * 1000 >= total * 14;
+    }
+
     private static boolean isTagRed(int c) {
         int r = Color.red(c);
         int g = Color.green(c);

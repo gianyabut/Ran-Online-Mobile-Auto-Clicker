@@ -132,6 +132,53 @@ public class ClickService extends AccessibilityService {
     private static final int KEYBOARD_WATCH_MS = 800;
     private static final int BOOSTER_PRESENCE_MS = 3000;
     private final Runnable keyboardWatchTick = this::keyboardWatchTick;
+    // Farmer mode (FARM on the start chooser, 2026-10-04): attacks monsters with rings you place for
+    // it, kept as their own layout so the FS heal/buff rings stay put. Each ring taps on its own
+    // interval/cooldown like Low Level FS; no waves, FB or chat-FB. The game picks the target for
+    // attack skills itself. When no monster names show for FARM_IDLE_MS it walks a step to find
+    // more, turning E, N, W, S so it circles its spot rather than drifting off.
+    private static final String KEY_FARMER = "farmer";
+    private static final String KEY_TARGETS_FARM = "targets_farm";
+    private boolean farmer;
+    // Kills leave gaps (a dead monster stays "selected" a few seconds), so wait well past them.
+    private static final int FARM_IDLE_MS = 12_000;
+    // One screenshot every 2 s does the fight check, and every 2nd one the loot + question reading
+    // (separate screenshots failed when too close together and ran the tablet out of memory).
+    private static final int FARM_SCAN_MS = 2000;
+    private static final int FARM_WALK_MS = 2500;   // far enough to leave a stuck spot behind
+    private static final int FARM_WALK_SETTLE_MS = 400;
+    private static final int FARM_PUSH_MS = 100;
+    private static final float FARM_PUSH = 140 / 2560f;
+    private static final int[][] FARM_WALK_DIRS = {{1, 0}, {0, -1}, {-1, 0}, {0, 1}};   // E N W S
+    private int farmWalkStep;
+    private long farmMobsSeenAt;
+    // Target HP not dropping this long = stuck on a monster it can't reach.
+    private static final int FARM_STUCK_MS = 10_000;
+    // A full bar that stays full may be a new monster each check (fast kills: 3 in 15 s read 99%
+    // every time), so a full bar has to stay full for longer.
+    private static final int FARM_STUCK_FULL_MS = 45_000;   // 20 s still dropped fast kills (11:54)
+    private long farmProgressAt;
+    private float farmTargetHp = -1;
+    // Until when a walk, a target drop or a trip to loot is still going (attacks hold off too).
+    private long farmHoldUntil;
+    // The shared "pause after tap" (3 s, set for heals) spaced attacks ~4 s apart.
+    private static final int FARM_TAP_GAP_MS = 800;
+    // Loot: the hand button beside F1 picks up everything nearby (the user's pick, 2026-10-04,
+    // after walking to gold labels kept stopping short and attacks pulled the character away).
+    // While the hand shows, attacks pause until it's picked up (farmLootCheck).
+    private static final float LOOT_HAND_X = 1735 / 2560f, LOOT_HAND_Y = 1430 / 1600f;
+    private static final int LOOT_MAX_PAUSE_MS = 10_000, LOOT_RETAP_MS = 1500, LOOT_IGNORE_MS = 8000;
+    // A skill still animating ignores other input; give it this long after the last attack tap.
+    private static final int LOOT_AFTER_SKILL_MS = 1000;
+    private long lootStartedAt, lootIgnoreUntil;
+    private final Runnable lootTapTick = this::lootTapTick;
+    // Text reading (the anti-bot question) on every 2nd fight-check screenshot, from the play area.
+    private static final int FARM_OCR_MS = 4000;
+    private long lastFarmOcrAt;
+    // From just under the HP bars at the top (so the target bar's name is in it) down to the chat.
+    private static final float READ_L = 0.15f, READ_T = 0.02f, READ_W = 0.65f, READ_H = 0.72f;
+    private static final float TARGET_NAME_MAX_Y = 0.07f;     // title ends ~0.064H
+    private static final String[] FARM_SKIP_NAMES = {"caloyski"};
     private int refusedInARow;
     // The connected service, for the watchdog's health check (it runs in this same process).
     private static volatile ClickService instance;
@@ -234,6 +281,28 @@ public class ClickService extends AccessibilityService {
     private static final int MIN_USEFUL_LUMA = 45;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    // The anti-bot question: since 2026-10-04 four answer buttons ("what is 6 + 6", A) 18 B) 9 C) 12
+    // D) 22) instead of a typed answer, so no keyboard opens and keyboardOpened never sees it. OCR
+    // the screen every few seconds for the question (Farmer reads it from its own screenshots);
+    // when it shows, tap the button with the answer (checkForQuestion), or alert you if unsure.
+    // Its own handler: start/stop clears `handler`, and this runs whether or not ▶ is on.
+    private final Handler watchHandler = new Handler(Looper.getMainLooper());
+    // Off the 1 s / 2 s screenshot rhythm of the other checks, so it doesn't keep colliding.
+    private static final int QUESTION_WATCH_MS = 3170;
+    private static final float QUESTION_SCAN_H = 0.66f;     // down to the answer buttons
+    private static final String[] QUESTION_WATCH_WORDS = {"verify", "simple question"};
+    private final Runnable questionWatchTick = this::questionWatchTick;
+    private boolean questionSeen;
+    private int questionAbsentScans;
+    private long questionSeenAt;
+    // Auto-answer (the user asked, 2026-10-04): tap the matching button, re-tap if the panel is
+    // still up a few seconds later, give up and alert after a few.
+    private static final int QUESTION_MAX_TAPS = 3;
+    private static final int QUESTION_RETAP_MS = 3500;
+    private static final int QUESTION_TAP_HOLD_MS = 1500;
+    private int questionTaps;
+    private long lastQuestionTapAt;
+    private boolean questionAlerted;
     private final List<Target> targets = new ArrayList<>();
     // Targets waiting for their turn to tap. Each target is in here at most once.
     private final List<Target> pending = new ArrayList<>();
@@ -518,6 +587,8 @@ public class ClickService extends AccessibilityService {
         // Android can disconnect and reconnect this same service without destroying it.
         // Clear everything from the previous connection so bars and rings aren't duplicated.
         removeOverlays("connect");
+        // Farmer keeps its own rings: load the layout of the mode it was last in.
+        farmer = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FARMER, false);
         loadTargets();
         refusedInARow = 0;
         instance = this;
@@ -564,11 +635,14 @@ public class ClickService extends AccessibilityService {
 
         addTouchWatcher();
         setRunning(false, "connected");
+        watchHandler.removeCallbacks(questionWatchTick);
+        watchHandler.postDelayed(questionWatchTick, QUESTION_WATCH_MS);
 
         // Android kills background apps when the game uses most of the memory, then restarts
         // this service. If you had pressed ▶, carry on where it left off.
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         setEndGame(prefs.getBoolean(KEY_END_GAME, true), "restored");
+        setFarmer(farmer, "restored");
         setBooster(prefs.getBoolean(KEY_BOOSTER, false), "restored");
         if (prefs.getBoolean(KEY_MANUAL, false)) {
             setManual(true, "restored");
@@ -655,7 +729,8 @@ public class ClickService extends AccessibilityService {
     private void setRunning(boolean run, String why) {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         if (run) {
-            tapGapMs = Math.max(0, prefs.getInt(KEY_TAP_GAP, DEFAULT_TAP_GAP_MS));
+            // Attack rings go at a quick fixed pace; a tap during the game's skill lock is just ignored.
+            tapGapMs = farmer ? FARM_TAP_GAP_MS : Math.max(0, prefs.getInt(KEY_TAP_GAP, DEFAULT_TAP_GAP_MS));
         }
         if (why.equals("button")) {
             // Remember that you want it running, and which app it's for, so it can resume
@@ -710,14 +785,16 @@ public class ClickService extends AccessibilityService {
         }
         if (run) handler.post(this::cooldownCheck);                  // booster path does presence only
         if (run) handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
-        if (run && !booster) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // no chat-FB in booster
+        if (run && fsMode()) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // chat-FB is FS only
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
         // Clearing the handler above also dropped the "game back yet?" check.
         updateOverlayVisibility();
         // End Game starts the cycle like the support does by hand: buff the party first, but only
         // if no fight is on (decided on the first monster count, see updateWave). Skipped when
         // this start came from a full buff (FB or the EG switch while stopped).
-        startBuffPending = run && endGame && !booster && why.equals("button")
+        if (run) farmMobsSeenAt = farmProgressAt = SystemClock.uptimeMillis();   // a moment before walking
+        lootStartedAt = 0;                                          // its tap tick was cleared above
+        startBuffPending = run && eg() && why.equals("button")
                 && SystemClock.uptimeMillis() - lastFullBuffAt >= FULL_BUFF_COOLDOWN_MS;
     }
 
@@ -743,9 +820,9 @@ public class ClickService extends AccessibilityService {
         int others = on ? View.GONE : View.VISIBLE;
         toggle.setVisibility(others);
         add.setVisibility(others);
-        // FB and EG/LL have no meaning in booster.
-        fullBuffButton.setVisibility(on || booster ? View.GONE : View.VISIBLE);
-        modeButton.setVisibility(on || booster ? View.GONE : View.VISIBLE);
+        // FB and EG/LL only mean something in FS.
+        fullBuffButton.setVisibility(on || !fsMode() ? View.GONE : View.VISIBLE);
+        modeButton.setVisibility(on || !fsMode() ? View.GONE : View.VISIBLE);
         LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) manualButton.getLayoutParams();
         lp.topMargin = on ? 0 : dp(8);
         manualButton.setLayoutParams(lp);
@@ -872,7 +949,7 @@ public class ClickService extends AccessibilityService {
         // End Game: a full buff casts every buff once, in order, through the last one. Judging by
         // our own buff row made it retry (e.g. buffs that went to a selected player) and the
         // cast-last buff (Massive Haste) never got its turn.
-        if (!running || !t.isSmart() || endGame) return;
+        if (!running || !t.isSmart() || eg()) return;
         // Read full at some point since the tap. Not "is it still full": a short buff (Massive
         // Haste) has drained below 90% by the time this runs, and was cast again for nothing.
         boolean took = t.lastFullAt >= t.lastTapAt;
@@ -999,7 +1076,7 @@ public class ClickService extends AccessibilityService {
         pending.remove(next);
         // The game locks all skills for a while after a cast: ~2.6-4 s after the heal (longer in a
         // fight), but only ~2.5 s after a buff. Wait just that long so the heal isn't held up.
-        busyUntil = now + TAP_MS + (next.priority ? tapGapMs : AFTER_BUFF_GAP_MS);
+        busyUntil = now + TAP_MS + (next.priority || farmer ? tapGapMs : AFTER_BUFF_GAP_MS);
         lastAnyTapAt = now;
         if (next.priority) lastPriorityTapAt = now;
         if (next.isSmart()) {
@@ -1040,11 +1117,12 @@ public class ClickService extends AccessibilityService {
             // End Game: a fixed 4 s, so the first buff goes before the next heal is due (4.17 s).
             // A learned wait (up to 3 s extra) let a heal in first and started the wait over: the
             // full buff began 10 s after the wave cleared.
-            long wait = endGame ? FORCED_AFTER_HEAL_MS : Math.max(tapGapMs + t.extraGapMs, FORCED_AFTER_HEAL_MS);
+            long wait = eg() ? FORCED_AFTER_HEAL_MS : Math.max(tapGapMs + t.extraGapMs, FORCED_AFTER_HEAL_MS);
             return Math.max(0, lastAnyTapAt + TAP_MS + wait - now);
         }
         boolean anyPriority = false;
         for (Target o : targets) if (o.priority) anyPriority = true;
+        if (farmer) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs - now);   // no learned waits
         if (!anyPriority) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + t.extraGapMs - now);
 
         long slotStart = lastPriorityTapAt + TAP_MS + tapGapMs + t.extraGapMs;
@@ -1282,55 +1360,54 @@ public class ClickService extends AccessibilityService {
     /** ▶/AUTO: when stopped, ask which mode to start in; when running, stop. */
     private void onToggle() {
         if (running) setRunning(false, "button");
-        else showModeChooser();
+        else showModeChooser(toggle);
     }
 
     /** ✋/AUTO: go manual, or (from manual) pick a mode to start in. */
     private void onManualButton() {
-        if (manual) showModeChooser();          // startInMode turns manual off and starts
+        if (manual) showModeChooser(manualButton);   // startInMode turns manual off and starts
         else setManual(true, "button");
     }
 
-    /** A small overlay with FS and BOOST; the one tapped starts the clicker in that mode. */
-    private void showModeChooser() {
+    /**
+     * Small circles, FS, BOOST and FARM, right beside the button you tapped (on its left if the bar
+     * sits at the right edge); the one tapped starts the clicker in that mode.
+     */
+    private void showModeChooser(View anchor) {
         closeModeChooser();
         closeEditor();
         LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setGravity(Gravity.CENTER);
-        panel.setPadding(dp(22), dp(18), dp(22), dp(18));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Color.rgb(28, 28, 28));
-        bg.setCornerRadius(dp(18));
-        bg.setStroke(dp(1), Color.rgb(90, 90, 90));
-        panel.setBackground(bg);
-
-        TextView title = new TextView(this);
-        title.setText("Start as");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(16);
-        title.setGravity(Gravity.CENTER);
-        panel.addView(title);
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        TextView fs = pillButton("FS", Color.rgb(170, 40, 40), () -> startInMode(false));
-        TextView boost = pillButton("BOOST", Color.rgb(150, 90, 30), () -> startInMode(true));
-        for (TextView b : new TextView[] {fs, boost}) {
-            b.setTextSize(18);
-            b.setTypeface(Typeface.DEFAULT_BOLD);
-            b.setPadding(dp(30), dp(16), dp(30), dp(16));
+        panel.setOrientation(LinearLayout.HORIZONTAL);
+        int size = dp(40), gap = dp(6);
+        TextView fs = roundButton("FS");
+        fs.setTextSize(14);
+        fs.setBackground(circle(Color.rgb(170, 40, 40)));
+        TextView boost = roundButton("BOOST");
+        boost.setTextSize(9);
+        boost.setBackground(circle(Color.rgb(150, 90, 30)));
+        TextView farm = roundButton("FARM");
+        farm.setTextSize(10);
+        farm.setBackground(circle(Color.rgb(60, 120, 40)));
+        TextView[] choices = {fs, boost, farm};
+        fs.setOnClickListener(v -> startInMode(false, false));
+        boost.setOnClickListener(v -> startInMode(true, false));
+        farm.setOnClickListener(v -> startInMode(false, true));
+        for (int i = 0; i < choices.length; i++) {
+            choices[i].setTypeface(Typeface.DEFAULT_BOLD);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
+            if (i > 0) lp.leftMargin = gap;
+            panel.addView(choices[i], lp);
         }
-        LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        bl.setMargins(dp(10), dp(14), dp(10), 0);
-        row.addView(fs, bl);
-        row.addView(boost, bl);
-        panel.addView(row);
 
         WindowManager.LayoutParams p = overlayParams(
                 WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
-        p.gravity = Gravity.CENTER;
+        int[] at = new int[2];
+        anchor.getLocationOnScreen(at);
+        int panelW = choices.length * size + (choices.length - 1) * gap;
+        int right = at[0] + anchor.getWidth() + gap;
+        p.x = right + panelW <= getResources().getDisplayMetrics().widthPixels
+                ? right : at[0] - gap - panelW;
+        p.y = at[1] + (anchor.getHeight() - size) / 2;
         p.flags |= WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
         panel.setOnTouchListener((v, e) -> {
             if (e.getActionMasked() == MotionEvent.ACTION_OUTSIDE) closeModeChooser();
@@ -1339,8 +1416,9 @@ public class ClickService extends AccessibilityService {
         if (safeAdd(panel, p)) modeChooser = panel;
     }
 
-    private void startInMode(boolean boostMode) {
+    private void startInMode(boolean boostMode, boolean farmMode) {
         closeModeChooser();
+        setFarmer(farmMode, "button");              // swaps in that mode's rings
         setBooster(boostMode, "button");            // sets ring/FB/mode-button visibility for the mode
         if (manual) setManual(false, "chooser");
         setRunning(true, "button");
@@ -1366,8 +1444,8 @@ public class ClickService extends AccessibilityService {
         }
         refreshModeButton();
         if (!manual) {
-            fullBuffButton.setVisibility(on ? View.GONE : View.VISIBLE);
-            modeButton.setVisibility(on ? View.GONE : View.VISIBLE);
+            fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
+            modeButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
         }
         for (Target t : targets) {
             t.root.setVisibility(on || manual || overlaysHidden ? View.GONE : View.VISIBLE);
@@ -1375,9 +1453,50 @@ public class ClickService extends AccessibilityService {
         if (changed && running) setRunning(true, "mode");   // reschedule ticks for the new mode
     }
 
+    /**
+     * Farmer mode on/off. Farmer has its own rings (attack skills), so switching saves the current
+     * layout and loads the other one; the FS heal/buff rings come back untouched.
+     */
+    private void setFarmer(boolean on, String why) {
+        boolean changed = farmer != on;
+        if (changed) {
+            closeEditor();
+            if (running) setRunning(false, "mode");
+            saveTargets();                          // under the outgoing mode's key
+            for (Target t : targets) safeRemove(t.root);
+            targets.clear();
+            pending.clear();
+            farmer = on;
+            loadTargets();
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_FARMER, on).apply();
+        if (changed || !why.equals("restored")) {
+            Log.i(TAG, "farmer mode " + (on ? "on: attack rings, walk when no monsters (" + targets.size()
+                    + " rings)" : "off") + " (" + why + ")");
+        }
+        if (!manual) {
+            fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
+            modeButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    /** Full support (EG or LL): not booster, not farmer. FB, EG/LL and chat-FB only apply here. */
+    private boolean fsMode() {
+        return !booster && !farmer;
+    }
+
+    /** End Game FS rules in force (waves, full buffs only). Farmer runs its rings like Low Level. */
+    private boolean eg() {
+        return endGame && fsMode();
+    }
+
+    private String targetsKey() {
+        return farmer ? KEY_TARGETS_FARM : KEY_TARGETS;
+    }
+
     private boolean buffNeeded(Target t) {
         // End Game: buffs only go out in full buffs; every other slot is a heal.
-        if (!t.forced && endGame) return false;
+        if (!t.forced && eg()) return false;
         return buffBelowRecast(t);
     }
 
@@ -1428,7 +1547,7 @@ public class ClickService extends AccessibilityService {
         schedulePump(0);
     }
 
-    /** In booster: the game is in front, in landscape, and no keyboard is up. */
+    /** In booster/farmer: the game is in front, in landscape, and no keyboard is up. */
     private boolean boosterCanAct() {
         if (keyboardShowing()) return false;
         DisplayMetrics real = new DisplayMetrics();
@@ -1516,6 +1635,180 @@ public class ClickService extends AccessibilityService {
             if (leftFree && rightFree) return true;
         }
         return false;
+    }
+
+    /**
+     * Farmer: nothing to fight for FARM_IDLE_MS -> walk a step (E, N, W, S in turn) to find more.
+     * "Fighting" is a target's HP bar showing at the top: monster names at some spots are white
+     * (Brute Punk), which the red-name counter misses, so it walked away mid-fight.
+     */
+    private void farmCheck(int mobs, float targetHp, long now) {
+        if (mobs < 0) return;
+        if (mobs != lastMobCount) Log.d(TAG, "monsters: ~" + mobs);
+        lastMobCount = mobs;
+        boolean target = targetHp >= 0;
+        // Stuck: the game keeps going for a monster it can't reach (behind a wall: "no clear line
+        // ... walking in", 2026-10-04 11:29), so its HP never drops. Any HP change, a new target or
+        // no target at all counts as progress.
+        if (!target || Math.abs(targetHp - farmTargetHp) > 0.01f) farmProgressAt = now;
+        farmTargetHp = targetHp;
+        Log.v(TAG, "farm scan: monsters ~" + mobs + ", target " + (target ? Math.round(targetHp * 100) + "%" : "none"));
+        long stuckAfter = targetHp >= 0.97f ? FARM_STUCK_FULL_MS : FARM_STUCK_MS;
+        if (target && now - farmProgressAt >= stuckAfter && canFarmMove(now)) {
+            Log.i(TAG, "farmer: target HP stuck at " + Math.round(targetHp * 100) + "% for "
+                    + (now - farmProgressAt) / 1000 + " s, dropping it and stepping away");
+            dropTargetAndStep(now);
+            return;
+        }
+        // Only a target bar counts as fighting. Red name tags here are Caloyski, whom the game
+        // auto-attacks without selecting (no bar) and can't reach: counting it as "monsters near"
+        // kept the character there for minutes (12:11). No bar for a while = walk a step.
+        if (target) {
+            farmMobsSeenAt = now;
+            return;
+        }
+        if (now - farmMobsSeenAt < FARM_IDLE_MS || !canFarmMove(now)) return;
+        Log.i(TAG, "farmer: no target for " + (now - farmMobsSeenAt) / 1000 + " s (monsters ~" + mobs
+                + "), walking " + "ENWS".charAt(farmWalkStep));
+        farmWalk(now);
+    }
+
+    /** Drop the selected target (its bar's ✕) and walk a step, so the game picks another monster. */
+    private void dropTargetAndStep(long now) {
+        farmProgressAt = now;
+        tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "drop target");
+        busyUntil = farmHoldUntil = now + TAP_MS + DESELECT_SETTLE_MS + FARM_PUSH_MS + FARM_WALK_MS
+                + FARM_WALK_SETTLE_MS;
+        handler.postDelayed(() -> farmWalk(SystemClock.uptimeMillis()), TAP_MS + DESELECT_SETTLE_MS);
+    }
+
+    /**
+     * Monsters Farmer won't fight: Caloyski (red name) keeps the character "walking in" to it
+     * behind walls for minutes (2026-10-04 11:29 and 12:08; the HP rule only caught it after 46 s).
+     * Its name on the target bar is read with the anti-bot text, so it's dropped within seconds.
+     */
+    private void checkTargetName(List<MathQuestion.Line> lines) {
+        if (!running || !farmer || farmTargetHp < 0) return;
+        for (MathQuestion.Line line : lines) {
+            if (line.box.bottom > screenH * TARGET_NAME_MAX_Y) continue;     // the target bar's title
+            String name = line.text.toLowerCase(java.util.Locale.ROOT);
+            for (String skip : FARM_SKIP_NAMES) {
+                if (!name.contains(skip)) continue;
+                long now = SystemClock.uptimeMillis();
+                if (!canFarmMove(now)) return;
+                Log.i(TAG, "farmer: target is " + line.text.trim() + " (skipped monster), dropping it");
+                dropTargetAndStep(now);
+                return;
+            }
+        }
+    }
+
+    private boolean canFarmMove(long now) {
+        // Not mid-walk/loot, and not during an attack tap (a new gesture would cancel it). The
+        // attack lock (busyUntil) is ignored: attacks come so often it would never let go.
+        return !questionSeen && now >= farmHoldUntil && now - lastAnyTapAt >= TAP_MS + 50
+                && now - userTouchAt >= USER_TOUCH_PAUSE_MS && boosterCanAct();
+    }
+
+    /** One step of the E, N, W, S walk; attacks hold off until it's done. */
+    private void farmWalk(long now) {
+        if (!running || !farmer) return;
+        int[] dir = FARM_WALK_DIRS[farmWalkStep];
+        farmWalkStep = (farmWalkStep + 1) % FARM_WALK_DIRS.length;
+        farmMobsSeenAt = now;                       // look again after the step
+        long window = FARM_PUSH_MS + FARM_WALK_MS;
+        ownTapUntil = now + window + OWN_TAP_SLACK_MS;
+        busyUntil = farmHoldUntil = now + window + FARM_WALK_SETTLE_MS;
+        float push = screenW * FARM_PUSH;
+        joystickHold(dir[0] * push, dir[1] * push, FARM_WALK_MS);
+    }
+
+    /**
+     * Farmer's text reading, from the screenshot the fight check already took (each screenshot is
+     * ~18 MB inside Android; separate ones for loot and the question ran the tablet out of memory
+     * and Android itself restarted, 2026-10-04 11:43). The play-area crop holds both the ground
+     * labels and the anti-bot panel's question line.
+     */
+    private void farmOcr(Bitmap shot) {
+        int x = Math.round(screenW * READ_L), y = Math.round(screenH * READ_T);
+        int w = Math.min(Math.round(screenW * READ_W), shot.getWidth() - x);
+        int h = Math.min(Math.round(screenH * READ_H), shot.getHeight() - y);
+        if (w <= 0 || h <= 0) return;
+        Bitmap crop;
+        try {
+            crop = Bitmap.createBitmap(shot, x, y, w, h);   // its own pixels: shot is recycled after
+        } catch (RuntimeException | OutOfMemoryError e) {
+            Log.w(TAG, "farmer: couldn't crop for reading: " + e);
+            return;
+        }
+        String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+        Ocr.read(crop, (lines, words) -> {
+            try {
+                for (MathQuestion.Line l : lines) l.box.offset(x, y);   // crop pixels -> screen pixels
+                checkForQuestion(game, lines);
+                checkTargetName(lines);
+            } finally {
+                crop.recycle();
+            }
+        }, false);
+    }
+
+    /**
+     * The loot hand shows (an item lies nearby): stop attacking until it's picked up. Tapped in
+     * between attacks, the next skill always overrode the pickup (the user's call, 12:15). So hold
+     * every skill, let the last one finish animating, tap the hand, re-tap while it still shows,
+     * and attack again once it's gone - or after LOOT_MAX_PAUSE_MS, then leave that item a while.
+     */
+    private void farmLootCheck(boolean handShowing, long now) {
+        if (lootStartedAt > 0) {                            // a pickup is under way
+            boolean gaveUp = now - lootStartedAt >= LOOT_MAX_PAUSE_MS;
+            if (handShowing && !gaveUp) return;
+            Log.i(TAG, "farmer: " + (handShowing ? "couldn't pick it up in " + LOOT_MAX_PAUSE_MS / 1000
+                    + " s, leaving it" : "picked up") + ", attacking again");
+            if (handShowing) lootIgnoreUntil = now + LOOT_IGNORE_MS;
+            lootStartedAt = 0;
+            handler.removeCallbacks(lootTapTick);
+            busyUntil = farmHoldUntil = now;
+            farmMobsSeenAt = farmProgressAt = now;          // standing still to loot isn't idling
+            schedulePump(0);
+            return;
+        }
+        if (!handShowing || now < lootIgnoreUntil || questionSeen || !canFarmMove(now)) return;
+        lootStartedAt = now;
+        busyUntil = farmHoldUntil = now + LOOT_MAX_PAUSE_MS;    // no attacks, no walking meanwhile
+        long wait = Math.max(0, lastAnyTapAt + TAP_MS + LOOT_AFTER_SKILL_MS - now);
+        Log.i(TAG, "farmer: item nearby, pausing attacks to loot it");
+        handler.removeCallbacks(lootTapTick);
+        handler.postDelayed(lootTapTick, wait);
+    }
+
+    /** Taps the hand, and again every LOOT_RETAP_MS while the pickup is under way. */
+    private void lootTapTick() {
+        if (!running || !farmer || lootStartedAt == 0) return;
+        tapAt(screenW * LOOT_HAND_X, screenH * LOOT_HAND_Y, "loot hand");
+        handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
+    }
+
+    /** Push the joystick from the centre by (dx, dy) and hold it there for holdMs, then release. */
+    private void joystickHold(float dx, float dy, int holdMs) {
+        if (!running) return;
+        float cx = screenW * JOYSTICK_X;
+        float cy = screenH * JOYSTICK_Y;
+        Path out = new Path();
+        out.moveTo(cx, cy);
+        out.lineTo(cx + dx, cy + dy);
+        GestureDescription.StrokeDescription push =
+                new GestureDescription.StrokeDescription(out, 0, FARM_PUSH_MS, true);
+        dispatchGesture(new GestureDescription.Builder().addStroke(push).build(), new GestureResultCallback() {
+            @Override
+            public void onCompleted(GestureDescription g) {
+                Path hold = new Path();
+                hold.moveTo(cx + dx, cy + dy);
+                hold.lineTo(cx + dx + 1, cy + dy);
+                dispatchGesture(new GestureDescription.Builder()
+                        .addStroke(push.continueStroke(hold, 0, holdMs, false)).build(), null, null);
+            }
+        }, null);
     }
 
     /** One brief joystick push from the centre by dx pixels, then released. */
@@ -1755,6 +2048,107 @@ public class ClickService extends AccessibilityService {
         return null;
     }
 
+    /** Every few seconds while the game is in front: is the (new, 4-button) math question up? */
+    private void questionWatchTick() {
+        watchHandler.postDelayed(questionWatchTick, QUESTION_WATCH_MS);
+        if (running && farmer) return;           // Farmer reads it from its own screenshots
+        if (!canReadScreen()) return;
+        String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+        if (!game.equals(foregroundPackage())) return;
+        // From the top-left corner, so OCR boxes are already screen pixels.
+        captureRegionForOcr(0f, 0f, 1f, QUESTION_SCAN_H, top -> {
+            if (top != null) Ocr.read(top, (lines, words) -> checkForQuestion(game, lines));
+        });
+    }
+
+    private void checkForQuestion(String game, List<MathQuestion.Line> lines) {
+        List<MathQuestion.Line> hits = new ArrayList<>();
+        for (MathQuestion.Line line : lines) {
+            String norm = line.text.toLowerCase(java.util.Locale.ROOT);
+            for (String w : QUESTION_WATCH_WORDS) {
+                if (norm.contains(w)) {
+                    hits.add(line);
+                    break;
+                }
+            }
+        }
+        long now = SystemClock.uptimeMillis();
+        if (hits.isEmpty()) {
+            if (questionSeen && ++questionAbsentScans >= 2) {
+                questionSeen = false;
+                Log.i(TAG, "question watch: question gone after " + (now - questionSeenAt) / 1000 + " s");
+                Alerts.clearQuestion(this);
+            }
+            return;
+        }
+        questionAbsentScans = 0;
+        StringBuilder text = new StringBuilder();
+        for (MathQuestion.Line l : hits) text.append(text.length() > 0 ? " / " : "").append(l.text);
+        if (!questionSeen) {
+            questionSeen = true;
+            questionSeenAt = now;
+            questionTaps = 0;
+            questionAlerted = false;
+            Log.i(TAG, "question watch: SEEN \"" + text + "\"");
+            for (MathQuestion.Line l : lines) {
+                Log.i(TAG, "question watch: line \"" + l.text + "\" at " + l.box.toShortString());
+            }
+            saveQuestionShot();
+        }
+        // Answer it: tap the one button showing the answer. Only while the clicker runs (in manual
+        // you're playing), a few tries at most, and never a guess: unsure -> alert you instead.
+        MathQuestion.Choice choice = running && !manual ? MathQuestion.solveChoice(lines) : null;
+        if (choice != null && questionTaps < QUESTION_MAX_TAPS && now - lastQuestionTapAt >= QUESTION_RETAP_MS) {
+            questionTaps++;
+            lastQuestionTapAt = now;
+            Log.i(TAG, "question watch: answering " + choice.answer + " -> \"" + choice.label + "\" at "
+                    + choice.button.toShortString() + " (tap " + questionTaps + ")");
+            busyUntil = Math.max(busyUntil, now + QUESTION_TAP_HOLD_MS);   // no attack tap in between
+            long wait = Math.max(0, lastAnyTapAt + TAP_MS + 60 - now);      // not on top of one either
+            Rect b = choice.button;
+            handler.postDelayed(() -> tapAt(b.exactCenterX(), b.exactCenterY(), "question answer"), wait);
+            if (questionTaps == 1) {
+                Telegram.send(this, "🧮 Ran Online anti-bot check: \"" + text + "\" -> tapped "
+                        + choice.label + ". Double-check it if you can.");
+            }
+            return;
+        }
+        if (!questionAlerted && (choice == null || questionTaps >= QUESTION_MAX_TAPS)) {
+            questionAlerted = true;
+            Log.w(TAG, "question watch: not answering (" + (choice == null ? "couldn't read it surely"
+                    : "still up after " + questionTaps + " taps") + "), alerting you");
+            Alerts.question(this, game, "The game is asking a question. Answer it in the game.");
+            Telegram.send(this, "⚠️ Ran Online anti-bot check is waiting for you: \"" + text
+                    + "\". Answer it in the game.");
+        }
+    }
+
+    /** Full screenshot of the question to a PNG (app files dir), then every word on it to the log. */
+    private void saveQuestionShot() {
+        captureForOcr(shot -> {
+            if (shot == null) return;
+            java.io.File dir = getExternalFilesDir(null);
+            String name = "question-" + new java.text.SimpleDateFormat("MMdd-HHmmss", java.util.Locale.ROOT)
+                    .format(new java.util.Date()) + ".png";
+            new Thread(() -> {
+                if (dir != null) {
+                    java.io.File f = new java.io.File(dir, name);
+                    try (java.io.FileOutputStream out = new java.io.FileOutputStream(f)) {
+                        shot.compress(Bitmap.CompressFormat.PNG, 100, out);
+                        Log.i(TAG, "question watch: saved " + f);
+                    } catch (java.io.IOException e) {
+                        Log.w(TAG, "question watch: couldn't save the screenshot: " + e);
+                    }
+                }
+                watchHandler.post(() -> Ocr.read(shot, (lines, words) -> {
+                    for (MathQuestion.Word w : words) {
+                        Log.i(TAG, "question watch: word \"" + w.text + "\" at " + w.box.toShortString());
+                    }
+                }));
+            }, "question-shot").start();
+        });
+    }
+
     /** The words OCR read, for the log when a question couldn't be parsed. */
     private static String describeWords(List<MathQuestion.Word> words) {
         StringBuilder sb = new StringBuilder();
@@ -1780,7 +2174,9 @@ public class ClickService extends AccessibilityService {
         GestureDescription gesture = new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, TAP_MS))
                 .build();
-        ownTapUntil = SystemClock.uptimeMillis() + TAP_MS + OWN_TAP_SLACK_MS;
+        // Never shorten it: a loot/walk gesture may have set it further out (a tap there used to
+        // cut it short, so the joystick walk looked like your finger and paused Farmer 4 s).
+        ownTapUntil = Math.max(ownTapUntil, SystemClock.uptimeMillis() + TAP_MS + OWN_TAP_SLACK_MS);
         boolean sent = dispatchGesture(gesture, new GestureResultCallback() {
             @Override
             public void onCompleted(GestureDescription g) {
@@ -1835,7 +2231,7 @@ public class ClickService extends AccessibilityService {
             // A smart buff's cooldown lasts far longer than a scan; only plain rings need 0.35 s.
             if (t.waitForCooldown && t.readyLook != null && !t.smartBuff) anyCooldown = true;
         }
-        boolean anyWatching = anyCooldown || anySmart;
+        boolean anyWatching = anyCooldown || anySmart || farmer;   // farmer counts monsters
         if (anyWatching && canReadScreen()) {
             boolean scanBuffs = anySmart;
             // The whole screen, for the monster count. Copying just the buff row saved nothing:
@@ -1850,10 +2246,20 @@ public class ClickService extends AccessibilityService {
                 long now = SystemClock.uptimeMillis();
                 // Screenshots come every 0.35 s while a ring watches a cooldown; counting once
                 // per BUFF_SCAN_EVERY_MS is plenty.
-                if (endGame && scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
+                if (eg() && scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
                     lastMobCountAt = now;
                     updateParty(MobCounter.partySize(shot, screenW, screenH));
                     updateWave(MobCounter.count(shot, screenW, screenH));
+                }
+                if (farmer && now - lastMobCountAt >= FARM_SCAN_MS - 100) {
+                    lastMobCountAt = now;
+                    farmCheck(MobCounter.count(shot, screenW, screenH),
+                            MobCounter.targetHp(shot, screenW, screenH), now);
+                    farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
+                    if (now - lastFarmOcrAt >= FARM_OCR_MS - 100) {
+                        lastFarmOcrAt = now;
+                        farmOcr(shot);
+                    }
                 }
                 if (scanBuffs) targetSelected = MobCounter.targetSelected(shot, screenW, screenH);
                 updatePresenceCheck(Prompts.presenceCheck(shot, screenW, screenH));
@@ -1885,7 +2291,8 @@ public class ClickService extends AccessibilityService {
         }
         // Each screenshot is a full-screen copy (~16 MB). Buff timers change slowly, so smart
         // buffs only need one a second; the fast rate is for rings watching a cooldown shade.
-        handler.postDelayed(this::cooldownCheck, anyCooldown ? SCREENSHOT_EVERY_MS : BUFF_SCAN_EVERY_MS);
+        handler.postDelayed(this::cooldownCheck,
+                anyCooldown ? SCREENSHOT_EVERY_MS : farmer ? FARM_SCAN_MS : BUFF_SCAN_EVERY_MS);
     }
 
     /** For the log: each icon as x,y size fill%. */
@@ -1952,7 +2359,7 @@ public class ClickService extends AccessibilityService {
         if (needed != wasNeeded) {
             Log.i(TAG, "buff target " + n + ": "
                     + (icon != null ? Math.round(icon.fill * 100) + "% left" : "not active")
-                    + (!needed ? ", ok" : endGame ? ", left for the next full buff" : ", recasting"));
+                    + (!needed ? ", ok" : eg() ? ", left for the next full buff" : ", recasting"));
         }
         if (wasNeeded && !needed && icon.fill >= 0.9f) {
             // Our tap took first time: the wait after the heal may be longer than it needs to be.
@@ -2401,12 +2808,12 @@ public class ClickService extends AccessibilityService {
             sb.append(',').append(t.extraGapMs);
             sb.append(',').append(t.castLast ? 1 : 0);
         }
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_TARGETS, sb.toString()).apply();
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(targetsKey(), sb.toString()).apply();
     }
 
     private void loadTargets() {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        String saved = prefs.getString(KEY_TARGETS, "");
+        String saved = prefs.getString(targetsKey(), "");
         boolean retune = !prefs.getBoolean(KEY_TUNED_40, false);
         for (String entry : saved.split(";")) {
             String[] parts = entry.split(",", -1);
@@ -2689,6 +3096,7 @@ public class ClickService extends AccessibilityService {
     @Override
     public boolean onUnbind(Intent intent) {
         if (instance == this) instance = null;
+        watchHandler.removeCallbacksAndMessages(null);
         if (wm != null) removeOverlays("unbind");
         return super.onUnbind(intent);
     }
@@ -2696,6 +3104,7 @@ public class ClickService extends AccessibilityService {
     @Override
     public void onDestroy() {
         if (instance == this) instance = null;
+        watchHandler.removeCallbacksAndMessages(null);
         if (wm != null) removeOverlays("destroy");
         super.onDestroy();
     }

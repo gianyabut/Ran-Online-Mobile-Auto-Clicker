@@ -32,6 +32,11 @@ final class Ocr {
     }
 
     static void read(Bitmap bitmap, Callback cb) {
+        read(bitmap, cb, true);
+    }
+
+    /** With recycle false the caller keeps the bitmap and recycles it itself once done. */
+    static void read(Bitmap bitmap, Callback cb, boolean recycle) {
         if (bitmap == null) {
             cb.onText(new ArrayList<>(), new ArrayList<>());
             return;
@@ -42,12 +47,12 @@ final class Ocr {
                     List<MathQuestion.Line> lines = new ArrayList<>();
                     List<MathQuestion.Word> words = new ArrayList<>();
                     flatten(text, lines, words);
-                    finish(bitmap, recognizer);
+                    finish(recycle ? bitmap : null, recognizer);
                     cb.onText(lines, words);
                 })
                 .addOnFailureListener(e -> {
                     Log.w(TAG, "OCR failed", e);
-                    finish(bitmap, recognizer);
+                    finish(recycle ? bitmap : null, recognizer);
                     cb.onText(new ArrayList<>(), new ArrayList<>());
                 });
     }
@@ -67,6 +72,6 @@ final class Ocr {
 
     private static void finish(Bitmap bitmap, TextRecognizer recognizer) {
         recognizer.close();
-        if (!bitmap.isRecycled()) bitmap.recycle();
+        if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
     }
 }
