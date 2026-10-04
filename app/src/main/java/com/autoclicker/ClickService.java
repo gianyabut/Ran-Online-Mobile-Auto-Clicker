@@ -357,6 +357,7 @@ public class ClickService extends AccessibilityService {
     private static final int BUFF_SPACING_MS = 6000;
     // After a buff reads full, ignore "low" readings this long (fastest buff needs ~30 s to 50%).
     private static final int JUST_FULL_MS = 15_000;
+    private static final int MISSING_GLITCH_MS = 20_000;
     // Below this a buff skips the spacing wait so it never runs out.
     private static final float SMART_URGENT_AT = 0.4f;
     private static final int MAX_EXTRA_GAP_MS = 3000;
@@ -404,6 +405,9 @@ public class ClickService extends AccessibilityService {
         boolean buffKnown;
         boolean buffFound;
         float buffFill;
+        // When and how full the buff was last actually seen (to spot a row misread as "gone").
+        long lastSeenAt;
+        float lastSeenFill;
         long lastTapAt;
         // While learning: the buff row just before this ring's last cast, and when to look again.
         List<BuffReader.Icon> learnBefore;
@@ -554,7 +558,10 @@ public class ClickService extends AccessibilityService {
             root.addOnLayoutChangeListener((v, l, t, r, b, oldL, oldT, oldR, oldB) -> {
                 int oldWidth = oldR - oldL;
                 int newWidth = r - l;
-                if (oldWidth > 0 && newWidth != oldWidth) {
+                // Hidden rings (manual, game off screen, installs) lay out at width 0: that's not a
+                // label change, and treating it as one pushed every ring half its width sideways
+                // each time it was hidden (rings "kept moving after a restart", 2026-10-04).
+                if (oldWidth > 0 && newWidth > 0 && newWidth != oldWidth) {
                     params.x += (oldWidth - newWidth) / 2;
                     safeUpdate(root, params);
                     saveTargets();
@@ -2473,6 +2480,14 @@ public class ClickService extends AccessibilityService {
         // a low reading is a glitch (the row reshuffling after a recast, often "48%"). Throw the
         // reading away entirely and keep the last good one, so nothing acts on it.
         if (icon != null && looksNeeded && now - t.lastFullAt < JUST_FULL_MS) return;
+        // Same for "not found at all": a buff seen well above its threshold moments ago can't
+        // be gone (rings 7-9 read 100/88/88% then all "not active" 10 s later and were recast at
+        // ~80%, 13:43). The row was misread; keep the last good reading.
+        if (icon == null && now - t.lastSeenAt < MISSING_GLITCH_MS && t.lastSeenFill >= t.recastAt + 0.25f) return;
+        if (icon != null) {
+            t.lastSeenAt = now;
+            t.lastSeenFill = icon.fill;
+        }
         // One odd frame (an effect or a player walking over the row) shouldn't trigger a recast:
         // only believe "missing" or "low" once two scans in a row agree.
         t.neededStreak = looksNeeded ? t.neededStreak + 1 : 0;
