@@ -919,7 +919,7 @@ public class ClickService extends AccessibilityService {
         // End Game starts the cycle like the support does by hand: buff the party first, but only
         // if no fight is on (decided on the first monster count, see updateWave). Skipped when
         // this start came from a full buff (FB or the EG switch while stopped).
-        if (run) farmMobsSeenAt = farmProgressAt = SystemClock.uptimeMillis();   // a moment before walking
+        if (run) farmMobsSeenAt = farmProgressAt = lastTargetBarAt = SystemClock.uptimeMillis();   // a moment before walking
         luring = run && lureMode;                                  // LURE: start by gathering a group
         lureStartedAt = SystemClock.uptimeMillis();
         lureHits = 0;
