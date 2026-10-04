@@ -157,6 +157,12 @@ final class BuffReader {
      * there isn't exactly one, e.g. the tap was ignored or a teammate buffed at the same moment.
      */
     static Icon refreshedIcon(List<Icon> before, List<Icon> after) {
+        // Both reads must be the same row: once the "before" row was other, smaller boxes (42 px at
+        // y 210 vs the buff row's 62 px at y 238), so every real icon looked new and a ring learned
+        // someone else's buff (2026-10-04 13:30).
+        if (!before.isEmpty() && !after.isEmpty()
+                && (Math.abs(before.get(0).size - after.get(0).size) > 6
+                || Math.abs(before.get(0).y - after.get(0).y) > 6)) return null;
         Icon appeared = null;
         int appearedCount = 0;
         Icon best = null;

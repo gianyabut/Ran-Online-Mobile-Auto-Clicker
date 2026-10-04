@@ -1092,7 +1092,10 @@ public class ClickService extends AccessibilityService {
         pending.remove(next);
         // The game locks all skills for a while after a cast: ~2.6-4 s after the heal (longer in a
         // fight), but only ~2.5 s after a buff. Wait just that long so the heal isn't held up.
-        busyUntil = now + TAP_MS + (next.priority || farmer ? tapGapMs : AFTER_BUFF_GAP_MS);
+        // Farmer: attack after attack at the quick pace, but after a buff let its cast finish - the
+        // next attack 0.8 s later cancelled it (the user, 13:31).
+        boolean quick = next.priority || (farmer && !next.isSmart());
+        busyUntil = now + TAP_MS + (quick ? tapGapMs : AFTER_BUFF_GAP_MS);
         lastAnyTapAt = now;
         if (next.priority) lastPriorityTapAt = now;
         if (next.isSmart()) {
