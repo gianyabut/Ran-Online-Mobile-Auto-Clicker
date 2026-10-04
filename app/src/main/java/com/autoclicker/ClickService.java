@@ -1172,7 +1172,7 @@ public class ClickService extends AccessibilityService {
             }
         }
         if (pending.isEmpty()) return;
-        if (farmer && farmBuffsHeld(now) && pending.stream().allMatch(Target::isSmart)) {
+        if (farmer && farmBuffsHeld(now) && pending.stream().allMatch(t -> t.isSmart() && !t.forced)) {
             schedulePump(1000);                         // only buffs waiting, and a fight is on
             return;
         }
@@ -1691,6 +1691,9 @@ public class ClickService extends AccessibilityService {
         // five buffs back to back stalled a fight ~15 s while the target healed).
         if (farmer) {
             if (farmBuffsHeld(now)) {
+                // A full buff that started finishes even if the next fight began meanwhile: it held
+                // Power Up back 50 s and it ran from 48% to 2% (00:10:29).
+                for (Target t : pending) if (t.isSmart() && t.forced) return t;
                 for (Target t : pending) if (!t.isSmart()) return t;
             } else {
                 for (Target t : pending) if (t.isSmart()) return t;
