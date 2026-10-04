@@ -228,7 +228,7 @@ public class ClickService extends AccessibilityService {
     // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
     // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
     private static final float KILL_SOON_HP = 0.4f;
-    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 2500;
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 5500;
     private long postKillUntil;
     // Buffs wait while fighting: a target bar on the last scan, a monster name close by in the
     // last NEAR_TAG_FIGHT_MS, a pickup or the post-kill pause. After FARM_BUFF_HOLD_MAX_MS of
@@ -1921,9 +1921,18 @@ public class ClickService extends AccessibilityService {
         // A kill (the bar went away): hold attacks a moment and look again for the loot hand.
         // Attacking on straight away auto-targeted the next monster and ran off from the drop,
         // and the hand then walked the character all the way back (the user, 12:55).
+        // Drops show their hand ~1 s or ~5 s after the kill (12 min of kills, 2026-10-05 06:45-06:57:
+        // 0.9-1.0 s or 4.96-5.02 s), so wait up to POST_KILL_HOLD_MS; the hand ends it early.
         if (!target && farmTargetHp >= 0 && lootStartedAt == 0 && now >= lootIgnoreUntil) {
             postKillUntil = now + POST_KILL_HOLD_MS;
             busyUntil = Math.max(busyUntil, postKillUntil);
+        }
+        // The game locked the next monster by itself during the pause: the character is off to it
+        // already, so waiting for the drop gains nothing.
+        if (target && farmTargetHp < 0 && now < postKillUntil && lootStartedAt == 0) {
+            postKillUntil = now;
+            busyUntil = now;
+            schedulePump(0);
         }
         // Stuck: the game keeps going for a monster it can't reach (behind a wall: "no clear line
         // ... walking in", 2026-10-04 11:29), so its HP never drops. Any HP change, a new target or
@@ -2198,7 +2207,10 @@ public class ClickService extends AccessibilityService {
         List<Target> low = new ArrayList<>();
         for (Target t : targets) {
             if (!t.isSmart() || t.priority || t.onCooldown() || pending.contains(t)) continue;
-            if (!t.buffKnown || !t.buffFound || t.buffFill <= FARM_TOPUP_AT) low.add(t);
+            // Only buffs actually read since the start: right after ▶ every reading is "unknown",
+            // and all five went out, two of them at 95-98% (06:59:36). Missing ones still get their
+            // own recast once read.
+            if (t.buffKnown && (!t.buffFound || t.buffFill <= FARM_TOPUP_AT)) low.add(t);
         }
         if (low.isEmpty()) return;
         lastFarmFullBuffAt = now;
