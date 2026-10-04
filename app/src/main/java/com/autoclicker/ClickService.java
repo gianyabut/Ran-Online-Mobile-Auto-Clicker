@@ -215,6 +215,7 @@ public class ClickService extends AccessibilityService {
     private boolean luring;
     // Monster names learned from the target bar this session (see checkTargetName).
     private final java.util.Set<String> knownMonsters = new java.util.HashSet<>();
+    private static final String KEY_MONSTERS = "farm_monsters";
     private long lureStartedAt, lastPullAt, pullingSince;
     private static final String[] FARM_SKIP_NAMES = {"caloyski"};
     private int refusedInARow;
@@ -647,6 +648,9 @@ public class ClickService extends AccessibilityService {
         removeOverlays("connect");
         // Farmer keeps its own rings: load the layout of the mode it was last in.
         farmer = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FARMER, false);
+        knownMonsters.clear();
+        knownMonsters.addAll(getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getStringSet(KEY_MONSTERS, java.util.Collections.emptySet()));
         loadTargets();
         refusedInARow = 0;
         instance = this;
@@ -1904,6 +1908,9 @@ public class ClickService extends AccessibilityService {
             boolean skipped = java.util.Arrays.stream(FARM_SKIP_NAMES).anyMatch(key::contains);   // never lure Caloyski
             if (!skipped && mid > screenW * 0.3f && mid < screenW * 0.7f && key.length() >= 4 && knownMonsters.add(key)) {
                 Log.i(TAG, "farmer: learned monster name \"" + line.text.trim() + "\"");
+                // Kept across restarts and installs, so luring works from the first fight.
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putStringSet(KEY_MONSTERS, new java.util.HashSet<>(knownMonsters)).apply();
             }
             for (String skip : FARM_SKIP_NAMES) {
                 if (!name.contains(skip)) continue;
