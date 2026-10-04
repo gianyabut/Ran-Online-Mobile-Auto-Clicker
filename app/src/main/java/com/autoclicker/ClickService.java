@@ -225,7 +225,7 @@ public class ClickService extends AccessibilityService {
     private static final String[] FARM_SKIP_NAMES = {"caloyski"};
     // Aggressive monsters chase whoever comes within their range, so no punch is needed: walk
     // toward one for LURE_AGGRO_WALK_SHARE of the run there (capped) and it follows (the user, 14:56).
-    private static final String[] FARM_AGGRO_NAMES = {"skatingmaster"};
+    private static final String[] FARM_AGGRO_NAMES = {"skatingmaster", "skatingboy"};
     private static final float LURE_AGGRO_WALK_SHARE = 0.6f;
     private static final int LURE_AGGRO_MAX_WALK_MS = 2500;
     private final List<Rect> aggroTags = new ArrayList<>();   // this scan's aggressive name tags
