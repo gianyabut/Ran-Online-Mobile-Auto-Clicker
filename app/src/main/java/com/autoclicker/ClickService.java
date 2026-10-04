@@ -209,7 +209,10 @@ public class ClickService extends AccessibilityService {
     private static final int LURE_COUNT = 3;
     private static final float LURE_NEAR_W = 0.25f, LURE_FAR_W = 0.6f, LURE_BODY_BELOW = 2f, LURE_HIT_HP = 0.97f;
     private static final float FIST_X = 2362 / 2560f, FIST_Y = 1386 / 1600f;
-    private static final int LURE_PULL_GAP_MS = 2500, LURE_SELECT_SETTLE_MS = 300, LURE_PULL_MAX_MS = 4000;
+    private static final int LURE_PULL_GAP_MS = 2500, LURE_SELECT_SETTLE_MS = 300, LURE_PULL_MAX_MS = 7000;
+    // Run speed toward a pulled monster (screen px/s, as measured for walks) and one punch's time.
+    private static final float LURE_RUN_PX_PER_S = 350f;
+    private static final int LURE_ONE_PUNCH_MS = 450;
     private static final int LURE_START_IDLE_MS = 3000, LURE_MAX_MS = 30_000;   // incl. walking to find them
     private static final float HUD_TOP_H = 0.15f, HUD_LEFT_W = 0.25f, HUD_LEFT_H = 0.25f;
     private boolean luring, lureMode;
@@ -220,6 +223,12 @@ public class ClickService extends AccessibilityService {
     private long lureStartedAt, lastPullAt, pullingSince;
     private int lureHits;   // pulls that landed this round
     private static final String[] FARM_SKIP_NAMES = {"caloyski"};
+    // Aggressive monsters chase whoever comes within their range, so no punch is needed: walk
+    // toward one for LURE_AGGRO_WALK_SHARE of the run there (capped) and it follows (the user, 14:56).
+    private static final String[] FARM_AGGRO_NAMES = {"skatingmaster"};
+    private static final float LURE_AGGRO_WALK_SHARE = 0.6f;
+    private static final int LURE_AGGRO_MAX_WALK_MS = 2500;
+    private final List<Rect> aggroTags = new ArrayList<>();   // this scan's aggressive name tags
     private int refusedInARow;
     // The connected service, for the watchdog's health check (it runs in this same process).
     private static volatile ClickService instance;
@@ -1805,6 +1814,7 @@ public class ClickService extends AccessibilityService {
      */
     private List<Rect> monsterTags(List<MathQuestion.Line> lines, Bitmap crop, int ox, int oy) {
         List<Rect> tags = new ArrayList<>();
+        aggroTags.clear();
         for (MathQuestion.Line line : lines) {
             if (!isKnownMonster(line.text)) {
                 if (luring && line.text.trim().length() >= 4) Log.d(TAG, "lure skip \"" + line.text.trim() + "\" (not a learned monster)");
@@ -1832,7 +1842,10 @@ public class ClickService extends AccessibilityService {
             }
             // Any colour: weaker monsters' names are gray, not white (the user, 14:44), so a
             // colour test missed every monster here. Only learned names get this far anyway.
-            tags.add(new Rect(line.box));
+            Rect tag = new Rect(line.box);
+            tags.add(tag);
+            String key = monsterKey(line.text);
+            if (java.util.Arrays.stream(FARM_AGGRO_NAMES).anyMatch(key::contains)) aggroTags.add(tag);
         }
         return tags;
     }
@@ -1901,6 +1914,22 @@ public class ClickService extends AccessibilityService {
         }
         if (pull != null) farmMobsSeenAt = now;                         // monsters in range: no walking off
         if (pull == null || pullingSince > 0 || now - lastPullAt < LURE_PULL_GAP_MS || !canFarmMove(now)) return;
+        if (aggroTags.contains(pull)) {
+            // Aggressive: just get within its range and it comes (the user, 14:56). Walk toward it,
+            // then count it as following.
+            float dx = pull.exactCenterX() - screenW * 0.5f, dy = pull.exactCenterY() - screenH * 0.53f;
+            float len = (float) Math.hypot(dx, dy), push = screenW * FARM_PUSH;
+            int walkMs = (int) Math.min(LURE_AGGRO_MAX_WALK_MS, pullDist * 1000f / LURE_RUN_PX_PER_S * LURE_AGGRO_WALK_SHARE);
+            lastPullAt = now;
+            lureHits++;
+            ownTapUntil = now + FARM_PUSH_MS + walkMs + OWN_TAP_SLACK_MS;
+            busyUntil = farmHoldUntil = now + FARM_PUSH_MS + walkMs + FARM_WALK_SETTLE_MS;
+            Log.i(TAG, "farmer: luring (" + followers + " following), walking " + walkMs
+                    + " ms toward the aggressive one at " + pull.centerX() + "," + pull.centerY()
+                    + " (" + lureHits + " pulled)");
+            joystickHold(dx / len * push, dy / len * push, walkMs);
+            return;
+        }
         // The pull is the fist (basic attack, no cooldown; ring 1 is long range but its cooldown is
         // long - the user). Select the monster, punch; once it's hit, drop it (lurePullCheck) so
         // the punches stop and it just chases.
@@ -1915,6 +1944,18 @@ public class ClickService extends AccessibilityService {
             lastAnyTapAt = SystemClock.uptimeMillis();
             tapAt(screenW * FIST_X, screenH * FIST_Y, "lure punch");
         }, TAP_MS + LURE_SELECT_SETTLE_MS);
+        // One punch is enough to pull it (the user, 14:52); the fist keeps auto-attacking until the
+        // target is dropped, so drop it as soon as the run there plus one punch should be done
+        // rather than at the next screenshot (2 s, several punches later).
+        long dropAfter = TAP_MS + LURE_SELECT_SETTLE_MS + TAP_MS
+                + Math.round(pullDist * 1000f / LURE_RUN_PX_PER_S) + LURE_ONE_PUNCH_MS;
+        handler.postDelayed(() -> {
+            if (!running || !farmer || pullingSince == 0) return;     // already dropped (seen hit)
+            pullingSince = 0;
+            lureHits++;
+            tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
+            Log.i(TAG, "farmer: pull punched once (" + lureHits + " pulled), dropped the target");
+        }, dropAfter);
     }
 
     /** While pulling: once the target's HP shows a hit (or it took too long), drop it. */
