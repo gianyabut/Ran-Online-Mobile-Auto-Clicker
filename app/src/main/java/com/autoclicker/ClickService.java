@@ -141,7 +141,7 @@ public class ClickService extends AccessibilityService {
     private static final String KEY_TARGETS_FARM = "targets_farm";
     private boolean farmer;
     // Kills leave gaps (a dead monster stays "selected" a few seconds), so wait well past them.
-    private static final int FARM_IDLE_MS = 8000;
+    private static final int FARM_IDLE_MS = 10_000;
     // One screenshot every 2 s does the fight check, and every 2nd one the loot + question reading
     // (separate screenshots failed when too close together and ran the tablet out of memory).
     private static final int FARM_SCAN_MS = 2000;
@@ -155,7 +155,7 @@ public class ClickService extends AccessibilityService {
     private int farmLegLen = 1, farmLegDone, farmTurns;
     private long farmMobsSeenAt;
     // Target HP not dropping this long = stuck on a monster it can't reach.
-    private static final int FARM_STUCK_MS = 10_000;
+    private static final int FARM_STUCK_MS = 15_000;   // tougher monsters take a few hits (13:37)
     // A full bar that stays full may be a new monster each check (fast kills: 3 in 15 s read 99%
     // every time), so a full bar has to stay full for longer.
     private static final int FARM_STUCK_FULL_MS = 45_000;   // 20 s still dropped fast kills (11:54)
@@ -196,6 +196,8 @@ public class ClickService extends AccessibilityService {
     // From just under the HP bars at the top (so the target bar's name is in it) down to the chat.
     private static final float READ_L = 0.15f, READ_T = 0.02f, READ_W = 0.65f, READ_H = 0.72f;
     private static final float TARGET_NAME_MAX_Y = 0.07f;     // title ends ~0.064H
+    // Monster names this far from the character (share of screen width) count as "a fight is on".
+    private static final float MONSTER_NEAR_W = 0.3f;
     private static final String[] FARM_SKIP_NAMES = {"caloyski"};
     private int refusedInARow;
     // The connected service, for the watchdog's health check (it runs in this same process).
@@ -1724,6 +1726,35 @@ public class ClickService extends AccessibilityService {
         farmWalk(now);
     }
 
+    /**
+     * A monster name tag (white text on its dark box, e.g. "Brute Punk") within reach of the
+     * character. The game often fights with no target bar (auto skills hit without selecting), so
+     * the bar alone said "nothing here" and the character walked off mid-fight (13:36). Our own
+     * name and item labels are yellow, the pet green, Caloyski red: none of them count.
+     */
+    private boolean monsterNameNear(List<MathQuestion.Line> lines, Bitmap crop, int ox, int oy) {
+        float cx = screenW * 0.5f, cy = screenH * 0.53f;
+        float reach = screenW * MONSTER_NEAR_W;
+        for (MathQuestion.Line line : lines) {
+            if (line.text.trim().length() < 4) continue;
+            if (Math.hypot(line.box.exactCenterX() - cx, line.box.exactCenterY() - cy) > reach) continue;
+            int l = Math.max(0, line.box.left - ox), t = Math.max(0, line.box.top - oy);
+            int r = Math.min(crop.getWidth(), line.box.right - ox), b = Math.min(crop.getHeight(), line.box.bottom - oy);
+            int white = 0, total = 0;
+            for (int yy = t; yy < b; yy += 2) {
+                for (int xx = l; xx < r; xx += 2) {
+                    int c = crop.getPixel(xx, yy);
+                    int mn = Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c)));
+                    int mx = Math.max(Color.red(c), Math.max(Color.green(c), Color.blue(c)));
+                    total++;
+                    if (mn > 185 && mx - mn < 35) white++;
+                }
+            }
+            if (total > 0 && white * 100 >= total * 6) return true;
+        }
+        return false;
+    }
+
     /** Drop the selected target (its bar's ✕) and walk a step, so the game picks another monster. */
     private void dropTargetAndStep(long now) {
         farmProgressAt = now;
@@ -1757,7 +1788,9 @@ public class ClickService extends AccessibilityService {
     private boolean canFarmMove(long now) {
         // Not mid-walk/loot, and not during an attack tap (a new gesture would cancel it). The
         // attack lock (busyUntil) is ignored: attacks come so often it would never let go.
+        // Nor during a buff's cast: a walk right after the buff tap cancelled it (13:36).
         return !questionSeen && now >= farmHoldUntil && now - lastAnyTapAt >= TAP_MS + 50
+                && now - lastBuffTapAt >= TAP_MS + FARM_AFTER_BUFF_MS
                 && now - userTouchAt >= USER_TOUCH_PAUSE_MS && boosterCanAct();
     }
 
@@ -1804,6 +1837,7 @@ public class ClickService extends AccessibilityService {
                 for (MathQuestion.Line l : lines) l.box.offset(x, y);   // crop pixels -> screen pixels
                 checkForQuestion(game, lines);
                 checkTargetName(lines);
+                if (monsterNameNear(lines, crop, x, y)) farmMobsSeenAt = SystemClock.uptimeMillis();
             } finally {
                 crop.recycle();
             }
