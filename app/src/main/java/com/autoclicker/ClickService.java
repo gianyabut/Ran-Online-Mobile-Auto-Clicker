@@ -222,6 +222,13 @@ public class ClickService extends AccessibilityService {
     // fighting in a row they get a FARM_BUFF_WINDOW_MS window, so stragglers can't starve them.
     private static final int NEAR_TAG_FIGHT_MS = 5000, FARM_BUFF_HOLD_MAX_MS = 45_000, FARM_BUFF_WINDOW_MS = 4000;
     private long buffsHeldSince, buffWindowUntil, nearTagAt;
+    // When a fight ends: a full buff - every buff at or below FARM_TOPUP_AT (or gone) back to back,
+    // so all of them start the next fight well above the 20% recast line (the user, 2026-10-05:
+    // with buffs held mid-fight, the ~6 s spacing let only one go per break and the rest ran low).
+    private static final float FARM_TOPUP_AT = 0.5f;
+    private static final int FARM_FULL_BUFF_GAP_MS = 20_000;
+    private boolean wasFighting;
+    private long lastFarmFullBuffAt;
     // Attacks going out but no target bar for this long: the game keeps aiming at a monster it
     // can't lock (every skill "auto -> 2:348", never a lock, 20 min standing still at 15:52). The
     // names around kept the idle walk from starting, so step away and let it pick another.
@@ -2141,6 +2148,29 @@ public class ClickService extends AccessibilityService {
         }
     }
 
+    /** Farmer, a fight just ended: cast every low or missing buff back to back. */
+    private void farmFullBuff() {
+        long now = SystemClock.uptimeMillis();
+        if (!running || !farmer || now - lastFarmFullBuffAt < FARM_FULL_BUFF_GAP_MS) return;
+        List<Target> low = new ArrayList<>();
+        for (Target t : targets) {
+            if (!t.isSmart() || t.priority || t.onCooldown() || pending.contains(t)) continue;
+            if (!t.buffKnown || !t.buffFound || t.buffFill <= FARM_TOPUP_AT) low.add(t);
+        }
+        if (low.isEmpty()) return;
+        lastFarmFullBuffAt = now;
+        StringBuilder which = new StringBuilder();
+        for (Target t : low) {
+            which.append(which.length() > 0 ? "," : "").append(targets.indexOf(t) + 1)
+                    .append(t.buffFound ? " " + Math.round(t.buffFill * 100) + "%" : " off");
+            t.forced = true;
+            t.forcedRetries = 0;
+            queueTap(t);
+        }
+        Log.i(TAG, "farmer: fight over, full buff: " + low.size() + " at or below "
+                + Math.round(FARM_TOPUP_AT * 100) + "% (targets " + which + ")");
+    }
+
     /** Farmer: hold buff casts while a fight is on. */
     private boolean farmBuffsHeld(long now) {
         // Luring isn't fighting: attacks are paused and the followers only tag along, so that's
@@ -2149,8 +2179,13 @@ public class ClickService extends AccessibilityService {
                 && (farmTargetHp >= 0 || now - nearTagAt < NEAR_TAG_FIGHT_MS || now < postKillUntil)));
         if (!fighting) {
             buffsHeldSince = 0;
+            if (wasFighting) {
+                wasFighting = false;
+                handler.post(this::farmFullBuff);           // not from inside the queue walk
+            }
             return false;
         }
+        wasFighting = true;
         if (now < buffWindowUntil) return false;
         if (buffsHeldSince == 0) buffsHeldSince = now;
         if (now - buffsHeldSince < FARM_BUFF_HOLD_MAX_MS) return true;
