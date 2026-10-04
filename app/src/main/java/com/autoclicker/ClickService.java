@@ -1126,7 +1126,9 @@ public class ClickService extends AccessibilityService {
         }
         boolean anyPriority = false;
         for (Target o : targets) if (o.priority) anyPriority = true;
-        if (farmer) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs - now);   // no learned waits
+        // Farmer: attacks keep the quick pace; a buff waits out the last skill's lock (its learned
+        // extra wait), or it lands mid-animation and is ignored (12:32-12:33).
+        if (farmer) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + (t.isSmart() ? t.extraGapMs : 0) - now);
         if (!anyPriority) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + t.extraGapMs - now);
 
         long slotStart = lastPriorityTapAt + TAP_MS + tapGapMs + t.extraGapMs;
