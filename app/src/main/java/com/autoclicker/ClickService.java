@@ -222,6 +222,13 @@ public class ClickService extends AccessibilityService {
     private static final String KEY_MONSTERS = "farm_monsters";
     private long lureStartedAt, lastPullAt, pullingSince;
     private int lureHits;   // pulls that landed this round
+    // The fight after a lure: how many were gathered, how many died since, when it began. The
+    // next lure starts once the group is dead (monsters straggling in kept it fighting one at a
+    // time and never luring again, 15:06), or after a real lull - not one scan without a bar,
+    // which left a monster at 56% beating on the character for 20 s while it lured (15:07:33).
+    private int lureGathered, fightKills, noTargetScans;
+    private long lureFightStartedAt, lastLureDropAt;
+    private static final int LURE_FIGHT_MIN_MS = 8000;
     private static final String[] FARM_SKIP_NAMES = {"caloyski"};
     // Aggressive monsters chase whoever comes within their range, so no punch is needed: walk
     // toward one for LURE_AGGRO_WALK_SHARE of the run there (capped) and it follows (the user, 14:56).
@@ -1766,12 +1773,29 @@ public class ClickService extends AccessibilityService {
         lastMobCount = mobs;
         boolean target = targetHp >= 0;
         lurePullCheck(targetHp, now);
-        // Nothing left to fight for a moment: gather the next group.
-        if (lureMode && !luring && !target && lootStartedAt == 0 && now - farmMobsSeenAt >= LURE_START_IDLE_MS) {
+        // A kill: the bar went away (or jumped to a fresh monster) right after reading low.
+        if (farmTargetHp >= 0 && farmTargetHp <= 0.35f && (!target || targetHp - farmTargetHp > 0.4f)) fightKills++;
+        noTargetScans = target ? 0 : noTargetScans + 1;
+        // Gather the next group once this one is dead, or after a real lull with nothing to fight.
+        boolean groupDead = lureGathered > 0 && fightKills >= lureGathered;
+        boolean lull = noTargetScans >= 2 && now - farmMobsSeenAt >= LURE_START_IDLE_MS
+                && now - lureFightStartedAt >= LURE_FIGHT_MIN_MS;
+        if (lureMode && !luring && !target && lootStartedAt == 0 && (groupDead || lull)) {
             luring = true;
             lureStartedAt = now;
             lureHits = 0;
-            Log.i(TAG, "farmer: fight over, luring the next " + LURE_COUNT);
+            Log.i(TAG, "farmer: " + (groupDead ? "group of " + lureGathered + " killed" : "fight over")
+                    + ", luring the next " + LURE_COUNT);
+        }
+        // Luring, but a monster is already on us (the game auto-targeted it, or it was left from
+        // the fight): drop it so it just follows, and count it as gathered.
+        if (luring && target && pullingSince == 0 && now - lastLureDropAt >= 1500) {
+            lastLureDropAt = now;
+            boolean onUs = targetHp < LURE_HIT_HP;
+            if (onUs) lureHits++;
+            tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
+            Log.i(TAG, "farmer: luring, dropped a selected monster at " + Math.round(targetHp * 100) + "%"
+                    + (onUs ? " (on us, " + lureHits + " gathered)" : ""));
         }
         // A kill (the bar went away): hold attacks a moment and look again for the loot hand.
         // Attacking on straight away auto-targeted the next monster and ran off from the drop,
@@ -1817,7 +1841,6 @@ public class ClickService extends AccessibilityService {
         aggroTags.clear();
         for (MathQuestion.Line line : lines) {
             if (!isKnownMonster(line.text)) {
-                if (luring && line.text.trim().length() >= 4) Log.d(TAG, "lure skip \"" + line.text.trim() + "\" (not a learned monster)");
                 continue;
             }
             // Not the HUD: the top strip (target bar title) and the top-left panel ("Lv. 148",
@@ -1901,6 +1924,9 @@ public class ClickService extends AccessibilityService {
             luring = false;
             busyUntil = now;
             farmMobsSeenAt = farmProgressAt = now;
+            lureGathered = Math.min(followers, LURE_COUNT);
+            fightKills = 0;
+            lureFightStartedAt = now;
             Log.i(TAG, "farmer: lured " + followers + " (" + (followers >= LURE_COUNT ? "enough"
                     : timeUp ? "time up" : "no more in range") + "), fighting");
             schedulePump(0);
@@ -1955,6 +1981,7 @@ public class ClickService extends AccessibilityService {
             if (!running || !farmer || pullingSince == 0) return;     // already dropped (seen hit)
             pullingSince = 0;
             lureHits++;
+            lastLureDropAt = SystemClock.uptimeMillis();
             tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
             Log.i(TAG, "farmer: pull punched once (" + lureHits + " pulled), dropped the target");
         }, dropAfter);
@@ -1966,6 +1993,7 @@ public class ClickService extends AccessibilityService {
         boolean hit = targetHp >= 0 && targetHp < LURE_HIT_HP;
         if (!hit && now - pullingSince < LURE_PULL_MAX_MS) return;
         pullingSince = 0;
+        lastLureDropAt = now;
         if (targetHp >= 0) tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
         if (hit) lureHits++;
         Log.i(TAG, "farmer: pull " + (hit ? "hit it (" + lureHits + " pulled)" : "timed out") + ", dropped the target");
