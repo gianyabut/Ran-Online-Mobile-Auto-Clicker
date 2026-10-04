@@ -195,10 +195,27 @@ public class ClickService extends AccessibilityService {
     private static final int FARM_OCR_MS = 4000;
     private long lastFarmOcrAt;
     // From just under the HP bars at the top (so the target bar's name is in it) down to the chat.
-    private static final float READ_L = 0.15f, READ_T = 0.02f, READ_W = 0.65f, READ_H = 0.72f;
+    // Wide, for luring on sparse maps (a Skating Master at 0.87W was out of view); the HUD, ring
+    // labels and minimap text in it never match a learned monster name.
+    private static final float READ_L = 0.05f, READ_T = 0.02f, READ_W = 0.87f, READ_H = 0.72f;
     private static final float TARGET_NAME_MAX_Y = 0.07f;     // title ends ~0.064H
     // Monster names this far from the character (share of screen width) count as "a fight is on".
     private static final float MONSTER_NEAR_W = 0.3f;
+    // Luring: gather LURE_COUNT within LURE_NEAR_W (share of screen width) of the character before
+    // fighting; pull the nearest one out to LURE_FAR_W with the fist (FIST_X/Y), one every
+    // LURE_PULL_GAP_MS, tapping LURE_BODY_BELOW tag-heights under its name to select it. A pull is
+    // dropped once the target reads below LURE_HIT_HP or after LURE_PULL_MAX_MS. Luring starts
+    // LURE_START_IDLE_MS after the last fight and gives up after LURE_MAX_MS.
+    private static final int LURE_COUNT = 3;
+    private static final float LURE_NEAR_W = 0.15f, LURE_FAR_W = 0.6f, LURE_BODY_BELOW = 2f, LURE_HIT_HP = 0.97f;
+    private static final float FIST_X = 2362 / 2560f, FIST_Y = 1386 / 1600f;
+    private static final int LURE_PULL_GAP_MS = 2500, LURE_SELECT_SETTLE_MS = 300, LURE_PULL_MAX_MS = 4000;
+    private static final int LURE_START_IDLE_MS = 3000, LURE_MAX_MS = 15_000;
+    private static final float HUD_TOP_H = 0.15f, HUD_LEFT_W = 0.25f, HUD_LEFT_H = 0.25f;
+    private boolean luring;
+    // Monster names learned from the target bar this session (see checkTargetName).
+    private final java.util.Set<String> knownMonsters = new java.util.HashSet<>();
+    private long lureStartedAt, lastPullAt, pullingSince;
     private static final String[] FARM_SKIP_NAMES = {"caloyski"};
     private int refusedInARow;
     // The connected service, for the watchdog's health check (it runs in this same process).
@@ -834,6 +851,9 @@ public class ClickService extends AccessibilityService {
         // if no fight is on (decided on the first monster count, see updateWave). Skipped when
         // this start came from a full buff (FB or the EG switch while stopped).
         if (run) farmMobsSeenAt = farmProgressAt = SystemClock.uptimeMillis();   // a moment before walking
+        luring = run;                                               // start by gathering a group
+        lureStartedAt = SystemClock.uptimeMillis();
+        pullingSince = 0;
         lootStartedAt = 0;                                          // its tap tick was cleared above
         startBuffPending = run && eg() && why.equals("button")
                 && SystemClock.uptimeMillis() - lastFullBuffAt >= FULL_BUFF_COOLDOWN_MS;
@@ -1706,6 +1726,13 @@ public class ClickService extends AccessibilityService {
         if (mobs != lastMobCount) Log.d(TAG, "monsters: ~" + mobs);
         lastMobCount = mobs;
         boolean target = targetHp >= 0;
+        lurePullCheck(targetHp, now);
+        // Nothing left to fight for a moment: gather the next group.
+        if (!luring && !target && lootStartedAt == 0 && now - farmMobsSeenAt >= LURE_START_IDLE_MS) {
+            luring = true;
+            lureStartedAt = now;
+            Log.i(TAG, "farmer: fight over, luring the next " + LURE_COUNT);
+        }
         // A kill (the bar went away): hold attacks a moment and look again for the loot hand.
         // Attacking on straight away auto-targeted the next monster and ran off from the drop,
         // and the hand then walked the character all the way back (the user, 12:55).
@@ -1720,7 +1747,7 @@ public class ClickService extends AccessibilityService {
         farmTargetHp = targetHp;
         Log.v(TAG, "farm scan: monsters ~" + mobs + ", target " + (target ? Math.round(targetHp * 100) + "%" : "none"));
         long stuckAfter = targetHp >= 0.97f ? FARM_STUCK_FULL_MS : FARM_STUCK_MS;
-        if (target && now - farmProgressAt >= stuckAfter && canFarmMove(now)) {
+        if (target && !luring && now - farmProgressAt >= stuckAfter && canFarmMove(now)) {
             Log.i(TAG, "farmer: target HP stuck at " + Math.round(targetHp * 100) + "% for "
                     + (now - farmProgressAt) / 1000 + " s, dropping it and stepping away");
             dropTargetAndStep(now);
@@ -1740,17 +1767,19 @@ public class ClickService extends AccessibilityService {
     }
 
     /**
-     * A monster name tag (white text on its dark box, e.g. "Brute Punk") within reach of the
-     * character. The game often fights with no target bar (auto skills hit without selecting), so
-     * the bar alone said "nothing here" and the character walked off mid-fight (13:36). Our own
-     * name and item labels are yellow, the pet green, Caloyski red: none of them count.
+     * Monster name tags on screen (white text on a dark box, e.g. "Brute Punk"), in screen pixels.
+     * The game often fights with no target bar (auto skills hit without selecting), so the bar
+     * alone said "nothing here" and the character walked off mid-fight (13:36). Our own name and
+     * item labels are yellow, the pet green, Caloyski red, the target bar's title is skipped.
      */
-    private boolean monsterNameNear(List<MathQuestion.Line> lines, Bitmap crop, int ox, int oy) {
-        float cx = screenW * 0.5f, cy = screenH * 0.53f;
-        float reach = screenW * MONSTER_NEAR_W;
+    private List<Rect> monsterTags(List<MathQuestion.Line> lines, Bitmap crop, int ox, int oy) {
+        List<Rect> tags = new ArrayList<>();
         for (MathQuestion.Line line : lines) {
-            if (line.text.trim().length() < 4) continue;
-            if (Math.hypot(line.box.exactCenterX() - cx, line.box.exactCenterY() - cy) > reach) continue;
+            if (!isKnownMonster(line.text)) continue;
+            // Not the HUD: the top strip (target bar title) and the top-left panel ("Lv. 148",
+            // "MMR", the buff row) are white on dark too - the first lure kept pulling "531,195".
+            if (line.box.bottom <= screenH * HUD_TOP_H
+                    || (line.box.left < screenW * HUD_LEFT_W && line.box.top < screenH * HUD_LEFT_H)) continue;
             int l = Math.max(0, line.box.left - ox), t = Math.max(0, line.box.top - oy);
             int r = Math.min(crop.getWidth(), line.box.right - ox), b = Math.min(crop.getHeight(), line.box.bottom - oy);
             int white = 0, total = 0;
@@ -1763,9 +1792,89 @@ public class ClickService extends AccessibilityService {
                     if (mn > 185 && mx - mn < 35) white++;
                 }
             }
-            if (total > 0 && white * 100 >= total * 6) return true;
+            if (total > 0 && white * 100 >= total * 6) tags.add(new Rect(line.box));
         }
+        return tags;
+    }
+
+    /** Letters only, lower case: "Brute Punk" and an OCR "Brute Punk." match. */
+    private static String monsterKey(String text) {
+        // OCR mixes up look-alikes ("Lo0se Halogen"): read 0 as o, 1 as l, 5 as s before matching.
+        return text.toLowerCase(java.util.Locale.ROOT).replace('0', 'o').replace('1', 'l').replace('5', 's')
+                .replaceAll("[^a-z]", "");
+    }
+
+    private boolean isKnownMonster(String text) {
+        String key = monsterKey(text);
+        if (key.length() < 4) return false;
+        for (String m : knownMonsters) if (key.equals(m) || key.contains(m) || m.contains(key) && key.length() >= 6) return true;
         return false;
+    }
+
+    /** How far a name tag is from the character (screen pixels). */
+    private float fromCharacter(Rect tag) {
+        return (float) Math.hypot(tag.exactCenterX() - screenW * 0.5f, tag.exactCenterY() - screenH * 0.53f);
+    }
+
+    /**
+     * Luring (the user's idea, 2026-10-04): the skills mostly hit an area and a monster hit once
+     * chases you, so gather LURE_COUNT before fighting. Between fights attacks pause; every scan
+     * the name tags close around the character are the followers, and while there are too few
+     * the nearest monster further out is selected (a tap just under its name) and hit once with
+     * ring 1, a long-range skill, so it comes over. Then the normal fight takes them all at once.
+     */
+    private void lureStep(List<Rect> tags, long now) {
+        if (!luring || lootStartedAt > 0 || questionSeen) return;
+        int followers = 0;
+        Rect pull = null;
+        float pullDist = Float.MAX_VALUE;
+        for (Rect tag : tags) {
+            float d = fromCharacter(tag);
+            if (d <= screenW * LURE_NEAR_W) {
+                followers++;
+            } else if (d <= screenW * LURE_FAR_W && d < pullDist) {
+                pull = tag;
+                pullDist = d;
+            }
+        }
+        boolean timeUp = now - lureStartedAt >= LURE_MAX_MS;
+        // Nothing (known) left to pull: carry on as before rather than stand idle until time-up.
+        if (followers >= LURE_COUNT || timeUp || (pull == null && pullingSince == 0)) {
+            luring = false;
+            busyUntil = now;
+            farmMobsSeenAt = farmProgressAt = now;
+            Log.i(TAG, "farmer: lured " + followers + " (" + (followers >= LURE_COUNT ? "enough"
+                    : timeUp ? "time up" : "no more in range") + "), fighting");
+            schedulePump(0);
+            return;
+        }
+        busyUntil = Math.max(busyUntil, now + FARM_SCAN_MS + 500);     // no attacks while luring
+        if (pull != null) farmMobsSeenAt = now;                         // monsters in range: no walking off
+        if (pull == null || pullingSince > 0 || now - lastPullAt < LURE_PULL_GAP_MS || !canFarmMove(now)) return;
+        // The pull is the fist (basic attack, no cooldown; ring 1 is long range but its cooldown is
+        // long - the user). Select the monster, punch; once it's hit, drop it (lurePullCheck) so
+        // the punches stop and it just chases.
+        lastPullAt = now;
+        pullingSince = now;
+        float tx = pull.exactCenterX(), ty = pull.bottom + pull.height() * LURE_BODY_BELOW;
+        Log.i(TAG, "farmer: luring (" + followers + " following), pulling the one at "
+                + Math.round(tx) + "," + Math.round(ty));
+        tapAt(tx, ty, "lure select");
+        handler.postDelayed(() -> {
+            if (!running || !farmer) return;
+            lastAnyTapAt = SystemClock.uptimeMillis();
+            tapAt(screenW * FIST_X, screenH * FIST_Y, "lure punch");
+        }, TAP_MS + LURE_SELECT_SETTLE_MS);
+    }
+
+    /** While pulling: once the target's HP shows a hit (or it took too long), drop it. */
+    private void lurePullCheck(float targetHp, long now) {
+        if (pullingSince == 0) return;
+        boolean hit = targetHp >= 0 && targetHp < LURE_HIT_HP;
+        if (!hit && now - pullingSince < LURE_PULL_MAX_MS) return;
+        pullingSince = 0;
+        if (targetHp >= 0) tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
+        Log.i(TAG, "farmer: pull " + (hit ? "hit it" : "timed out") + ", dropped the target");
     }
 
     /** Drop the selected target (its bar's ✕) and walk a step, so the game picks another monster. */
@@ -1787,6 +1896,15 @@ public class ClickService extends AccessibilityService {
         for (MathQuestion.Line line : lines) {
             if (line.box.bottom > screenH * TARGET_NAME_MAX_Y) continue;     // the target bar's title
             String name = line.text.toLowerCase(java.util.Locale.ROOT);
+            // Learn monster names from the target bar: only monsters get targeted, so a name seen
+            // here is a monster. Name tags elsewhere count only if learned (players and the pet's
+            // owner label are white too and counted as "followers", 14:31).
+            float mid = line.box.exactCenterX();
+            String key = monsterKey(line.text);
+            boolean skipped = java.util.Arrays.stream(FARM_SKIP_NAMES).anyMatch(key::contains);   // never lure Caloyski
+            if (!skipped && mid > screenW * 0.3f && mid < screenW * 0.7f && key.length() >= 4 && knownMonsters.add(key)) {
+                Log.i(TAG, "farmer: learned monster name \"" + line.text.trim() + "\"");
+            }
             for (String skip : FARM_SKIP_NAMES) {
                 if (!name.contains(skip)) continue;
                 long now = SystemClock.uptimeMillis();
@@ -1850,7 +1968,10 @@ public class ClickService extends AccessibilityService {
                 for (MathQuestion.Line l : lines) l.box.offset(x, y);   // crop pixels -> screen pixels
                 checkForQuestion(game, lines);
                 checkTargetName(lines);
-                if (monsterNameNear(lines, crop, x, y)) farmMobsSeenAt = SystemClock.uptimeMillis();
+                long seen = SystemClock.uptimeMillis();
+                List<Rect> tags = monsterTags(lines, crop, x, y);
+                for (Rect tag : tags) if (fromCharacter(tag) <= screenW * MONSTER_NEAR_W) farmMobsSeenAt = seen;
+                lureStep(tags, seen);
             } finally {
                 crop.recycle();
             }
@@ -2395,7 +2516,7 @@ public class ClickService extends AccessibilityService {
                     farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
                     farmCheck(MobCounter.count(shot, screenW, screenH),
                             MobCounter.targetHp(shot, screenW, screenH), now);
-                    if (now - lastFarmOcrAt >= FARM_OCR_MS - 100) {
+                    if (luring || now - lastFarmOcrAt >= FARM_OCR_MS - 100) {   // every scan while luring
                         lastFarmOcrAt = now;
                         farmOcr(shot);
                     }
