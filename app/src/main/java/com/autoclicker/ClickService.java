@@ -228,7 +228,7 @@ public class ClickService extends AccessibilityService {
     // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
     // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
     private static final float KILL_SOON_HP = 0.4f;
-    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 3000;
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 6000;     // a cap; the drop labels decide earlier
     private long postKillUntil;
     // The drop lands where the monster died, sometimes just outside the hand's reach: the hand only
     // showed ~2.5 s after attacks resumed, as the character ran past it (07:01-07:07). So the
@@ -238,6 +238,18 @@ public class ClickService extends AccessibilityService {
     private long killSpotAt, killAt;
     private boolean killStepDone;
     private long lastHandSeenAt;
+    // Drops: after a kill, look for the drop's label on the ground (a gold amount like "367", or an
+    // item name - learned from the loot chat, or a typical loot word). Seen: walk to it until the hand
+    // shows. None by DROP_DECIDE_MS: nothing dropped, attack at once. Attacking "right away" walked
+    // off from drops whose hand hadn't shown yet (the user, 07:34).
+    private static final int DROP_DECIDE_MS = 1500, DROP_MAX_STEPS = 3;
+    private static final String KEY_LOOT_NAMES = "farm_loot_names";
+    private static final String[] LOOT_WORDS = {"potion", "burr", "box", "scroll", "card", "ore", "stone",
+            "gem", "crystal", "protection", "coin", "gold", "elixir", "pill", "ticket", "chest"};
+    private final java.util.Set<String> knownLoot = new java.util.HashSet<>();
+    private float dropX, dropY;
+    private long dropSeenAt, postKillOcrAt;
+    private int dropSteps;
     // Camera: one-finger drag across empty ground turns it (the user; a 400 px drag turned the view
     // ~60-90 deg, 07:23). Turned when buildings hide things: the target's name tag unreadable
     // CAMERA_TAG_MISSES reads in a row, or two walks in a row into walls.
@@ -267,7 +279,8 @@ public class ClickService extends AccessibilityService {
     // When a fight ends: a full buff - every buff at or below FARM_TOPUP_AT (or gone) back to back,
     // so all of them start the next fight well above the 20% recast line (the user, 2026-10-05:
     // with buffs held mid-fight, the ~6 s spacing let only one go per break and the rest ran low).
-    private static final float FARM_TOPUP_AT = 0.5f;
+    private static final float FARM_TOPUP_AT = 0.3f;    // 0.5 doubled the casts (13% of the time, 07:28-07:31)
+    private static final int FARM_BUFF_GIVEUP_FAILS = 3, FARM_BUFF_GIVEUP_MS = 180_000;
     private static final int FARM_FULL_BUFF_GAP_MS = 20_000;
     private boolean wasFighting;
     private long lastFarmFullBuffAt;
@@ -548,6 +561,9 @@ public class ClickService extends AccessibilityService {
         // Queued by the FB button: cast even if the buff is still up, without waiting its turn.
         boolean forced;
         int forcedRetries;
+        // Casts in a row that didn't take (Farmer): Lightspeed failing on low MP was retried every
+        // 15 s and in every full buff, ~2.5 s each time (13% of the time went to buffs, 07:28-07:31).
+        int failStreak;
         // Goes after every other buff that's due (and last in a full buff).
         boolean castLast;
         // Dropped from a full buff that a returning wave stopped; cast when it resumes.
@@ -599,10 +615,12 @@ public class ClickService extends AccessibilityService {
                         // Farmer: a buff the monsters keep interrupting must not starve the attacks
                         // (retried every ~10 s with waits around it, the character barely attacked,
                         // 13:32). Leave it a while; the attacks go on meanwhile.
-                        backoffUntil = now + FARM_BUFF_RETRY_MS;
+                        long wait = ++failStreak >= FARM_BUFF_GIVEUP_FAILS ? FARM_BUFF_GIVEUP_MS : FARM_BUFF_RETRY_MS;
+                        backoffUntil = now + wait;
                         lastTapAt = 0;
-                        Log.i(TAG, "buff target " + (targets.indexOf(Target.this) + 1) + ": cast didn't take, trying again in "
-                                + FARM_BUFF_RETRY_MS / 1000 + " s");
+                        Log.i(TAG, "buff target " + (targets.indexOf(Target.this) + 1) + ": cast didn't take"
+                                + (failStreak >= FARM_BUFF_GIVEUP_FAILS ? " " + failStreak + " times in a row" : "")
+                                + ", trying again in " + wait / 1000 + " s");
                         handler.postDelayed(this, SMART_RECHECK_MS);
                         return;
                     }
@@ -757,6 +775,7 @@ public class ClickService extends AccessibilityService {
         // Farmer keeps its own rings: load the layout of the mode it was last in.
         farmer = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FARMER, false);
         follow = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FOLLOW, false);
+        knownLoot.addAll(getSharedPreferences(PREFS, MODE_PRIVATE).getStringSet(KEY_LOOT_NAMES, java.util.Collections.emptySet()));
         lureMode = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_LURE, false);
         knownMonsters.clear();
         knownMonsters.addAll(getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -964,6 +983,7 @@ public class ClickService extends AccessibilityService {
         if (run) handler.postDelayed(testMoveTick, TEST_MOVE_EVERY_MS);
         if (run && fsMode()) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // chat-FB is FS only
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
+        deadUntil = 0;
         if (run && farmer) {
             lootGold = 0;
             lootItems.clear();
@@ -1156,6 +1176,12 @@ public class ClickService extends AccessibilityService {
             Log.i(TAG, "full buff: target " + (targets.indexOf(t) + 1) + " didn't take, still on cooldown");
             return;
         }
+        if (farmer && ++t.failStreak >= FARM_BUFF_GIVEUP_FAILS) {
+            t.backoffUntil = SystemClock.uptimeMillis() + FARM_BUFF_GIVEUP_MS;
+            Log.i(TAG, "full buff: target " + (targets.indexOf(t) + 1) + " didn't take " + t.failStreak
+                    + " times in a row, leaving it " + FARM_BUFF_GIVEUP_MS / 1000 + " s");
+            return;
+        }
         t.forcedRetries++;
         t.extraGapMs = Math.min(MAX_EXTRA_GAP_MS, t.extraGapMs + 500);
         t.retried = true;
@@ -1203,6 +1229,10 @@ public class ClickService extends AccessibilityService {
 
     private void pumpQueue() {
         if (!running || pending.isEmpty()) return;
+        if (SystemClock.uptimeMillis() < deadUntil) {          // dead / on the way back: no skills
+            schedulePump(1000);
+            return;
+        }
         // While the game isn't in front (or the keyboard is up) hold everything as it is,
         // so no tap is sent, counted, or mistaken for one the game ignored.
         if (!gameInFront()) {
@@ -1965,9 +1995,38 @@ public class ClickService extends AccessibilityService {
             busyUntil = Math.max(busyUntil, postKillUntil);
             killAt = now;
             killStepDone = false;
+            dropSeenAt = 0;
+            dropSteps = 0;
+        }
+        if (!target && now < postKillUntil && lootStartedAt == 0) {
+            if (dropSeenAt > killAt) {
+                // A drop lies there but the hand isn't up: walk to it (short steps).
+                float dx = dropX - screenW * 0.5f, dy = dropY - screenH * 0.53f;
+                float d = (float) Math.hypot(dx, dy);
+                if (dropSteps < DROP_MAX_STEPS && now - killAt >= 900 && d > screenW * 0.03f && canFarmMove(now)) {
+                    dropSteps++;
+                    int ms = (int) Math.max(300, Math.min(1000, d * 900f / LURE_RUN_PX_PER_S));
+                    float push = screenW * FARM_PUSH;
+                    long window = FARM_PUSH_MS + ms;
+                    ownTapUntil = now + window + OWN_TAP_SLACK_MS;
+                    busyUntil = farmHoldUntil = now + window + FARM_WALK_SETTLE_MS;
+                    postKillUntil = Math.max(postKillUntil, now + window + 1800);
+                    busyUntil = Math.max(busyUntil, postKillUntil);
+                    killStepDone = true;
+                    Log.i(TAG, "farmer: drop " + Math.round(d) + " px away, no hand yet, walking " + ms + " ms to it ("
+                            + dropSteps + "/" + DROP_MAX_STEPS + ")");
+                    joystickHold(dx / d * push, dy / d * push, ms);
+                }
+            } else if (postKillOcrAt >= killAt + DROP_DECIDE_MS && now - lastHandSeenAt > 2000) {
+                // Read the ground well after the kill and no drop label: nothing dropped.
+                Log.i(TAG, "farmer: no drop after the kill, attacking");
+                postKillUntil = now;
+                busyUntil = now;
+                schedulePump(0);
+            }
         }
         // No hand yet: step to where the monster died, so the drop comes into reach.
-        if (!target && now < postKillUntil && lootStartedAt == 0 && !killStepDone
+        if (!target && now < postKillUntil && lootStartedAt == 0 && !killStepDone && postKillOcrAt < killAt
                 && now - killAt >= LOOT_STEP_AFTER_MS && now - killSpotAt < KILL_SPOT_FRESH_MS && canFarmMove(now)) {
             killStepDone = true;
             float dx = killSpotX - screenW * 0.5f, dy = killSpotY - screenH * 0.53f;
@@ -2263,7 +2322,7 @@ public class ClickService extends AccessibilityService {
         if (!running || !farmer || now - lastFarmFullBuffAt < FARM_FULL_BUFF_GAP_MS) return;
         List<Target> low = new ArrayList<>();
         for (Target t : targets) {
-            if (!t.isSmart() || t.priority || t.onCooldown() || pending.contains(t)) continue;
+            if (!t.isSmart() || t.priority || t.onCooldown() || pending.contains(t) || now < t.backoffUntil) continue;
             // Only buffs actually read since the start: right after ▶ every reading is "unknown",
             // and all five went out, two of them at 95-98% (06:59:36). Missing ones still get their
             // own recast once read.
@@ -2308,6 +2367,42 @@ public class ClickService extends AccessibilityService {
         // Nonstop fights (a party on a busy map) never "end", so the window tops up every low
         // buff too - otherwise only the ones already at 20% went, one per window (00:06).
         handler.post(this::farmFullBuff);
+        return false;
+    }
+
+    /** After a kill: drop labels on the ground near the character (gold amounts, item names). */
+    private void noteDrops(List<MathQuestion.Line> lines) {
+        long now = SystemClock.uptimeMillis();
+        if (now >= postKillUntil || killAt == 0) return;
+        Rect best = null;
+        float bestD = screenW * 0.35f;
+        for (MathQuestion.Line l : lines) {
+            Rect b = l.box;
+            if (b.bottom <= screenH * HUD_TOP_H || (b.right > screenW * 0.76f && b.top < screenH * 0.32f)) continue;
+            if (b.left < screenW * HUD_LEFT_W && b.top < screenH * HUD_LEFT_H) continue;
+            if (!isDropLabel(l.text, b)) continue;
+            float d = fromCharacter(b);
+            if (d < bestD) {
+                bestD = d;
+                best = b;
+            }
+        }
+        postKillOcrAt = now;
+        if (best == null) return;
+        dropX = best.exactCenterX();
+        dropY = best.bottom + best.height() * 1.2f;               // the item lies under its label
+        if (dropSeenAt <= killAt) Log.i(TAG, "farmer: drop on the ground " + Math.round(bestD) + " px away");
+        dropSeenAt = now;
+    }
+
+    private boolean isDropLabel(String text, Rect box) {
+        String t = text.trim();
+        // Gold: a plain amount in a small label (damage numbers are big, stylised digits).
+        if (t.matches("\\d{2,7}") && box.height() >= 12 && box.height() <= 52) return true;
+        String k = t.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+        if (k.length() < 4 || isKnownMonster(t)) return false;
+        for (String w : LOOT_WORDS) if (k.contains(w)) return true;
+        for (String n : knownLoot) if (k.equals(n) || (k.length() >= 6 && (n.contains(k) || k.contains(n)))) return true;
         return false;
     }
 
@@ -2435,6 +2530,10 @@ public class ClickService extends AccessibilityService {
         }
         String item = entry.substring(5);
         lootItems.merge(item, 1, Integer::sum);
+        String lk = item.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+        if (lk.length() >= 5 && knownLoot.add(lk)) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putStringSet(KEY_LOOT_NAMES, new java.util.HashSet<>(knownLoot)).apply();
+        }
         Log.i(TAG, "loot: " + item);
     }
 
@@ -2464,7 +2563,7 @@ public class ClickService extends AccessibilityService {
         // Not mid-walk/loot, and not during an attack tap (a new gesture would cancel it). The
         // attack lock (busyUntil) is ignored: attacks come so often it would never let go.
         // Nor during a buff's cast: a walk right after the buff tap cancelled it (13:36).
-        return !questionSeen && now >= farmHoldUntil && now - lastAnyTapAt >= TAP_MS + 50
+        return !questionSeen && now >= deadUntil && now >= farmHoldUntil && now - lastAnyTapAt >= TAP_MS + 50
                 && now - lastBuffTapAt >= TAP_MS + FARM_AFTER_BUFF_MS
                 && now - userTouchAt >= USER_TOUCH_PAUSE_MS && boosterCanAct();
     }
@@ -2621,6 +2720,7 @@ public class ClickService extends AccessibilityService {
                 lastOcrResultAt = SystemClock.uptimeMillis();
                 checkTargetName(lines);
                 noteKillSpot(lines);
+                noteDrops(lines);
                 long seen = SystemClock.uptimeMillis();
                 List<Rect> tags = monsterTags(lines, crop, x, y);
                 noteMonstersSeen(tags, seen);
@@ -3118,7 +3218,80 @@ public class ClickService extends AccessibilityService {
         });
     }
 
+    private long lastReviveAt;
+    // After a death (the user, 07:38): no attacks in town; once revived, use the Back Point card in
+    // quick slot S to return to the farming spot, then farm on. S = the middle of A/S/D (07:39).
+    private static final float BACK_POINT_X = 2317 / 2560f, BACK_POINT_Y = 755 / 1600f;
+    private static final int BACK_POINT_AFTER_MS = 7000, BACK_POINT_LOAD_MS = 12_000;
+    private long deadUntil;
+    private final Runnable useBackPoint = this::useBackPoint;
+    private final Runnable backAtSpot = this::backAtSpot;
+
+    /**
+     * Death: "Do you wish to be revived?" over a Revive button (killed by a player, 2026-10-05
+     * 07:37). Tap Revive whenever it shows, in any mode (the user's rule), and say so on Telegram.
+     */
+    private void checkRevive(List<MathQuestion.Line> lines) {
+        if (!running || manual) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - lastReviveAt < 5000) return;
+        MathQuestion.Line ask = null;
+        for (MathQuestion.Line l : lines) {
+            String t = l.text.toLowerCase(java.util.Locale.ROOT);
+            if (t.contains("to be revived") || t.contains("wish to be reviv")) {
+                ask = l;
+                break;
+            }
+        }
+        if (ask == null) return;
+        Rect button = null;
+        for (MathQuestion.Line l : lines) {
+            String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+            if (l != ask && k.equals("revive") && l.box.top > ask.box.bottom && l.box.top < ask.box.bottom + ask.box.height() * 6) {
+                button = l.box;
+                break;
+            }
+        }
+        float x = button != null ? button.exactCenterX() : ask.box.exactCenterX();
+        float y = button != null ? button.exactCenterY() : ask.box.bottom + ask.box.height() * 2.6f;   // measured 07:37
+        lastReviveAt = now;
+        Log.w(TAG, "died: \"" + ask.text.trim() + "\", tapping Revive at " + Math.round(x) + "," + Math.round(y));
+        tapAt(x, y, "revive");
+        // No more attacks until back at the farming spot.
+        deadUntil = now + BACK_POINT_AFTER_MS + BACK_POINT_LOAD_MS + 5000;
+        busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+        handler.removeCallbacks(useBackPoint);
+        handler.removeCallbacks(backAtSpot);
+        if (farmer) handler.postDelayed(useBackPoint, BACK_POINT_AFTER_MS);
+        Telegram.send(this, "\uD83D\uDC80 Ran Online: your character died - tapped Revive"
+                + (farmer ? ", using the Back Point card (slot S) next." : "."));
+    }
+
+    /** Revived in town: the Back Point card (slot S) takes the character back to where it died. */
+    private void useBackPoint() {
+        if (!running || !farmer || manual) return;
+        long now = SystemClock.uptimeMillis();
+        Log.i(TAG, "died: using the Back Point card (slot S) to return to the farming spot");
+        tapAt(screenW * BACK_POINT_X, screenH * BACK_POINT_Y, "back point");
+        deadUntil = now + BACK_POINT_LOAD_MS;
+        busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+        handler.postDelayed(backAtSpot, BACK_POINT_LOAD_MS);
+    }
+
+    private void backAtSpot() {
+        if (!running || !farmer) return;
+        long now = SystemClock.uptimeMillis();
+        deadUntil = 0;
+        busyUntil = farmHoldUntil = now;
+        farmMobsSeenAt = farmProgressAt = lastTargetBarAt = now;
+        Log.i(TAG, "died: back from the Back Point, farming again");
+        Telegram.send(this, "\u2705 Ran Online: Back Point used, farming again. Check how many Back Point cards are left.");
+        handler.post(this::farmFullBuff);
+        schedulePump(0);
+    }
+
     private void checkForQuestion(String game, List<MathQuestion.Line> lines) {
+        checkRevive(lines);
         List<MathQuestion.Line> hits = new ArrayList<>();
         for (MathQuestion.Line line : lines) {
             String norm = line.text.toLowerCase(java.util.Locale.ROOT);
@@ -3329,7 +3502,8 @@ public class ClickService extends AccessibilityService {
                     farmCheck(MobCounter.count(shot, screenW, screenH),
                             MobCounter.targetHp(shot, screenW, screenH), now);
                     farmChatRead(shot);
-                    boolean nearKill = farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP;   // to see where it dies
+                    boolean nearKill = (farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP)   // to see where it dies
+                            || now < postKillUntil;                                           // and what it drops
                     if (luring || nearKill || now - lastFarmOcrAt >= FARM_OCR_MS - 100) {   // every scan while luring
                         lastFarmOcrAt = now;
                         farmOcr(shot);
@@ -3439,7 +3613,10 @@ public class ClickService extends AccessibilityService {
         t.buffFound = icon != null;
         t.buffFill = icon != null ? icon.fill : 0f;
         boolean needed = looksNeeded;
-        if (!needed) t.recastsWithoutOk = 0;
+        if (!needed) {
+            t.recastsWithoutOk = 0;
+            t.failStreak = 0;
+        }
         if (needed != wasNeeded) {
             Log.i(TAG, "buff target " + n + ": "
                     + (icon != null ? Math.round(icon.fill * 100) + "% left" : "not active")
@@ -4049,6 +4226,7 @@ public class ClickService extends AccessibilityService {
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+        closeUsbPopup(event);
         checkGameDialog(event);
         updateOverlayVisibility();
     }
@@ -4059,6 +4237,32 @@ public class ClickService extends AccessibilityService {
      * stop. Please close the app and reopen it." over the game; Android's own crash dialog says
      * "... keeps stopping" or "... has stopped".
      */
+    /**
+     * Android's "Use USB for ..." screen (Settings$UsbDetailsActivity) pops up over the game when
+     * the cable reconnects, and the bot pauses behind it (the user, 2026-10-05). While running,
+     * close just that screen with Back; other Settings screens you open yourself are left alone.
+     */
+    private void closeUsbPopup(AccessibilityEvent event) {
+        if (!running || manual) return;
+        CharSequence cls = event.getClassName(), pkg = event.getPackageName();
+        String c = cls != null ? cls.toString() : "";
+        boolean usb = c.contains("UsbDetails") || c.contains("UsbModeChooser") || c.contains("UsbPermission");
+        if (!usb && pkg != null && (pkg.toString().equals("com.android.settings") || pkg.toString().equals("com.android.systemui"))) {
+            String lower = windowText(event).toLowerCase(java.util.Locale.ROOT);
+            usb = lower.contains("usb") && (lower.contains("file transfer") || lower.contains("charging only")
+                    || lower.contains("use usb") || lower.contains("usb preferences") || lower.contains("transfer files"));
+        }
+        if (!usb) return;
+        String what = c.isEmpty() ? String.valueOf(pkg) : c;
+        handler.postDelayed(() -> {
+            String front = foregroundPackage();
+            if (front != null && (front.equals("com.android.settings") || front.equals("com.android.systemui"))) {
+                Log.i(TAG, "USB popup over the game (" + what + "), closing it with Back");
+                performGlobalAction(GLOBAL_ACTION_BACK);
+            }
+        }, 700);
+    }
+
     private void checkGameDialog(AccessibilityEvent event) {
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         CharSequence pkg = event.getPackageName();
