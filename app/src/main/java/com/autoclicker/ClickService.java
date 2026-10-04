@@ -984,6 +984,12 @@ public class ClickService extends AccessibilityService {
         if (run && fsMode()) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // chat-FB is FS only
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
         deadUntil = 0;
+        if (run) {
+            homeMap = null;                                     // home = where this start happens
+            calStage = 0;
+            calValid = false;
+            leashMisses = 0;
+        }
         if (run && farmer) {
             lootGold = 0;
             lootItems.clear();
@@ -2078,7 +2084,10 @@ public class ClickService extends AccessibilityService {
             farmWalk(now);
             return;
         }
+        if (!luring && lootStartedAt == 0 && now >= postKillUntil && leashStep(now, false)) return;
         if (now - farmMobsSeenAt < FARM_IDLE_MS || !canFarmMove(now)) return;
+        // Searching while already halfway out: search back toward home.
+        if (!luring && leashStep(now, true)) return;
         Log.i(TAG, "farmer: no target for " + (now - farmMobsSeenAt) / 1000 + " s (monsters ~" + mobs
                 + "), walking " + "ENWS".charAt(farmWalkStep));
         farmWalk(now);
@@ -2406,6 +2415,125 @@ public class ClickService extends AccessibilityService {
         return false;
     }
 
+    private void farmCoordRead(Bitmap shot) {
+        int x = Math.round(screenW * COORD_L), y = Math.round(screenH * COORD_T);
+        int w = Math.min(Math.round(screenW * COORD_W), shot.getWidth() - x);
+        int h = Math.min(Math.round(screenH * COORD_H), shot.getHeight() - y);
+        if (w <= 0 || h <= 0) return;
+        Bitmap crop;
+        try {
+            crop = Bitmap.createBitmap(shot, x, y, w, h);
+        } catch (RuntimeException | OutOfMemoryError e) {
+            return;
+        }
+        Ocr.read(crop, (lines, words) -> {
+            for (MathQuestion.Line l : lines) {
+                java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
+                if (!m.find()) continue;
+                posMap = m.group(1);
+                posX = Integer.parseInt(m.group(2));
+                posY = Integer.parseInt(m.group(3));
+                posAt = SystemClock.uptimeMillis();
+                if (homeMap == null) {
+                    homeMap = posMap;
+                    homeX = posX;
+                    homeY = posY;
+                    Log.i(TAG, "farmer: home spot " + homeMap + "[" + homeX + "," + homeY + "], staying within " + LEASH_R);
+                }
+                return;
+            }
+        });
+    }
+
+    /**
+     * Walks back toward home when farther than LEASH_R (or LEASH_R/2 when searching anyway).
+     * Returns true if it started a walk (or a calibration step).
+     */
+    private boolean leashStep(long now, boolean searching) {
+        if (homeMap == null || posMap == null || !sameMap(posMap, homeMap) || now - posAt > 6000) return false;
+        if (!canFarmMove(now) || farmTargetHp >= 0) return false;
+        float gx = homeX - posX, gy = homeY - posY;
+        float dist = (float) Math.hypot(gx, gy);
+        if (dist <= (searching ? LEASH_R / 2f : LEASH_R)) {
+            calStage = calValid ? calStage : 0;
+            return false;
+        }
+        float push = screenW * FARM_PUSH;
+        if (!calValid) {
+            // Learn the mapping: push E, see the coordinates move; push N, same.
+            if (calStage == 0) {
+                calP0x = posX;
+                calP0y = posY;
+                calStage = 1;
+                calWalkEnd = now + FARM_PUSH_MS + LEASH_PROBE_MS + 300;
+                leashWalk(push, 0, LEASH_PROBE_MS, now);
+                Log.i(TAG, "farmer: " + Math.round(dist) + " from home, learning the directions (east)");
+                return true;
+            }
+            if (posAt < calWalkEnd) return true;                  // wait for a reading after the walk
+            if (calStage == 1) {
+                calEx = posX - calP0x;
+                calEy = posY - calP0y;
+                calP0x = posX;
+                calP0y = posY;
+                calStage = 2;
+                calWalkEnd = now + FARM_PUSH_MS + LEASH_PROBE_MS + 300;
+                leashWalk(0, -push, LEASH_PROBE_MS, now);
+                Log.i(TAG, "farmer: learning the directions (north)");
+                return true;
+            }
+            calNx = posX - calP0x;
+            calNy = posY - calP0y;
+            float det = calEx * calNy - calNx * calEy;
+            calStage = 0;
+            if (Math.abs(det) < 0.5f) {
+                Log.i(TAG, "farmer: couldn't learn the directions (blocked?), trying again later");
+                return false;
+            }
+            calValid = true;
+            leashMisses = 0;
+            leashLastDist = 0;
+            Log.i(TAG, "farmer: directions learned: E=(" + calEx + "," + calEy + ") N=(" + calNx + "," + calNy + ")");
+        }
+        // Not getting closer after two walks: the mapping is stale (camera, slope) - learn it again.
+        if (leashLastDist > 0 && dist > leashLastDist - 1 && ++leashMisses >= 2) {
+            calValid = false;
+            calStage = 0;
+            leashMisses = 0;
+            leashLastDist = 0;
+            return true;
+        }
+        if (dist < leashLastDist - 1) leashMisses = 0;
+        // Solve a*E + b*N = goal; the joystick push is (a, -b).
+        float det = calEx * calNy - calNx * calEy;
+        float a = (gx * calNy - calNx * gy) / det, b = (calEx * gy - gx * calEy) / det;
+        float len = (float) Math.hypot(a, b);
+        if (len < 1e-3f) return false;
+        float step = (float) Math.hypot(calEx, calEy) + (float) Math.hypot(calNx, calNy);   // units per 2 probes
+        int ms = (int) Math.max(600, Math.min(2500, LEASH_PROBE_MS * dist / Math.max(1f, step / 2f)));
+        leashLastDist = dist;
+        Log.i(TAG, "farmer: " + Math.round(dist) + " from home " + homeMap + "[" + homeX + "," + homeY + "] at ["
+                + posX + "," + posY + "], walking back " + ms + " ms");
+        leashWalk(a / len * push, -b / len * push, ms, now);
+        return true;
+    }
+
+    /** Same map despite OCR slips ("TradingHole" / "TradingHolde"): first 6 letters, any case. */
+    private static boolean sameMap(String a, String b) {
+        String x = a.toLowerCase(java.util.Locale.ROOT), y = b.toLowerCase(java.util.Locale.ROOT);
+        return x.regionMatches(0, y, 0, Math.min(6, Math.min(x.length(), y.length())));
+    }
+
+    private void leashWalk(float dx, float dy, int ms, long now) {
+        walkStartThumb = lastSceneThumb;
+        lastWalkShort = false;
+        farmMobsSeenAt = now;
+        long window = FARM_PUSH_MS + ms;
+        ownTapUntil = now + window + OWN_TAP_SLACK_MS;
+        busyUntil = farmHoldUntil = now + window + FARM_WALK_SETTLE_MS;
+        joystickHold(dx, dy, ms);
+    }
+
     /** One drag across empty ground (upper middle) turns the camera. */
     private void turnCamera(String why) {
         long now = SystemClock.uptimeMillis();
@@ -2418,6 +2546,8 @@ public class ClickService extends AccessibilityService {
         ownTapUntil = now + CAMERA_DRAG_MS + OWN_TAP_SLACK_MS;
         busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + CAMERA_DRAG_MS + 300);
         Log.i(TAG, "farmer: turning the camera (" + why + ")");
+        calValid = false;
+        calStage = 0;
         dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(drag, 0, CAMERA_DRAG_MS)).build(), null, null);
     }
@@ -2598,8 +2728,11 @@ public class ClickService extends AccessibilityService {
         }
         busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + FARM_SCAN_MS + 500);
         if (hudHiddenScans++ == 0) hudHiddenSince = now;
-        // Two scans in a row, and a text read since it appeared that found no question.
-        if (hudHiddenScans < 2 || lastOcrResultAt <= hudHiddenSince) return true;
+        // Three scans in a row, and a text read since it appeared that found no question and no
+        // Yes/No-style dialog: X doesn't close those ("Summon your pet?" got 3 X taps, 07:42) and
+        // with nothing else open X brings up the Server List.
+        if (now < panelQuietUntil || lastOcrHadDialog) return true;
+        if (hudHiddenScans < 3 || lastOcrResultAt <= hudHiddenSince) return true;
         if (panelCloseTries >= PANEL_MAX_TRIES) {
             if (panelCloseTries++ == PANEL_MAX_TRIES) {
                 Log.w(TAG, "farmer: a panel is still covering the game after " + PANEL_MAX_TRIES + " X taps");
@@ -2717,6 +2850,13 @@ public class ClickService extends AccessibilityService {
             try {
                 for (MathQuestion.Line l : lines) l.box.offset(x, y);   // crop pixels -> screen pixels
                 checkForQuestion(game, lines);
+                boolean dialog = false;
+                for (MathQuestion.Line l : lines) {
+                    String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+                    if (k.equals("yes") || k.equals("no") || k.equals("revive") || k.equals("ok") || k.equals("cancel")
+                            || k.equals("confirm") || k.contains("summonyourpet")) dialog = true;
+                }
+                lastOcrHadDialog = dialog;
                 lastOcrResultAt = SystemClock.uptimeMillis();
                 checkTargetName(lines);
                 noteKillSpot(lines);
@@ -3226,6 +3366,27 @@ public class ClickService extends AccessibilityService {
     private long deadUntil;
     private final Runnable useBackPoint = this::useBackPoint;
     private final Runnable backAtSpot = this::backAtSpot;
+    // The pet stays behind after a death: the paw (top right) asks "Summon your pet?" Yes/No.
+    private static final float PAW_X = 1828 / 2560f, PAW_Y = 42 / 1600f;
+    private static final float PET_YES_X = 1357 / 2560f, PET_YES_Y = 947 / 1600f;   // measured 07:43
+    private long panelQuietUntil;
+    // Home spot (the user, 07:45): the game prints "TradingHole[124,114]" at the bottom left. Home is
+    // where Farmer starts; drifting more than LEASH_R away, it walks back between fights. Which
+    // joystick push moves which way in map coordinates is learned by two probe walks (E, N), and
+    // learned again after a camera turn or when walking home stops getting closer.
+    private static final float COORD_L = 0f, COORD_T = 0.95f, COORD_W = 0.35f, COORD_H = 0.05f;
+    private static final int COORD_EVERY_MS = 6000, LEASH_R = 12, LEASH_PROBE_MS = 1200;
+    private static final java.util.regex.Pattern COORD_TEXT =
+            java.util.regex.Pattern.compile("([A-Za-z_]{3,})\\s*\\[\\s*(\\d{1,4})\\s*[,.]\\s*(\\d{1,4})\\s*\\]");
+    private String homeMap, posMap;
+    private int homeX, homeY, posX, posY;
+    private long posAt, lastCoordReadAt, lastChatReadAt;
+    private static final int CHAT_READ_MS = 4000;
+    private int calStage, leashMisses;
+    private boolean calValid;
+    private float calEx, calEy, calNx, calNy, calP0x, calP0y, leashLastDist;
+    private long calWalkEnd;
+    private boolean lastOcrHadDialog;
 
     /**
      * Death: "Do you wish to be revived?" over a Revive button (killed by a player, 2026-10-05
@@ -3284,10 +3445,39 @@ public class ClickService extends AccessibilityService {
         deadUntil = 0;
         busyUntil = farmHoldUntil = now;
         farmMobsSeenAt = farmProgressAt = lastTargetBarAt = now;
-        Log.i(TAG, "died: back from the Back Point, farming again");
-        Telegram.send(this, "\u2705 Ran Online: Back Point used, farming again. Check how many Back Point cards are left.");
+        Log.i(TAG, "died: back from the Back Point, summoning the pet, then farming again");
+        summonPet();
+        Telegram.send(this, "\u2705 Ran Online: Back Point used, pet summoned, farming again. Check how many Back Point cards are left.");
         handler.post(this::farmFullBuff);
         schedulePump(0);
+    }
+
+    /** Paw (top right) -> "Summon your pet?" -> Yes. The Yes button is read by OCR, else its measured spot. */
+    private void summonPet() {
+        long now = SystemClock.uptimeMillis();
+        panelQuietUntil = now + 8000;                          // that dialog is ours, not a panel to X
+        busyUntil = farmHoldUntil = Math.max(busyUntil, now + 4000);
+        tapAt(screenW * PAW_X, screenH * PAW_Y, "pet paw");
+        handler.postDelayed(() -> captureRegionForOcr(0f, 0f, 1f, 0.75f, shot -> {
+            if (shot == null) return;
+            Ocr.read(shot, (lines, words) -> {
+                boolean asked = false;
+                Rect yes = null;
+                for (MathQuestion.Line l : lines) {
+                    String t = l.text.toLowerCase(java.util.Locale.ROOT);
+                    if (t.contains("summon") && t.contains("pet")) asked = true;
+                    if (t.replaceAll("[^a-z]", "").equals("yes")) yes = l.box;
+                }
+                if (!asked) {
+                    Log.i(TAG, "pet: no \"Summon your pet?\" after the paw (already out?)");
+                    return;
+                }
+                float x = yes != null ? yes.exactCenterX() : screenW * PET_YES_X;
+                float y = yes != null ? yes.exactCenterY() : screenH * PET_YES_Y;
+                Log.i(TAG, "pet: \"Summon your pet?\" -> Yes at " + Math.round(x) + "," + Math.round(y));
+                tapAt(x, y, "pet yes");
+            });
+        }), 1500);
     }
 
     private void checkForQuestion(String game, List<MathQuestion.Line> lines) {
@@ -3501,9 +3691,18 @@ public class ClickService extends AccessibilityService {
                     farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
                     farmCheck(MobCounter.count(shot, screenW, screenH),
                             MobCounter.targetHp(shot, screenW, screenH), now);
-                    farmChatRead(shot);
+                    // Each text read costs memory and CPU on the Pad 5 (system froze again 07:49 with
+                    // reads every scan): chat every CHAT_READ_MS, coordinates every COORD_EVERY_MS.
+                    if (now - lastChatReadAt >= CHAT_READ_MS - 100) {
+                        lastChatReadAt = now;
+                        farmChatRead(shot);
+                    }
+                    if (now - lastCoordReadAt >= COORD_EVERY_MS - 100) {
+                        lastCoordReadAt = now;
+                        farmCoordRead(shot);
+                    }
                     boolean nearKill = (farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP)   // to see where it dies
-                            || now < postKillUntil;                                           // and what it drops
+                            || (now < postKillUntil && now - killAt < 2500);                  // and what it drops
                     if (luring || nearKill || now - lastFarmOcrAt >= FARM_OCR_MS - 100) {   // every scan while luring
                         lastFarmOcrAt = now;
                         farmOcr(shot);
