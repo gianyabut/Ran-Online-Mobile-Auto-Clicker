@@ -1065,7 +1065,9 @@ public class ClickService extends AccessibilityService {
             schedulePump(busyUntil - now);
             return;
         }
-        if (next.smartBuff && targetSelected && gameInFront()) {
+        // Not in Farmer: there the selection is the monster being fought, and a self buff goes to
+        // self anyway; dropping it would cancel the fight every time the buff is cast.
+        if (next.smartBuff && targetSelected && !farmer && gameInFront()) {
             // With a player selected, the game casts buffs on that player instead of us and the
             // party. Close the selection (the ✕ by its name) first; the buff goes next.
             targetSelected = false;
