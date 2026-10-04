@@ -177,6 +177,8 @@ public class ClickService extends AccessibilityService {
     // Taps allowed per screenshot that shows the hand (0.7 s apart, inside the 2 s scan).
     private static final int LOOT_TAPS_PER_LOOK = 2;
     private int lootTapsLeft;
+    private static final int LOOT_FAILS_TO_PAUSE = 3, LOOT_FULL_PAUSE_MS = 5 * 60_000;
+    private int lootFailStreak;
     // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
     // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
     private static final float KILL_SOON_HP = 0.4f;
@@ -1668,7 +1670,7 @@ public class ClickService extends AccessibilityService {
         // A kill (the bar went away): hold attacks a moment and look again for the loot hand.
         // Attacking on straight away auto-targeted the next monster and ran off from the drop,
         // and the hand then walked the character all the way back (the user, 12:55).
-        if (!target && farmTargetHp >= 0 && lootStartedAt == 0) {
+        if (!target && farmTargetHp >= 0 && lootStartedAt == 0 && now >= lootIgnoreUntil) {
             postKillUntil = now + POST_KILL_HOLD_MS;
             busyUntil = Math.max(busyUntil, postKillUntil);
         }
@@ -1800,7 +1802,21 @@ public class ClickService extends AccessibilityService {
             }
             Log.i(TAG, "farmer: " + (handShowing ? "couldn't pick it up in " + LOOT_MAX_PAUSE_MS / 1000
                     + " s, leaving it" : "picked up") + ", attacking again");
-            if (handShowing) lootIgnoreUntil = now + LOOT_IGNORE_MS;
+            if (handShowing) {
+                lootIgnoreUntil = now + LOOT_IGNORE_MS;
+                // A few failures in a row with nothing picked up: the bag is full (12:55, the user).
+                // Stop pausing the fight for loot for a while, and say so.
+                if (++lootFailStreak >= LOOT_FAILS_TO_PAUSE) {
+                    lootFailStreak = 0;
+                    lootIgnoreUntil = now + LOOT_FULL_PAUSE_MS;
+                    Log.w(TAG, "farmer: " + LOOT_FAILS_TO_PAUSE + " pickups failed in a row, inventory full?"
+                            + " Not looting for " + LOOT_FULL_PAUSE_MS / 60_000 + " min");
+                    Telegram.send(this, "🎒 Ran Online: looting paused for " + LOOT_FULL_PAUSE_MS / 60_000
+                            + " min, items aren't being picked up (inventory full?). Still fighting.");
+                }
+            } else {
+                lootFailStreak = 0;
+            }
             lootStartedAt = 0;
             handler.removeCallbacks(lootTapTick);
             busyUntil = farmHoldUntil = now;
