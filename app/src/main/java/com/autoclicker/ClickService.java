@@ -2143,8 +2143,10 @@ public class ClickService extends AccessibilityService {
 
     /** Farmer: hold buff casts while a fight is on. */
     private boolean farmBuffsHeld(long now) {
-        boolean fighting = running && farmer && (farmTargetHp >= 0 || now - nearTagAt < NEAR_TAG_FIGHT_MS
-                || lootStartedAt > 0 || now < postKillUntil);
+        // Luring isn't fighting: attacks are paused and the followers only tag along, so that's
+        // the best time to buff (the names around had held every buff for 45 s, 23:25).
+        boolean fighting = running && farmer && (lootStartedAt > 0 || pullingSince > 0 || (!luring
+                && (farmTargetHp >= 0 || now - nearTagAt < NEAR_TAG_FIGHT_MS || now < postKillUntil)));
         if (!fighting) {
             buffsHeldSince = 0;
             return false;
