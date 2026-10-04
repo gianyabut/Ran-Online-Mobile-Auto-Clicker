@@ -141,16 +141,18 @@ public class ClickService extends AccessibilityService {
     private static final String KEY_TARGETS_FARM = "targets_farm";
     private boolean farmer;
     // Kills leave gaps (a dead monster stays "selected" a few seconds), so wait well past them.
-    private static final int FARM_IDLE_MS = 12_000;
+    private static final int FARM_IDLE_MS = 8000;
     // One screenshot every 2 s does the fight check, and every 2nd one the loot + question reading
     // (separate screenshots failed when too close together and ran the tablet out of memory).
     private static final int FARM_SCAN_MS = 2000;
-    private static final int FARM_WALK_MS = 2500;   // far enough to leave a stuck spot behind
+    private static final int FARM_WALK_MS = 4000;   // big maps: cover ground (and leave a stuck spot)
     private static final int FARM_WALK_SETTLE_MS = 400;
     private static final int FARM_PUSH_MS = 100;
     private static final float FARM_PUSH = 140 / 2560f;
     private static final int[][] FARM_WALK_DIRS = {{1, 0}, {0, -1}, {-1, 0}, {0, 1}};   // E N W S
     private int farmWalkStep;
+    private static final int FARM_MAX_LEG = 4;
+    private int farmLegLen = 1, farmLegDone, farmTurns;
     private long farmMobsSeenAt;
     // Target HP not dropping this long = stuck on a monster it can't reach.
     private static final int FARM_STUCK_MS = 10_000;
@@ -163,6 +165,9 @@ public class ClickService extends AccessibilityService {
     private long farmHoldUntil;
     // The shared "pause after tap" (3 s, set for heals) spaced attacks ~4 s apart.
     private static final int FARM_TAP_GAP_MS = 800;
+    // Buffs in Farmer: hold attacks this long after a buff so its cast isn't cancelled; wait at most
+    // FARM_BUFF_MAX_WAIT_MS before one; a cast that didn't take is retried after FARM_BUFF_RETRY_MS.
+    private static final int FARM_AFTER_BUFF_MS = 1500, FARM_BUFF_MAX_WAIT_MS = 1500, FARM_BUFF_RETRY_MS = 15_000;
     // Loot: the hand button beside F1 picks up everything nearby (the user's pick, 2026-10-04,
     // after walking to gold labels kept stopping short and attacks pulled the character away).
     // While the hand shows, attacks pause until it's picked up (farmLootCheck).
@@ -453,6 +458,18 @@ public class ClickService extends AccessibilityService {
                     }
                     // A long-cooldown buff (Massive Haste) can come due before it's castable again.
                     if (needed && onCooldown()) {
+                        handler.postDelayed(this, SMART_RECHECK_MS);
+                        return;
+                    }
+                    if (needed && sinceTap >= SMART_RETRY_MS && farmer && lastTapAt > 0
+                            && sinceTap < SMART_RETRY_MS + 5000) {
+                        // Farmer: a buff the monsters keep interrupting must not starve the attacks
+                        // (retried every ~10 s with waits around it, the character barely attacked,
+                        // 13:32). Leave it a while; the attacks go on meanwhile.
+                        backoffUntil = now + FARM_BUFF_RETRY_MS;
+                        lastTapAt = 0;
+                        Log.i(TAG, "buff target " + (targets.indexOf(Target.this) + 1) + ": cast didn't take, trying again in "
+                                + FARM_BUFF_RETRY_MS / 1000 + " s");
                         handler.postDelayed(this, SMART_RECHECK_MS);
                         return;
                     }
@@ -1095,7 +1112,7 @@ public class ClickService extends AccessibilityService {
         // Farmer: attack after attack at the quick pace, but after a buff let its cast finish - the
         // next attack 0.8 s later cancelled it (the user, 13:31).
         boolean quick = next.priority || (farmer && !next.isSmart());
-        busyUntil = now + TAP_MS + (quick ? tapGapMs : AFTER_BUFF_GAP_MS);
+        busyUntil = now + TAP_MS + (quick ? tapGapMs : farmer ? FARM_AFTER_BUFF_MS : AFTER_BUFF_GAP_MS);
         lastAnyTapAt = now;
         if (next.priority) lastPriorityTapAt = now;
         if (next.isSmart()) {
@@ -1143,7 +1160,10 @@ public class ClickService extends AccessibilityService {
         for (Target o : targets) if (o.priority) anyPriority = true;
         // Farmer: attacks keep the quick pace; a buff waits out the last skill's lock (its learned
         // extra wait), or it lands mid-animation and is ignored (12:32-12:33).
-        if (farmer) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + (t.isSmart() ? t.extraGapMs : 0) - now);
+        if (farmer) {
+            long extra = t.isSmart() ? Math.min(t.extraGapMs, FARM_BUFF_MAX_WAIT_MS) : 0;   // never stall attacks long
+            return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + extra - now);
+        }
         if (!anyPriority) return Math.max(0, lastAnyTapAt + TAP_MS + tapGapMs + t.extraGapMs - now);
 
         long slotStart = lastPriorityTapAt + TAP_MS + tapGapMs + t.extraGapMs;
@@ -1744,8 +1764,14 @@ public class ClickService extends AccessibilityService {
     /** One step of the E, N, W, S walk; attacks hold off until it's done. */
     private void farmWalk(long now) {
         if (!running || !farmer) return;
+        // Spiral outward (the maps are big, 13:34): legs of 1,1,2,2,3,3,4,4 steps, turning E N W S,
+        // then start small again so it doesn't wander off for good.
         int[] dir = FARM_WALK_DIRS[farmWalkStep];
-        farmWalkStep = (farmWalkStep + 1) % FARM_WALK_DIRS.length;
+        if (++farmLegDone >= farmLegLen) {
+            farmLegDone = 0;
+            farmWalkStep = (farmWalkStep + 1) % FARM_WALK_DIRS.length;
+            if (++farmTurns % 2 == 0) farmLegLen = farmLegLen >= FARM_MAX_LEG ? 1 : farmLegLen + 1;
+        }
         farmMobsSeenAt = now;                       // look again after the step
         long window = FARM_PUSH_MS + FARM_WALK_MS;
         ownTapUntil = now + window + OWN_TAP_SLACK_MS;
@@ -2318,9 +2344,10 @@ public class ClickService extends AccessibilityService {
                 }
                 if (farmer && now - lastMobCountAt >= farmScanMs() - 100) {
                     lastMobCountAt = now;
+                    // Loot first: a walk started by the "no target" rule left the drops behind (13:33).
+                    farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
                     farmCheck(MobCounter.count(shot, screenW, screenH),
                             MobCounter.targetHp(shot, screenW, screenH), now);
-                    farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
                     if (now - lastFarmOcrAt >= FARM_OCR_MS - 100) {
                         lastFarmOcrAt = now;
                         farmOcr(shot);
