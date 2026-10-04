@@ -157,6 +157,13 @@ public class ClickService extends AccessibilityService {
     // into a wall (the user, 15:19: lure walks pushed into one for a whole round), so turn.
     private int[] lastSceneThumb, walkStartThumb;
     private int wallsInARow;
+    // A game panel covering the screen (a stray tap opened the map, 15:29): its X at the top right
+    // closes it. With nothing open that X opens the Server List menu instead, so only tap it when
+    // the HUD is gone twice in a row; a second tap closes that menu if it was opened by mistake.
+    private int hudHiddenScans, panelCloseTries;
+    private long hudHiddenSince, lastOcrResultAt;
+    private static final float PANEL_X_X = 2340 / 2560f, PANEL_X_Y = 42 / 1600f;
+    private static final int PANEL_MAX_TRIES = 3;
     // Luring with nothing in range: head for where monsters were last seen (names at the screen
     // edge, e.g. during the fight), else explore in straight lines - the spiral kept going back
     // over the same empty ground ("just random walks", the user, 15:28).
@@ -686,7 +693,7 @@ public class ClickService extends AccessibilityService {
         knownMonsters.clear();
         knownMonsters.addAll(getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getStringSet(KEY_MONSTERS, java.util.Collections.emptySet()));
-        // Drop junk learned before the filters: "hodel" (a place label) and short OCR fragments.
+        // Drop junk learned before the filters: short OCR fragments.
         if (knownMonsters.removeIf(k -> !learnableMonster(k))) {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putStringSet(KEY_MONSTERS, new java.util.HashSet<>(knownMonsters)).apply();
@@ -1924,15 +1931,12 @@ public class ClickService extends AccessibilityService {
         return false;
     }
 
-    // Not monsters: "Hodel" is a place label (on the minimap and under the target bar), and it got
-    // learned - so the lure tapped the minimap and opened the map (the user, 15:29).
-    private static final String[] FARM_NOT_MONSTERS = {"hode"};
-
-    /** A name worth learning/matching: long enough to be a real name, and not a known non-monster. */
+    /**
+     * A name worth learning/matching: long enough to be a real name ("Hodel" is 5), not an OCR
+     * fragment like "hode", which matched any text containing it.
+     */
     private static boolean learnableMonster(String key) {
-        if (key.length() < 6) return false;
-        for (String n : FARM_NOT_MONSTERS) if (key.contains(n)) return false;
-        return true;
+        return key.length() >= 5;
     }
 
     /**
@@ -2128,6 +2132,31 @@ public class ClickService extends AccessibilityService {
         joystickHold(dir[0] * push, dir[1] * push, FARM_WALK_MS);
     }
 
+    /** True while a panel covers the game: everything else waits until it's closed. */
+    private boolean farmPanelCheck(boolean hidden, long now) {
+        if (!hidden || questionSeen) {
+            if (panelCloseTries > 0) Log.i(TAG, "farmer: panel closed, carrying on");
+            hudHiddenScans = panelCloseTries = 0;
+            return false;
+        }
+        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + FARM_SCAN_MS + 500);
+        if (hudHiddenScans++ == 0) hudHiddenSince = now;
+        // Two scans in a row, and a text read since it appeared that found no question.
+        if (hudHiddenScans < 2 || lastOcrResultAt <= hudHiddenSince) return true;
+        if (panelCloseTries >= PANEL_MAX_TRIES) {
+            if (panelCloseTries++ == PANEL_MAX_TRIES) {
+                Log.w(TAG, "farmer: a panel is still covering the game after " + PANEL_MAX_TRIES + " X taps");
+                Telegram.send(this, "⚠️ Ran Online: a game panel is covering the screen and X didn't close it. Farmer is waiting.");
+            }
+            return true;
+        }
+        panelCloseTries++;
+        hudHiddenScans = 0;
+        Log.i(TAG, "farmer: a panel covers the game (skill buttons gone), tapping its X (try " + panelCloseTries + ")");
+        tapAt(screenW * PANEL_X_X, screenH * PANEL_X_Y, "panel X");
+        return true;
+    }
+
     /** Remembers which way the nearest monster beyond the followers is, for lureSearchWalk. */
     private void noteMonstersSeen(List<Rect> tags, long now) {
         float best = Float.MAX_VALUE;
@@ -2209,6 +2238,7 @@ public class ClickService extends AccessibilityService {
             try {
                 for (MathQuestion.Line l : lines) l.box.offset(x, y);   // crop pixels -> screen pixels
                 checkForQuestion(game, lines);
+                lastOcrResultAt = SystemClock.uptimeMillis();
                 checkTargetName(lines);
                 long seen = SystemClock.uptimeMillis();
                 List<Rect> tags = monsterTags(lines, crop, x, y);
@@ -2765,6 +2795,14 @@ public class ClickService extends AccessibilityService {
                         walkStartThumb = null;
                     }
                     lastSceneThumb = thumb;
+                    if (farmPanelCheck(MobCounter.hudHidden(shot, screenW, screenH), now)) {
+                        // Keep reading text: the panel might be the anti-bot question, never X it.
+                        if (now - lastFarmOcrAt >= FARM_SCAN_MS - 100) {
+                            lastFarmOcrAt = now;
+                            farmOcr(shot);
+                        }
+                        return;
+                    }
                     farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
                     farmCheck(MobCounter.count(shot, screenW, screenH),
                             MobCounter.targetHp(shot, screenW, screenH), now);

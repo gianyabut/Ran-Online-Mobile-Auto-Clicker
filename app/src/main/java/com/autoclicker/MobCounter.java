@@ -169,6 +169,31 @@ final class MobCounter {
     }
 
     /**
+     * A game panel (the map, the Server List menu, ...) is covering the screen: the game's own Z
+     * button and Stop button are gone. ~11% / ~6% of those spots are white glyph pixels normally,
+     * 0% under the map and under the Server List (2026-10-04).
+     */
+    static boolean hudHidden(Bitmap shot, int screenW, int screenH) {
+        if (shot.getWidth() < screenW || shot.getHeight() < screenH) return false;
+        return brightShare(shot, screenW * 0.7375f, screenH * 0.572f, screenW * 0.0176f) < 0.03f
+                && brightShare(shot, screenW * 0.956f, screenH * 0.389f, screenW * 0.0156f) < 0.02f;
+    }
+
+    private static float brightShare(Bitmap shot, float cx, float cy, float r) {
+        int bright = 0, n = 0;
+        for (int y = (int) (cy - r); y < cy + r; y += 2) {
+            for (int x = (int) (cx - r); x < cx + r; x += 2) {
+                int c = shot.getPixel(x, y);
+                int mn = Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c)));
+                int mx = Math.max(Color.red(c), Math.max(Color.green(c), Color.blue(c)));
+                n++;
+                if (mn > 190 && mx - mn < 30) bright++;
+            }
+        }
+        return n > 0 ? bright / (float) n : 0f;
+    }
+
+    /**
      * A coarse picture of the play area (brightness of a grid of small patches) to tell whether a
      * walk moved the camera. The centre, where the character itself stands, is left out.
      */
