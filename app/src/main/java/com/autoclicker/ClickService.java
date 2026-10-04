@@ -210,9 +210,10 @@ public class ClickService extends AccessibilityService {
     private static final float LURE_NEAR_W = 0.15f, LURE_FAR_W = 0.6f, LURE_BODY_BELOW = 2f, LURE_HIT_HP = 0.97f;
     private static final float FIST_X = 2362 / 2560f, FIST_Y = 1386 / 1600f;
     private static final int LURE_PULL_GAP_MS = 2500, LURE_SELECT_SETTLE_MS = 300, LURE_PULL_MAX_MS = 4000;
-    private static final int LURE_START_IDLE_MS = 3000, LURE_MAX_MS = 15_000;
+    private static final int LURE_START_IDLE_MS = 3000, LURE_MAX_MS = 30_000;   // incl. walking to find them
     private static final float HUD_TOP_H = 0.15f, HUD_LEFT_W = 0.25f, HUD_LEFT_H = 0.25f;
-    private boolean luring;
+    private boolean luring, lureMode;
+    private static final String KEY_LURE = "farm_lure";
     // Monster names learned from the target bar this session (see checkTargetName).
     private final java.util.Set<String> knownMonsters = new java.util.HashSet<>();
     private static final String KEY_MONSTERS = "farm_monsters";
@@ -648,6 +649,7 @@ public class ClickService extends AccessibilityService {
         removeOverlays("connect");
         // Farmer keeps its own rings: load the layout of the mode it was last in.
         farmer = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FARMER, false);
+        lureMode = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_LURE, false);
         knownMonsters.clear();
         knownMonsters.addAll(getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getStringSet(KEY_MONSTERS, java.util.Collections.emptySet()));
@@ -855,7 +857,7 @@ public class ClickService extends AccessibilityService {
         // if no fight is on (decided on the first monster count, see updateWave). Skipped when
         // this start came from a full buff (FB or the EG switch while stopped).
         if (run) farmMobsSeenAt = farmProgressAt = SystemClock.uptimeMillis();   // a moment before walking
-        luring = run;                                               // start by gathering a group
+        luring = run && lureMode;                                  // LURE: start by gathering a group
         lureStartedAt = SystemClock.uptimeMillis();
         pullingSince = 0;
         lootStartedAt = 0;                                          // its tap tick was cleared above
@@ -887,7 +889,7 @@ public class ClickService extends AccessibilityService {
         add.setVisibility(others);
         // FB and EG/LL only mean something in FS.
         fullBuffButton.setVisibility(on || !fsMode() ? View.GONE : View.VISIBLE);
-        modeButton.setVisibility(on || !fsMode() ? View.GONE : View.VISIBLE);
+        modeButton.setVisibility(on || booster ? View.GONE : View.VISIBLE);   // EG/LL, or KILL/LURE in Farmer
         LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) manualButton.getLayoutParams();
         lp.topMargin = on ? 0 : dp(8);
         manualButton.setLayoutParams(lp);
@@ -1421,7 +1423,12 @@ public class ClickService extends AccessibilityService {
 
     /** The mode button's label/colour for the current mode (EG, LL, or BOOST). */
     private void refreshModeButton() {
-        if (booster) {
+        if (farmer) {
+            // Farmer: KILL fights whatever comes; LURE gathers LURE_COUNT first (the user, 14:44).
+            modeButton.setText(lureMode ? "LURE" : "KILL");
+            modeButton.setTextSize(11);
+            modeButton.setBackground(circle(lureMode ? Color.rgb(60, 120, 40) : Color.rgb(170, 40, 40)));
+        } else if (booster) {
             modeButton.setText("BOOST");
             modeButton.setTextSize(11);
             modeButton.setBackground(circle(Color.rgb(150, 90, 30)));
@@ -1434,7 +1441,23 @@ public class ClickService extends AccessibilityService {
 
     /** Mode button (FS only): toggle End Game / Low Level. BOOST is chosen on the ▶/AUTO chooser. */
     private void onModeButton() {
+        if (farmer) {
+            setLureMode(!lureMode);
+            return;
+        }
         setEndGame(!endGame, "button");
+    }
+
+    private void setLureMode(boolean on) {
+        lureMode = on;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_LURE, on).apply();
+        Log.i(TAG, "farmer: " + (on ? "LURE mode, gathering " + LURE_COUNT + " before each fight" : "KILL mode"));
+        luring = on && running;
+        lureStartedAt = SystemClock.uptimeMillis();
+        pullingSince = 0;
+        if (!on) busyUntil = SystemClock.uptimeMillis();
+        refreshModeButton();
+        shake(modeButton);
     }
 
     /** ▶/AUTO: when stopped, ask which mode to start in; when running, stop. */
@@ -1525,7 +1548,7 @@ public class ClickService extends AccessibilityService {
         refreshModeButton();
         if (!manual) {
             fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
-            modeButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
+            modeButton.setVisibility(booster ? View.GONE : View.VISIBLE);
         }
         for (Target t : targets) {
             t.root.setVisibility(on || manual || overlaysHidden ? View.GONE : View.VISIBLE);
@@ -1556,7 +1579,7 @@ public class ClickService extends AccessibilityService {
         }
         if (!manual) {
             fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
-            modeButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
+            modeButton.setVisibility(booster ? View.GONE : View.VISIBLE);
         }
     }
 
@@ -1732,7 +1755,7 @@ public class ClickService extends AccessibilityService {
         boolean target = targetHp >= 0;
         lurePullCheck(targetHp, now);
         // Nothing left to fight for a moment: gather the next group.
-        if (!luring && !target && lootStartedAt == 0 && now - farmMobsSeenAt >= LURE_START_IDLE_MS) {
+        if (lureMode && !luring && !target && lootStartedAt == 0 && now - farmMobsSeenAt >= LURE_START_IDLE_MS) {
             luring = true;
             lureStartedAt = now;
             Log.i(TAG, "farmer: fight over, luring the next " + LURE_COUNT);
@@ -1779,7 +1802,10 @@ public class ClickService extends AccessibilityService {
     private List<Rect> monsterTags(List<MathQuestion.Line> lines, Bitmap crop, int ox, int oy) {
         List<Rect> tags = new ArrayList<>();
         for (MathQuestion.Line line : lines) {
-            if (!isKnownMonster(line.text)) continue;
+            if (!isKnownMonster(line.text)) {
+                if (luring && line.text.trim().length() >= 4) Log.d(TAG, "lure skip \"" + line.text.trim() + "\" (not a learned monster)");
+                continue;
+            }
             // Not the HUD: the top strip (target bar title) and the top-left panel ("Lv. 148",
             // "MMR", the buff row) are white on dark too - the first lure kept pulling "531,195".
             if (line.box.bottom <= screenH * HUD_TOP_H
@@ -1796,7 +1822,13 @@ public class ClickService extends AccessibilityService {
                     if (mn > 185 && mx - mn < 35) white++;
                 }
             }
-            if (total > 0 && white * 100 >= total * 6) tags.add(new Rect(line.box));
+            if (luring) {
+                Log.d(TAG, "lure tag \"" + line.text.trim() + "\" at " + line.box.toShortString() + " white "
+                        + (total > 0 ? white * 100 / total : 0) + "% dist " + Math.round(fromCharacter(line.box)));
+            }
+            // Any colour: weaker monsters' names are gray, not white (the user, 14:44), so a
+            // colour test missed every monster here. Only learned names get this far anyway.
+            tags.add(new Rect(line.box));
         }
         return tags;
     }
@@ -1842,8 +1874,7 @@ public class ClickService extends AccessibilityService {
             }
         }
         boolean timeUp = now - lureStartedAt >= LURE_MAX_MS;
-        // Nothing (known) left to pull: carry on as before rather than stand idle until time-up.
-        if (followers >= LURE_COUNT || timeUp || (pull == null && pullingSince == 0)) {
+        if (followers >= LURE_COUNT || timeUp) {
             luring = false;
             busyUntil = now;
             farmMobsSeenAt = farmProgressAt = now;
@@ -1853,6 +1884,13 @@ public class ClickService extends AccessibilityService {
             return;
         }
         busyUntil = Math.max(busyUntil, now + FARM_SCAN_MS + 500);     // no attacks while luring
+        // Nothing in pull range: go and find more (the spiral walk; followers come along).
+        if (pull == null && pullingSince == 0 && canFarmMove(now)) {
+            Log.i(TAG, "farmer: luring (" + followers + " following), none in range, walking "
+                    + "ENWS".charAt(farmWalkStep));
+            farmWalk(now);
+            return;
+        }
         if (pull != null) farmMobsSeenAt = now;                         // monsters in range: no walking off
         if (pull == null || pullingSince > 0 || now - lastPullAt < LURE_PULL_GAP_MS || !canFarmMove(now)) return;
         // The pull is the fist (basic attack, no cooldown; ring 1 is long range but its cooldown is
