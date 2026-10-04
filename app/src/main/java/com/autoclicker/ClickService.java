@@ -167,9 +167,11 @@ public class ClickService extends AccessibilityService {
     // after walking to gold labels kept stopping short and attacks pulled the character away).
     // While the hand shows, attacks pause until it's picked up (farmLootCheck).
     private static final float LOOT_HAND_X = 1735 / 2560f, LOOT_HAND_Y = 1430 / 1600f;
-    private static final int LOOT_MAX_PAUSE_MS = 10_000, LOOT_RETAP_MS = 1500, LOOT_IGNORE_MS = 8000;
+    private static final int LOOT_MAX_PAUSE_MS = 10_000, LOOT_RETAP_MS = 700, LOOT_IGNORE_MS = 8000;
+    // While looting, check every second whether the hand is gone (else every FARM_SCAN_MS).
+    private static final int LOOT_SCAN_MS = 1000;
     // A skill still animating ignores other input; give it this long after the last attack tap.
-    private static final int LOOT_AFTER_SKILL_MS = 1000;
+    private static final int LOOT_AFTER_SKILL_MS = 700;
     private long lootStartedAt, lootIgnoreUntil;
     private final Runnable lootTapTick = this::lootTapTick;
     // Text reading (the anti-bot question) on every 2nd fight-check screenshot, from the play area.
@@ -1782,6 +1784,10 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(lootTapTick, wait);
     }
 
+    private int farmScanMs() {
+        return lootStartedAt > 0 ? LOOT_SCAN_MS : FARM_SCAN_MS;
+    }
+
     /** Taps the hand, and again every LOOT_RETAP_MS while the pickup is under way. */
     private void lootTapTick() {
         if (!running || !farmer || lootStartedAt == 0) return;
@@ -2251,7 +2257,7 @@ public class ClickService extends AccessibilityService {
                     updateParty(MobCounter.partySize(shot, screenW, screenH));
                     updateWave(MobCounter.count(shot, screenW, screenH));
                 }
-                if (farmer && now - lastMobCountAt >= FARM_SCAN_MS - 100) {
+                if (farmer && now - lastMobCountAt >= farmScanMs() - 100) {
                     lastMobCountAt = now;
                     farmCheck(MobCounter.count(shot, screenW, screenH),
                             MobCounter.targetHp(shot, screenW, screenH), now);
@@ -2292,7 +2298,7 @@ public class ClickService extends AccessibilityService {
         // Each screenshot is a full-screen copy (~16 MB). Buff timers change slowly, so smart
         // buffs only need one a second; the fast rate is for rings watching a cooldown shade.
         handler.postDelayed(this::cooldownCheck,
-                anyCooldown ? SCREENSHOT_EVERY_MS : farmer ? FARM_SCAN_MS : BUFF_SCAN_EVERY_MS);
+                anyCooldown ? SCREENSHOT_EVERY_MS : farmer ? farmScanMs() : BUFF_SCAN_EVERY_MS);
     }
 
     /** For the log: each icon as x,y size fill%. */
