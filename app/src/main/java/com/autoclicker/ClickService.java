@@ -168,8 +168,9 @@ public class ClickService extends AccessibilityService {
     // While the hand shows, attacks pause until it's picked up (farmLootCheck).
     private static final float LOOT_HAND_X = 1735 / 2560f, LOOT_HAND_Y = 1430 / 1600f;
     private static final int LOOT_MAX_PAUSE_MS = 10_000, LOOT_RETAP_MS = 700, LOOT_IGNORE_MS = 8000;
-    // While looting, check every second whether the hand is gone (else every FARM_SCAN_MS).
-    private static final int LOOT_SCAN_MS = 1000;
+    // Not faster while looting: 1 s screenshots under memory pressure preceded Android's own
+    // system process hanging and restarting (12:35-12:37, watchdog kill), as at 11:43.
+    private static final int LOOT_SCAN_MS = 2000;
     // A skill still animating ignores other input; give it this long after the last attack tap.
     private static final int LOOT_AFTER_SKILL_MS = 700;
     private long lootStartedAt, lootIgnoreUntil;
@@ -1512,6 +1513,9 @@ public class ClickService extends AccessibilityService {
      * needing a long wait after the heal would never fit between two heals.
      */
     private Target pickNext(long now) {
+        // Farmer: a buff that came due goes before the attacks waiting in line; queued behind six
+        // attack rings it lost a whole rotation (~8 s) and the short eye buff ran out (12:35:28).
+        if (farmer) for (Target t : pending) if (t.isSmart()) return t;
         // Full buff in progress: its buffs go back to back and the heal waits until the last one
         // is out (~12 s). It comes when the wave is cleared, right after a heal, and the party
         // gets every buff ~4 s sooner, before heading off to lure.
