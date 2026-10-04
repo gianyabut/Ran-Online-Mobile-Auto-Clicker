@@ -168,6 +168,47 @@ final class MobCounter {
         return total > 0 && tan * 1000 >= total * 14;
     }
 
+    /**
+     * A coarse picture of the play area (brightness of a grid of small patches) to tell whether a
+     * walk moved the camera. The centre, where the character itself stands, is left out.
+     */
+    static int[] sceneThumb(Bitmap shot, int screenW, int screenH) {
+        if (shot.getWidth() < screenW || shot.getHeight() < screenH) return null;
+        final int cols = 20, rows = 12;
+        int[] out = new int[cols * rows];
+        for (int gy = 0; gy < rows; gy++) {
+            for (int gx = 0; gx < cols; gx++) {
+                float fx = 0.1f + 0.8f * (gx + 0.5f) / cols, fy = 0.15f + 0.55f * (gy + 0.5f) / rows;
+                if (fx > 0.42f && fx < 0.58f && fy > 0.33f && fy < 0.67f) {
+                    out[gy * cols + gx] = -1;
+                    continue;
+                }
+                int cx = (int) (screenW * fx), cy = (int) (screenH * fy), sum = 0, n = 0;
+                for (int dy = -6; dy <= 6; dy += 3) {
+                    for (int dx = -6; dx <= 6; dx += 3) {
+                        int c = shot.getPixel(cx + dx, cy + dy);
+                        sum += (Color.red(c) * 3 + Color.green(c) * 6 + Color.blue(c)) / 10;
+                        n++;
+                    }
+                }
+                out[gy * cols + gx] = sum / n;
+            }
+        }
+        return out;
+    }
+
+    /** Average brightness change per patch between two sceneThumb()s (0-255). */
+    static int sceneDiff(int[] a, int[] b) {
+        long sum = 0;
+        int n = 0;
+        for (int i = 0; i < a.length; i++) {
+            if (a[i] < 0) continue;
+            sum += Math.abs(a[i] - b[i]);
+            n++;
+        }
+        return n > 0 ? (int) (sum / n) : 0;
+    }
+
     private static boolean isTagRed(int c) {
         int r = Color.red(c);
         int g = Color.green(c);

@@ -153,6 +153,11 @@ public class ClickService extends AccessibilityService {
     private int farmWalkStep;
     private static final int FARM_MAX_LEG = 4;
     private int farmLegLen = 1, farmLegDone, farmTurns;
+    // Walls: the scene before a walk vs after it. If the camera hardly moved, the character walked
+    // into a wall (the user, 15:19: lure walks pushed into one for a whole round), so turn.
+    private int[] lastSceneThumb, walkStartThumb;
+    private int wallsInARow;
+    private static final int WALL_SCENE_DIFF = 8;
     private long farmMobsSeenAt;
     // Target HP not dropping this long = stuck on a monster it can't reach.
     private static final int FARM_STUCK_MS = 15_000;   // tougher monsters take a few hits (13:37)
@@ -2056,6 +2061,7 @@ public class ClickService extends AccessibilityService {
         // Spiral outward (the maps are big, 13:34): legs of 1,1,2,2,3,3,4,4 steps, turning E N W S,
         // then start small again so it doesn't wander off for good.
         int[] dir = FARM_WALK_DIRS[farmWalkStep];
+        walkStartThumb = lastSceneThumb;
         if (++farmLegDone >= farmLegLen) {
             farmLegDone = 0;
             farmWalkStep = (farmWalkStep + 1) % FARM_WALK_DIRS.length;
@@ -2067,6 +2073,21 @@ public class ClickService extends AccessibilityService {
         busyUntil = farmHoldUntil = now + window + FARM_WALK_SETTLE_MS;
         float push = screenW * FARM_PUSH;
         joystickHold(dir[0] * push, dir[1] * push, FARM_WALK_MS);
+    }
+
+    /** After a walk: if the scene barely changed, a wall stopped it - turn (twice in a row: go back). */
+    private void farmWallCheck(int diff) {
+        if (diff >= WALL_SCENE_DIFF) {
+            Log.d(TAG, "farmer: walk moved the scene by " + diff);
+            wallsInARow = 0;
+            return;
+        }
+        wallsInARow++;
+        int turn = wallsInARow >= 2 ? 2 : 1;
+        farmWalkStep = (farmWalkStep + turn) % FARM_WALK_DIRS.length;
+        farmLegDone = 0;
+        Log.i(TAG, "farmer: walk barely moved the scene (" + diff + "), a wall? turning to "
+                + "ENWS".charAt(farmWalkStep));
     }
 
     /**
@@ -2638,6 +2659,12 @@ public class ClickService extends AccessibilityService {
                 if (farmer && now - lastMobCountAt >= farmScanMs() - 100) {
                     lastMobCountAt = now;
                     // Loot first: a walk started by the "no target" rule left the drops behind (13:33).
+                    int[] thumb = MobCounter.sceneThumb(shot, screenW, screenH);
+                    if (walkStartThumb != null && thumb != null && now >= farmHoldUntil) {
+                        farmWallCheck(MobCounter.sceneDiff(walkStartThumb, thumb));
+                        walkStartThumb = null;
+                    }
+                    lastSceneThumb = thumb;
                     farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
                     farmCheck(MobCounter.count(shot, screenW, screenH),
                             MobCounter.targetHp(shot, screenW, screenH), now);
