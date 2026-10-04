@@ -237,6 +237,7 @@ public class ClickService extends AccessibilityService {
     private float killSpotX, killSpotY;
     private long killSpotAt, killAt;
     private boolean killStepDone;
+    private long lastHandSeenAt;
     private static final int LOOT_STEP_AFTER_MS = 1500, KILL_SPOT_FRESH_MS = 5000;
     // Loot report: the chat box prints "Pick up item 'X'." and "Gained 'N' gold."; read it from the
     // fight screenshot and send a Telegram summary every LOOT_REPORT_MS (the user, 2026-10-05).
@@ -245,11 +246,12 @@ public class ClickService extends AccessibilityService {
     private final java.util.LinkedHashMap<String, Integer> lootItems = new java.util.LinkedHashMap<>();
     private long lootGold, lootReportFrom;
     private List<String> lastChatLines = new ArrayList<>();
+    private boolean chatPrimed;
     private final Runnable lootReportTick = this::lootReportTick;
     private static final java.util.regex.Pattern PICKUP_LINE =
-            java.util.regex.Pattern.compile("pick\\s*up\\s*item\\s*\\W*(.+?)\\W*$", java.util.regex.Pattern.CASE_INSENSITIVE);
+            java.util.regex.Pattern.compile("up\\s*item\\s*\\W*(.+?)\\W*$", java.util.regex.Pattern.CASE_INSENSITIVE);
     private static final java.util.regex.Pattern GOLD_LINE =
-            java.util.regex.Pattern.compile("gained\\W*([\\d,.]+)\\W*gold", java.util.regex.Pattern.CASE_INSENSITIVE);
+            java.util.regex.Pattern.compile("ined\\W*([\\d,.]+)\\W*gold", java.util.regex.Pattern.CASE_INSENSITIVE);
     // Buffs wait while fighting: a target bar on the last scan, a monster name close by in the
     // last NEAR_TAG_FIGHT_MS, a pickup or the post-kill pause. After FARM_BUFF_HOLD_MAX_MS of
     // fighting in a row they get a FARM_BUFF_WINDOW_MS window, so stragglers can't starve them.
@@ -959,6 +961,7 @@ public class ClickService extends AccessibilityService {
             lootGold = 0;
             lootItems.clear();
             lastChatLines = new ArrayList<>();
+            chatPrimed = false;
             lootReportFrom = System.currentTimeMillis();
             handler.postDelayed(lootReportTick, LOOT_REPORT_MS);
         }
@@ -2277,7 +2280,8 @@ public class ClickService extends AccessibilityService {
     private boolean farmBuffsHeld(long now) {
         // Luring isn't fighting: attacks are paused and the followers only tag along, so that's
         // the best time to buff (the names around had held every buff for 45 s, 23:25).
-        boolean fighting = running && farmer && (lootStartedAt > 0 || pullingSince > 0 || (!luring
+        boolean fighting = running && farmer && (lootStartedAt > 0 || pullingSince > 0
+                || now - lastHandSeenAt < FARM_SCAN_MS + 500 || (!luring
                 && (farmTargetHp >= 0 || now - nearTagAt < NEAR_TAG_FIGHT_MS || now < postKillUntil)));
         if (!fighting) {
             buffsHeldSince = 0;
@@ -2324,7 +2328,10 @@ public class ClickService extends AccessibilityService {
                 best = l.box;
             }
         }
-        if (best == null) return;
+        if (best == null) {
+            Log.d(TAG, "farmer: target \"" + key + "\" - its name tag not found on screen");
+            return;
+        }
         killSpotX = best.exactCenterX();
         killSpotY = best.bottom + best.height() * LURE_BODY_BELOW;
         killSpotAt = SystemClock.uptimeMillis();
@@ -2345,50 +2352,60 @@ public class ClickService extends AccessibilityService {
         Ocr.read(crop, (lines, words) -> {
             List<MathQuestion.Line> sorted = new ArrayList<>(lines);
             sorted.sort((a, b) -> Integer.compare(a.box.top, b.box.top));
-            List<String> cur = new ArrayList<>();
+            // Only the loot lines, as "gold 367" / "item big mp recovery potion": the red "Skill
+            // cooldown time." spam half under the pet icon read differently every time, so matching
+            // whole chat reads never lined up and one gold drop was counted 3 times (07:12:54-07:13:02).
+            List<String> cur = new ArrayList<>(), curKeys = new ArrayList<>();
             for (MathQuestion.Line l : sorted) {
-                String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
-                if (k.length() >= 4) cur.add(l.text.trim());
+                String entry = lootEntry(l.text);
+                if (entry == null) continue;
+                cur.add(entry);
+                curKeys.add(entry.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", ""));   // OCR slips
             }
-            if (cur.isEmpty()) return;                       // chat hidden or empty
-            // New lines are the ones after the longest overlap with the last read (oldest scroll off the top).
+            boolean chatSeen = !sorted.isEmpty();
+            if (!chatSeen) return;                           // chat hidden
+            // New ones come after the longest overlap with the last read (old ones scroll off the top).
             int overlap = 0;
-            for (int k = Math.min(lastChatLines.size(), cur.size()); k > 0; k--) {
-                boolean same = true;
-                for (int i = 0; i < k && same; i++) {
-                    same = chatKey(lastChatLines.get(lastChatLines.size() - k + i)).equals(chatKey(cur.get(i)));
-                }
-                if (same) {
+            for (int k = Math.min(lastChatLines.size(), curKeys.size()); k > 0; k--) {
+                if (lastChatLines.subList(lastChatLines.size() - k, lastChatLines.size()).equals(curKeys.subList(0, k))) {
                     overlap = k;
                     break;
                 }
             }
-            boolean firstRead = lastChatLines.isEmpty();
-            lastChatLines = cur;
+            boolean firstRead = !chatPrimed;
+            chatPrimed = true;
+            // Nothing in common although both reads had loot: the chat scrolled a lot; only count
+            // what's new at the bottom rather than everything (no double counts).
+            lastChatLines = curKeys;
             if (firstRead) return;                           // what's already there isn't ours to count
-            for (int i = overlap; i < cur.size(); i++) countLootLine(cur.get(i));
+            for (int i = overlap; i < cur.size(); i++) countLootEntry(cur.get(i));
         });
     }
 
-    private static String chatKey(String line) {
-        return line.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
-    }
-
-    private void countLootLine(String line) {
+    /** "gold 367" or "item <name>" for a loot line, else null. */
+    private static String lootEntry(String line) {
         java.util.regex.Matcher g = GOLD_LINE.matcher(line);
         if (g.find()) {
+            String n = g.group(1).replaceAll("[^0-9]", "");
+            return n.isEmpty() ? null : "gold " + n;
+        }
+        java.util.regex.Matcher m = PICKUP_LINE.matcher(line);
+        if (!m.find()) return null;
+        String item = m.group(1).trim();
+        return item.length() < 3 ? null : "item " + item;
+    }
+
+    private void countLootEntry(String entry) {
+        if (entry.startsWith("gold ")) {
             try {
-                long n = Long.parseLong(g.group(1).replaceAll("[^0-9]", ""));
+                long n = Long.parseLong(entry.substring(5));
                 if (n > 0 && n < 10_000_000) lootGold += n;
                 Log.i(TAG, "loot: +" + n + " gold");
             } catch (NumberFormatException ignored) {
             }
             return;
         }
-        java.util.regex.Matcher m = PICKUP_LINE.matcher(line);
-        if (!m.find()) return;
-        String item = m.group(1).trim();
-        if (item.length() < 3) return;
+        String item = entry.substring(5);
         lootItems.merge(item, 1, Integer::sum);
         Log.i(TAG, "loot: " + item);
     }
@@ -2629,6 +2646,12 @@ public class ClickService extends AccessibilityService {
             farmMobsSeenAt = farmProgressAt = now;          // standing still to loot isn't idling
             schedulePump(0);
             return;
+        }
+        if (handShowing && now >= lootIgnoreUntil) {
+            lastHandSeenAt = now;
+            // No skill while the hand shows, even if the pickup must wait for a cast to end: a full
+            // buff (Power Kick, Blood Lust) and an attack went out with the hand up (07:13:57).
+            busyUntil = Math.max(busyUntil, now + FARM_SCAN_MS + 500);
         }
         if (!handShowing || now < lootIgnoreUntil || questionSeen || !canFarmMove(now)) return;
         // The hand always wins, fight or not: no skill and no walking while it shows (the user's rule,
