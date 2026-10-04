@@ -207,8 +207,13 @@ public class ClickService extends AccessibilityService {
     // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
     // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
     private static final float KILL_SOON_HP = 0.4f;
-    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 2500;
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 1300;
     private long postKillUntil;
+    // Attacks going out but no target bar for this long: the game keeps aiming at a monster it
+    // can't lock (every skill "auto -> 2:348", never a lock, 20 min standing still at 15:52). The
+    // names around kept the idle walk from starting, so step away and let it pick another.
+    private static final int FARM_NO_BAR_MS = 20_000;
+    private long lastTargetBarAt;
     private final Runnable lootTapTick = this::lootTapTick;
     // Text reading (the anti-bot question) on every 2nd fight-check screenshot, from the play area.
     private static final int FARM_OCR_MS = 4000;
@@ -1862,7 +1867,15 @@ public class ClickService extends AccessibilityService {
         // auto-attacks without selecting (no bar) and can't reach: counting it as "monsters near"
         // kept the character there for minutes (12:11). No bar for a while = walk a step.
         if (target) {
-            farmMobsSeenAt = now;
+            farmMobsSeenAt = lastTargetBarAt = now;
+            return;
+        }
+        if (lastTargetBarAt == 0 || lootStartedAt > 0 || luring) lastTargetBarAt = Math.max(lastTargetBarAt, now - FARM_NO_BAR_MS / 2);
+        if (now - lastTargetBarAt >= FARM_NO_BAR_MS && now - lastAnyTapAt < 3000 && canFarmMove(now)) {
+            Log.i(TAG, "farmer: attacking for " + (now - lastTargetBarAt) / 1000 + " s with no target bar,"
+                    + " the game can't reach its pick; walking " + "ENWS".charAt(farmWalkStep));
+            lastTargetBarAt = now;
+            farmWalk(now);
             return;
         }
         if (now - farmMobsSeenAt < FARM_IDLE_MS || !canFarmMove(now)) return;
