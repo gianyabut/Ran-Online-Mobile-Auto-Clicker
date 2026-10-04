@@ -207,7 +207,7 @@ public class ClickService extends AccessibilityService {
     // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
     // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
     private static final float KILL_SOON_HP = 0.4f;
-    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 1300;
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 2500;
     private long postKillUntil;
     private final Runnable lootTapTick = this::lootTapTick;
     // Text reading (the anti-bot question) on every 2nd fight-check screenshot, from the play area.
@@ -2296,9 +2296,6 @@ public class ClickService extends AccessibilityService {
             return;
         }
         if (!handShowing || now < lootIgnoreUntil || questionSeen || !canFarmMove(now)) return;
-        // LURE: loot once the whole group is dead. Mid-fight the next skill auto-targets another
-        // monster and runs off from the item, and the hand taps then hit the ground (15:20:35).
-        if (lureMode && !luring && lureGathered > 0 && fightKills < lureGathered) return;
         lootStartedAt = now;
         busyUntil = farmHoldUntil = now + LOOT_MAX_PAUSE_MS;    // no attacks, no walking meanwhile
         long wait = Math.max(0, lastAnyTapAt + TAP_MS + LOOT_AFTER_SKILL_MS - now);
