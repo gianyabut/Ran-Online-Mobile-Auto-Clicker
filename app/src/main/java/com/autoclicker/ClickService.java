@@ -303,7 +303,8 @@ public class ClickService extends AccessibilityService {
     // Off the 1 s / 2 s screenshot rhythm of the other checks, so it doesn't keep colliding.
     private static final int QUESTION_WATCH_MS = 3170;
     private static final float QUESTION_SCAN_H = 0.66f;     // down to the answer buttons
-    private static final String[] QUESTION_WATCH_WORDS = {"verify", "simple question"};
+    // Not plain "verify": the loading screen says "Verifying~" (13:09, a false alert).
+    private static final String[] QUESTION_WATCH_WORDS = {"simple question", "verify this"};
     private final Runnable questionWatchTick = this::questionWatchTick;
     private boolean questionSeen;
     private int questionAbsentScans;
