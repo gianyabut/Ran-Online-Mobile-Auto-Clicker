@@ -1585,6 +1585,42 @@ public class ClickService extends AccessibilityService {
         }
     }
 
+    // No party at all (the user, 23:26): the Team header is gone from the top left (collapsed it
+    // still shows "Team") and no member rows read: Campus Return without the 60 s wait. Only
+    // once a party was seen since the start, and only after NO_PARTY_MS of both (several reads).
+    private static final int NO_PARTY_MS = 10_000;
+    private long lastTeamSeenAt, lastTopReadAt, partyZeroSince;
+
+    /** From the FS question read (top 66% of the screen): is the "Team" header there? */
+    private void noteTeamHeader(List<MathQuestion.Line> lines) {
+        long now = SystemClock.uptimeMillis();
+        lastTopReadAt = now;
+        for (MathQuestion.Line l : lines) {
+            if (l.box.left < screenW * 0.2f && l.box.top < screenH * 0.35f
+                    && l.text.trim().toLowerCase(java.util.Locale.ROOT).startsWith("team")) {
+                lastTeamSeenAt = now;
+                return;
+            }
+        }
+    }
+
+    private void noPartyCheck(int members, long now) {
+        if (members > 0) {
+            partyZeroSince = 0;
+            return;
+        }
+        if (partyZeroSince == 0) partyZeroSince = now;
+        if (partySize <= 0 || !running || manual || !fsMode()) return;   // never had a party this run
+        boolean headerGone = lastTopReadAt > lastTeamSeenAt && now - lastTeamSeenAt >= NO_PARTY_MS
+                && now - lastTopReadAt < 5000;
+        if (headerGone && now - partyZeroSince >= NO_PARTY_MS) {
+            int before = partySize;
+            partySize = 0;
+            Log.i(TAG, "party " + before + " -> none (no Team list)");
+            partyLeft(before, 0);
+        }
+    }
+
     private void partyLeft(int before, int members) {
         if (!running || manual || !fsMode()) return;
         Log.w(TAG, "party down from " + before + " to " + members + ": Campus Return card (slot D), then manual mode");
@@ -4903,17 +4939,24 @@ public class ClickService extends AccessibilityService {
                                 Math.min(shot.getHeight(), Math.round(screenH * QUESTION_SCAN_H)));
                     } catch (RuntimeException | OutOfMemoryError ignored) {
                     }
-                    if (top != null) Ocr.read(top, (lines, words) -> checkForQuestion(game, lines));
+                    if (top != null) Ocr.read(top, (lines, words) -> {
+                        noteTeamHeader(lines);
+                        checkForQuestion(game, lines);
+                    });
                 }
                 // Screenshots come every 0.35 s while a ring watches a cooldown; counting once
                 // per BUFF_SCAN_EVERY_MS is plenty.
                 if (eg() && scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
                     lastMobCountAt = now;
-                    updateParty(MobCounter.partySize(shot, screenW, screenH));
+                    int members = MobCounter.partySize(shot, screenW, screenH);
+                    updateParty(members);
+                    noPartyCheck(members, now);
                     updateWave(MobCounter.count(shot, screenW, screenH));
                 } else if (fsMode() && !eg() && now - lastPartyReadAt >= BUFF_SCAN_EVERY_MS - 100) {
                     lastPartyReadAt = now;
-                    updateParty(MobCounter.partySize(shot, screenW, screenH));
+                    int members = MobCounter.partySize(shot, screenW, screenH);
+                    updateParty(members);
+                    noPartyCheck(members, now);
                 }
                 if (farmer && now - lastMobCountAt >= farmScanMs() - 100) {
                     lastMobCountAt = now;
