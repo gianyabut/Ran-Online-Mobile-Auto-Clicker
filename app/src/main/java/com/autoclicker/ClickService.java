@@ -946,6 +946,23 @@ public class ClickService extends AccessibilityService {
         }
     }
 
+    /**
+     * The screen stays on while the bot runs: with nothing tapping (the 30 min rest in town, a
+     * pause) the tablet went to sleep, and a sleeping screen takes no taps or screenshots.
+     */
+    private void keepScreenOn(boolean on) {
+        if (bar == null || barParams == null || wm == null) return;
+        int flags = on ? barParams.flags | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                : barParams.flags & ~WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        if (flags == barParams.flags) return;
+        barParams.flags = flags;
+        try {
+            wm.updateViewLayout(bar, barParams);
+        } catch (RuntimeException ignored) {
+            // bar not attached
+        }
+    }
+
     private void setRunning(boolean run, String why) {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         if (run) {
@@ -967,6 +984,8 @@ public class ClickService extends AccessibilityService {
         Log.i(TAG, (run ? "start" : "stop") + " (" + why + "), " + targets.size() + " targets"
                 + (run ? ", pause after tap " + tapGapMs + "ms" : ""));
         running = run;
+        if (run && why.equals("button")) deathTimes.clear();
+        keepScreenOn(run);
         handler.removeCallbacksAndMessages(null);
         pending.clear();
         busyUntil = 0;
@@ -4042,6 +4061,11 @@ public class ClickService extends AccessibilityService {
     private String deathMap;
     private long revivedAt;
     private int backPointTries;
+    // Hunted (the user, 13:25): 3 deaths in DEATH_WINDOW_MS (10:06, 10:18, 10:20 - a player camping
+    // the spot) -> stay in town DEATH_REST_MS before the Back Point, instead of walking into it again.
+    private static final int DEATHS_TO_REST = 3;
+    private static final long DEATH_WINDOW_MS = 20 * 60_000L, DEATH_REST_MS = 30 * 60_000L;
+    private final java.util.ArrayDeque<Long> deathTimes = new java.util.ArrayDeque<>();
     private long panelQuietUntil;
     // Home spot (the user, 07:45): the game prints "TradingHole[124,114]" at the bottom left. Home is
     // where Farmer starts; drifting more than LEASH_R away, it walks back between fights. Which
@@ -4104,14 +4128,30 @@ public class ClickService extends AccessibilityService {
         deathMap = posMap;
         revivedAt = now;
         backPointTries = 0;
+        deathTimes.addLast(now);
+        while (!deathTimes.isEmpty() && now - deathTimes.peekFirst() > DEATH_WINDOW_MS) deathTimes.removeFirst();
+        boolean rest = farmer && deathTimes.size() >= DEATHS_TO_REST;
         // No more attacks until back at the farming spot.
-        deadUntil = now + BACK_POINT_AFTER_MS + BACK_POINT_LOAD_MS + 5000;
+        long backPointIn = rest ? DEATH_REST_MS : BACK_POINT_AFTER_MS;
+        deadUntil = now + backPointIn + BACK_POINT_LOAD_MS + 5000;
         busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
         handler.removeCallbacks(useBackPoint);
         handler.removeCallbacks(backAtSpot);
+        if (rest) {
+            long minutes = (now - deathTimes.peekFirst()) / 60_000;
+            Log.w(TAG, "died: " + deathTimes.size() + " deaths in " + minutes + " min - staying in town "
+                    + DEATH_REST_MS / 60_000 + " min before going back");
+            deathTimes.clear();
+            if (farmer) handler.postDelayed(useBackPoint, DEATH_REST_MS);
+            Telegram.send(this, "\uD83D\uDC80 Ran Online: died " + DEATHS_TO_REST + " times in " + minutes
+                    + " min (someone camping the spot?) - revived, staying safe in town for " + DEATH_REST_MS / 60_000
+                    + " min, then the Back Point and farming again.");
+            return;
+        }
         if (farmer) handler.postDelayed(useBackPoint, BACK_POINT_AFTER_MS);
         Telegram.send(this, "\uD83D\uDC80 Ran Online: your character died - tapped Revive"
-                + (farmer ? ", using the Back Point card (slot S) next." : "."));
+                + (farmer ? ", using the Back Point card (slot S) next (death " + deathTimes.size() + " of "
+                + DEATHS_TO_REST + " before a " + DEATH_REST_MS / 60_000 + " min rest)." : "."));
     }
 
     /** Revived in town: the Back Point card (slot S) takes the character back to where it died. */
@@ -4142,7 +4182,8 @@ public class ClickService extends AccessibilityService {
         busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
         readMapName(map -> {
             long t = SystemClock.uptimeMillis();
-            boolean inTown = map != null && (deathMap == null || !sameMap(map, deathMap));
+            boolean inTown = map != null && (deathMap == null || !sameMap(map, deathMap))
+                    || t - revivedAt >= DEATH_REST_MS;
             if (!inTown && t - revivedAt < BACK_POINT_MAX_WAIT_MS) {
                 Log.d(TAG, "died: map " + map + ", not in town yet - waiting");
                 deadUntil = Math.max(deadUntil, t + BACK_POINT_LOAD_MS);
