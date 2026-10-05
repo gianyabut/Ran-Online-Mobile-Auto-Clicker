@@ -3619,6 +3619,14 @@ public class ClickService extends AccessibilityService {
     // The pet stays behind after a death: the paw (top right) asks "Summon your pet?" Yes/No.
     private static final float PAW_X = 1828 / 2560f, PAW_Y = 42 / 1600f;
     private static final float PET_YES_X = 1357 / 2560f, PET_YES_Y = 947 / 1600f;   // measured 07:43
+    private static final float PET_NO_X = 1756 / 2560f, PET_NO_Y = 950 / 1600f;     // "Recall your pet?" No, 10:07
+    // Back Point by the map name (10:06: tapped 7 s after Revive while the town was still loading,
+    // so it stayed in town): wait until the map is no longer the one it died on, then tap; check
+    // it's back on that map after loading, else try once more.
+    private static final int BACK_POINT_WAIT_MS = 2000, BACK_POINT_MAX_WAIT_MS = 30_000, BACK_POINT_TRIES = 2;
+    private String deathMap;
+    private long revivedAt;
+    private int backPointTries;
     private long panelQuietUntil;
     // Home spot (the user, 07:45): the game prints "TradingHole[124,114]" at the bottom left. Home is
     // where Farmer starts; drifting more than LEASH_R away, it walks back between fights. Which
@@ -3678,6 +3686,9 @@ public class ClickService extends AccessibilityService {
         lastReviveAt = now;
         Log.w(TAG, "died: \"" + ask.text.trim() + "\", tapping Revive at " + Math.round(x) + "," + Math.round(y));
         tapAt(x, y, "revive");
+        deathMap = posMap;
+        revivedAt = now;
+        backPointTries = 0;
         // No more attacks until back at the farming spot.
         deadUntil = now + BACK_POINT_AFTER_MS + BACK_POINT_LOAD_MS + 5000;
         busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
@@ -3689,17 +3700,74 @@ public class ClickService extends AccessibilityService {
     }
 
     /** Revived in town: the Back Point card (slot S) takes the character back to where it died. */
+    /** Reads the map name from the coordinates line ("TradingHole[124,117]"), or null. */
+    private void readMapName(Consumer<String> onMap) {
+        captureRegionForOcr(COORD_L, COORD_T, COORD_W, COORD_H, crop -> {
+            if (crop == null) {
+                onMap.accept(null);
+                return;
+            }
+            Ocr.read(crop, (lines, words) -> {
+                for (MathQuestion.Line l : lines) {
+                    java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
+                    if (m.find()) {
+                        onMap.accept(m.group(1));
+                        return;
+                    }
+                }
+                onMap.accept(null);
+            });
+        });
+    }
+
     private void useBackPoint() {
         if (!running || !farmer || manual) return;
         long now = SystemClock.uptimeMillis();
-        Log.i(TAG, "died: using the Back Point card (slot S) to return to the farming spot");
-        tapAt(screenW * BACK_POINT_X, screenH * BACK_POINT_Y, "back point");
-        deadUntil = now + BACK_POINT_LOAD_MS;
+        deadUntil = Math.max(deadUntil, now + BACK_POINT_LOAD_MS);
         busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
-        handler.postDelayed(backAtSpot, BACK_POINT_LOAD_MS);
+        readMapName(map -> {
+            long t = SystemClock.uptimeMillis();
+            boolean inTown = map != null && (deathMap == null || !sameMap(map, deathMap));
+            if (!inTown && t - revivedAt < BACK_POINT_MAX_WAIT_MS) {
+                Log.d(TAG, "died: map " + map + ", not in town yet - waiting");
+                deadUntil = Math.max(deadUntil, t + BACK_POINT_LOAD_MS);
+                busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+                handler.postDelayed(useBackPoint, BACK_POINT_WAIT_MS);
+                return;
+            }
+            backPointTries++;
+            Log.i(TAG, "died: in " + map + ", using the Back Point card (slot S) to return to " + deathMap
+                    + " (try " + backPointTries + ")");
+            tapAt(screenW * BACK_POINT_X, screenH * BACK_POINT_Y, "back point");
+            deadUntil = t + BACK_POINT_LOAD_MS;
+            busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+            handler.postDelayed(backAtSpot, BACK_POINT_LOAD_MS);
+        });
     }
 
     private void backAtSpot() {
+        if (!running || !farmer) return;
+        readMapName(map -> {
+            boolean back = deathMap == null || (map != null && sameMap(map, deathMap));
+            if (back || map == null) {
+                arrivedAtSpot();
+                return;
+            }
+            long t = SystemClock.uptimeMillis();
+            if (backPointTries < BACK_POINT_TRIES) {
+                Log.w(TAG, "died: still in " + map + " after the Back Point, trying it again");
+                handler.post(useBackPoint);
+                return;
+            }
+            // Out of tries: don't farm in town. Hold everything and say so.
+            deadUntil = busyUntil = farmHoldUntil = t + 10 * 60_000;
+            Log.w(TAG, "died: still in " + map + " after " + backPointTries + " Back Point taps, holding");
+            Telegram.send(this, "\u26A0 Ran Online: revived but still in " + map + " after " + backPointTries
+                    + " Back Point taps (no card left?). Farming is on hold.");
+        });
+    }
+
+    private void arrivedAtSpot() {
         if (!running || !farmer) return;
         long now = SystemClock.uptimeMillis();
         deadUntil = 0;
@@ -3707,7 +3775,7 @@ public class ClickService extends AccessibilityService {
         farmMobsSeenAt = farmProgressAt = lastTargetBarAt = now;
         Log.i(TAG, "died: back from the Back Point, summoning the pet, then farming again");
         summonPet();
-        Telegram.send(this, "\u2705 Ran Online: Back Point used, pet summoned, farming again. Check how many Back Point cards are left.");
+        Telegram.send(this, "\u2705 Ran Online: Back Point used, back in " + posMap + ", farming again. Check how many Back Point cards are left.");
         handler.post(this::farmFullBuff);
         schedulePump(0);
     }
@@ -3721,12 +3789,23 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(() -> captureRegionForOcr(0f, 0f, 1f, 0.75f, shot -> {
             if (shot == null) return;
             Ocr.read(shot, (lines, words) -> {
-                boolean asked = false;
-                Rect yes = null;
+                boolean asked = false, recall = false;
+                Rect yes = null, no = null;
                 for (MathQuestion.Line l : lines) {
                     String t = l.text.toLowerCase(java.util.Locale.ROOT);
                     if (t.contains("summon") && t.contains("pet")) asked = true;
-                    if (t.replaceAll("[^a-z]", "").equals("yes")) yes = l.box;
+                    if (t.contains("recall") && t.contains("pet")) recall = true;
+                    String k = t.replaceAll("[^a-z]", "");
+                    if (k.equals("yes")) yes = l.box;
+                    if (k.equals("no")) no = l.box;
+                }
+                if (recall) {
+                    // The pet is out already (Back Point brings it): never send it away.
+                    float x = no != null ? no.exactCenterX() : screenW * PET_NO_X;
+                    float y = no != null ? no.exactCenterY() : screenH * PET_NO_Y;
+                    Log.i(TAG, "pet: \"Recall your pet?\" - it's out already, No at " + Math.round(x) + "," + Math.round(y));
+                    tapAt(x, y, "pet no");
+                    return;
                 }
                 if (!asked) {
                     Log.i(TAG, "pet: no \"Summon your pet?\" after the paw (already out?)");
