@@ -985,6 +985,7 @@ public class ClickService extends AccessibilityService {
                 + (run ? ", pause after tap " + tapGapMs + "ms" : ""));
         running = run;
         if (run && why.equals("button")) deathTimes.clear();
+        if (run) partySize = -1;                                // a party that shrank while stopped is no drop
         keepScreenOn(run);
         handler.removeCallbacksAndMessages(null);
         pending.clear();
@@ -1463,6 +1464,7 @@ public class ClickService extends AccessibilityService {
         int oldEnd = waveEndMobs();
         int before = partySize;
         partySize = members;
+        if (!first) Log.i(TAG, "party " + before + " -> " + members);
         if (before > CAMPUS_PARTY && members <= CAMPUS_PARTY) partyLeft(before, members);
         // Only say so when the numbers it goes by change.
         if (first || waveStartMobs() != oldStart || waveEndMobs() != oldEnd) {
@@ -1581,15 +1583,14 @@ public class ClickService extends AccessibilityService {
 
     private void partyLeft(int before, int members) {
         if (!running || manual || !fsMode()) return;
-        Log.w(TAG, "party down from " + before + " to " + members + ": Campus Return card (slot D), then stopping");
+        Log.w(TAG, "party down from " + before + " to " + members + ": Campus Return card (slot D), then manual mode");
         // Stop only after the tap: stopping clears the handler, which would drop a pending bar flip.
         onCardPage(() -> {
             tapAt(screenW * CAMPUS_CARD_X, screenH * CAMPUS_CARD_Y, "campus return");
             Telegram.send(this, "\uD83C\uDFEB Ran Online: the party went from " + before + " to " + members
-                    + " - used the Campus Return card (D) and stopped FS.");
-            handler.postDelayed(() -> {
-                if (running) setRunning(false, "party left");
-            }, 1500);
+                    + " - used the Campus Return card (D), bot in manual mode.");
+            // Manual mode afterwards (the user, 23:22).
+            handler.postDelayed(() -> setManual(true, "campus return"), 1500);
         }, "Campus Return");
     }
 
