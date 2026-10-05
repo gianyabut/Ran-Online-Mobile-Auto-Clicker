@@ -2737,7 +2737,10 @@ public class ClickService extends AccessibilityService {
         final String map = posMap;
         tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
         handler.postDelayed(() -> captureHalfScreen(shot -> {
-            if (shot == null) return;
+            if (shot == null) {
+                Log.w(TAG, "farmer: couldn't take the map screenshot (walking home)");
+                return;
+            }
             boolean open = mapIsOpen(shot, 1f);
             int[] a = open ? mapCluster(shot, true) : null;
             shot.recycle();
@@ -4252,7 +4255,7 @@ public class ClickService extends AccessibilityService {
             // "[" is sometimes read as l, I, | or ( ("TradingHolel123,119]", 19:02): the name stops
             // as early as it can so the slipped bracket isn't taken as part of it.
             // A stray space inside a number too ("[1 31,118]", 19:04).
-            java.util.regex.Pattern.compile("([A-Za-z_]{3,}?)\\s*[\\[(|lI]\\s*(\\d(?: ?\\d){0,3})\\s*[,.]\\s*(\\d(?: ?\\d){0,3})");
+            java.util.regex.Pattern.compile("([\\p{L}_]{3,}?)\\s*[\\[(|lI]\\s*(\\d(?: ?\\d){0,3})\\s*[,.]\\s*(\\d(?: ?\\d){0,3})");
     private String homeMap, posMap;
     // ⚓ on the bar (Farmer): set home to where the character stands now; kept across restarts.
     private static final String KEY_HOME = "farm_home";
