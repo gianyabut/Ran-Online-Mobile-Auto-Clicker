@@ -3469,7 +3469,22 @@ public class ClickService extends AccessibilityService {
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         // One region from the top-left corner (OCR boxes are screen pixels): Team list + play area.
         captureRegionForOcr(0f, 0f, 0.92f, 0.74f, shot -> {
-            if (shot != null) Ocr.read(shot, (lines, words) -> {
+            if (shot == null) return;
+            // A big map left open hides the Team list (and nothing else would close it, 13:00).
+            if (mapIsOpen(shot)) {
+                shot.recycle();
+                // X doesn't close it while a portal's "Move to the area" is up (13:04, 10 tries):
+                // two tries, then leave it and say so once.
+                if (++mapCloseTries <= 2) {
+                    Log.i(TAG, "follow: the big map is open, closing it");
+                    closeMap();
+                } else if (mapCloseTries == 3) {
+                    Log.w(TAG, "follow: the big map won't close (a portal popup in front?), waiting");
+                }
+                return;
+            }
+            mapCloseTries = 0;
+            Ocr.read(shot, (lines, words) -> {
                 checkForQuestion(game, lines);              // the math check, from the same read
                 if (running && follow && !questionSeen) followStep(lines);
             });
@@ -3496,15 +3511,25 @@ public class ClickService extends AccessibilityService {
             if (!looksLikePlayerName(stripRowMark(l.text))) continue;
             if (first == null || l.box.top < first.box.top) first = l;
         }
+        Rect moveBtn = null;
+        boolean portalAsks = false;
+        for (MathQuestion.Line l : lines) {
+            String tl = l.text.toLowerCase(java.util.Locale.ROOT);
+            if (tl.contains("move to the area")) portalAsks = true;
+            else if (tl.replaceAll("[^a-z]", "").equals("move")) moveBtn = l.box;
+        }
+        if (portalAsks && !portalChase) {
+            // Standing on a portal we don't want (e.g. the one we just came out of): its popup blocks
+            // taps on the map, so step off it (the user, 13:01). Another direction each time.
+            float[][] dirs = {{0, 1}, {1, 0}, {-1, 0}, {0, -1}};
+            float[] d = dirs[portalStepDir++ % dirs.length];
+            float push = screenW * FARM_PUSH;
+            Log.i(TAG, "follow: on a portal's 'Move to the area' - stepping off it");
+            followWalk(d[0] * push, d[1] * push, 800, now);
+            return;
+        }
         if (portalChase) {
-            Rect moveBtn = null;
-            boolean asked = false;
-            for (MathQuestion.Line l : lines) {
-                String tl = l.text.toLowerCase(java.util.Locale.ROOT);
-                if (tl.contains("move to the area")) asked = true;
-                else if (tl.replaceAll("[^a-z]", "").equals("move")) moveBtn = l.box;
-            }
-            if (asked && moveBtn != null) {
+            if (portalAsks && moveBtn != null) {
                 Log.i(TAG, "follow: at the portal the master took - Move");
                 tapAt(moveBtn.exactCenterX(), moveBtn.exactCenterY(), "portal move");
                 portalChase = false;
@@ -3616,6 +3641,7 @@ public class ClickService extends AccessibilityService {
     private int[] lastMapM, lastMapArrow;
     private String lastMapMMap;
     private boolean portalChase;
+    private int portalStepDir, mapCloseTries;
     private long lastMapMAt;
     private int portalPushes;
 
@@ -3810,7 +3836,9 @@ public class ClickService extends AccessibilityService {
     private boolean mapIsOpen(Bitmap shot) {
         int w = shot.getWidth(), h = shot.getHeight();
         int[] row = new int[w];
-        for (int y = Math.round(h * 0.08f); y < Math.round(h * 0.13f); y++) {
+        // Rows as a share of the screen: follow captures only the top 74%, which put 13% of the
+        // capture just above the bar and the open map went unnoticed (13:02).
+        for (int y = Math.round(screenH * 0.08f); y < Math.min(h, Math.round(screenH * 0.13f)); y++) {
             shot.getPixels(row, 0, w, 0, y, w, 1);
             int n = 0, tot = 0;
             for (int x = Math.round(w * 0.05f); x < Math.round(w * 0.95f); x += 4) {
