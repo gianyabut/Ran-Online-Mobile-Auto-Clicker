@@ -12,6 +12,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        // The tablet (Xiaomi Pad 5) is arm64: the OCR library for the other three ABIs made the
+        // APK 46 MB and every install ~30 s.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 }
 

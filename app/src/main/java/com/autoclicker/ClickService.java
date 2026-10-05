@@ -1009,6 +1009,8 @@ public class ClickService extends AccessibilityService {
         deadUntil = 0;
         returning = false;
         returnGiveUpUntil = 0;
+        lootIgnoreUntil = 0;                                    // a start always loots again
+        lootFailStreak = 0;
         if (run) {
             loadHome();                                         // the ⚓ spot; none set = roam (the user, 08:03)
             calStage = 0;
@@ -2097,6 +2099,11 @@ public class ClickService extends AccessibilityService {
                 joystickHold(dx / d * push, dy / d * push, ms);
             }
         }
+        if (!luring && returnHome(targetHp, now)) {
+            farmTargetHp = targetHp;
+            farmProgressAt = now;
+            return;
+        }
         // The game locked the next monster by itself during the pause: the character is off to it
         // already, so waiting for the drop gains nothing.
         if (target && farmTargetHp < 0 && now < postKillUntil && lootStartedAt == 0) {
@@ -2124,7 +2131,6 @@ public class ClickService extends AccessibilityService {
             farmMobsSeenAt = lastTargetBarAt = now;
             return;
         }
-        if (!luring && returnHome(targetHp, now)) return;
         if (lastTargetBarAt == 0 || lootStartedAt > 0 || luring) lastTargetBarAt = Math.max(lastTargetBarAt, now - FARM_NO_BAR_MS / 2);
         if (now - lastTargetBarAt >= FARM_NO_BAR_MS && now - lastAnyTapAt < 3000 && canFarmMove(now)) {
             Log.i(TAG, "farmer: attacking for " + (now - lastTargetBarAt) / 1000 + " s with no target bar,"
@@ -2621,10 +2627,20 @@ public class ClickService extends AccessibilityService {
             return false;
         }
         boolean fresh = posMap != null && sameMap(posMap, homeMap) && now - posAt <= 6000;
+        if (returning && now - returnStartedAt > RETURN_MAX_MS) {
+            returning = false;
+            returnGiveUpUntil = now + 60_000;
+            Log.w(TAG, "farmer: couldn't get home in " + RETURN_MAX_MS / 1000 + " s (at " + posMap + "[" + posX + "," + posY
+                    + "]), farming here a minute");
+            Telegram.send(this, "\u26A0 Ran Online: couldn't walk back to the home spot " + homeMap + "[" + homeX + "," + homeY
+                    + "], at [" + posX + "," + posY + "]. Farming there; trying again in a minute.");
+            schedulePump(0);
+            return false;
+        }
         if (!fresh) {
-            if (returning && ((posMap != null && !sameMap(posMap, homeMap)) || now - returnStartedAt > RETURN_MAX_MS)) {
+            if (returning && posMap != null && !sameMap(posMap, homeMap)) {
                 returning = false;
-                Log.i(TAG, "farmer: lost the home spot's map, attacking again");
+                Log.i(TAG, "farmer: not on the home spot's map, attacking again");
                 schedulePump(0);
             }
             return returning;
@@ -2651,15 +2667,6 @@ public class ClickService extends AccessibilityService {
             schedulePump(0);
             return false;
         }
-        if (now - returnStartedAt > RETURN_MAX_MS) {
-            returning = false;
-            returnGiveUpUntil = now + 60_000;
-            Log.w(TAG, "farmer: couldn't get home in " + RETURN_MAX_MS / 1000 + " s (still " + Math.round(dist) + " away), farming here a minute");
-            Telegram.send(this, "\u26A0 Ran Online: couldn't walk back to the home spot " + homeMap + "[" + homeX + "," + homeY
-                    + "], stuck at [" + posX + "," + posY + "]. Farming there; trying again in a minute.");
-            schedulePump(0);
-            return false;
-        }
         if (canFarmMove(now) && posAt > leashWalkEnd) leashStep(now, false);
         return true;
     }
@@ -2681,28 +2688,30 @@ public class ClickService extends AccessibilityService {
                 calP0y = posY;
                 calStage = 1;
                 calWalkEnd = now + FARM_PUSH_MS + LEASH_PROBE_MS + 300;
-                leashWalk(push, 0, LEASH_PROBE_MS, now);
-                Log.i(TAG, "farmer: " + Math.round(dist) + " from home, learning the directions (east)");
+                leashWalk(calSign * push, 0, LEASH_PROBE_MS, now);
+                Log.i(TAG, "farmer: " + Math.round(dist) + " from home, learning the directions (" + (calSign > 0 ? "east" : "west") + ")");
                 return true;
             }
             if (posAt < calWalkEnd) return true;                  // wait for a reading after the walk
             if (calStage == 1) {
-                calEx = posX - calP0x;
-                calEy = posY - calP0y;
+                calEx = calSign * (posX - calP0x);                  // per push east
+                calEy = calSign * (posY - calP0y);
                 calP0x = posX;
                 calP0y = posY;
                 calStage = 2;
                 calWalkEnd = now + FARM_PUSH_MS + LEASH_PROBE_MS + 300;
-                leashWalk(0, -push, LEASH_PROBE_MS, now);
-                Log.i(TAG, "farmer: learning the directions (north)");
+                leashWalk(0, -calSign * push, LEASH_PROBE_MS, now);
+                Log.i(TAG, "farmer: learning the directions (" + (calSign > 0 ? "north" : "south") + ")");
                 return true;
             }
-            calNx = posX - calP0x;
-            calNy = posY - calP0y;
+            calNx = calSign * (posX - calP0x);                      // per push north
+            calNy = calSign * (posY - calP0y);
             float det = calEx * calNy - calNx * calEy;
             calStage = 0;
-            if (Math.abs(det) < 0.5f || Math.hypot(calEx, calEy) < 1.5 || Math.hypot(calNx, calNy) < 1.5) {
-                Log.i(TAG, "farmer: couldn't learn the directions (blocked?), trying again later");
+            if (Math.abs(det) < 0.5f || Math.hypot(calEx, calEy) < 1 || Math.hypot(calNx, calNy) < 1) {
+                calSign = -calSign;
+                Log.i(TAG, "farmer: couldn't learn the directions (E=(" + calEx + "," + calEy + ") N=(" + calNx + "," + calNy
+                        + "), blocked?), trying the other way");
                 return false;
             }
             calValid = true;
@@ -2753,7 +2762,7 @@ public class ClickService extends AccessibilityService {
     /** One drag across empty ground (upper middle) turns the camera. */
     private void turnCamera(String why) {
         long now = SystemClock.uptimeMillis();
-        if (!running || !farmer || now - lastCameraTurnAt < CAMERA_TURN_GAP_MS || !canFarmMove(now)) return;
+        if (!running || !farmer || returning || now - lastCameraTurnAt < CAMERA_TURN_GAP_MS || !canFarmMove(now)) return;
         lastCameraTurnAt = now;
         float x0 = screenW * CAMERA_DRAG_X, y = screenH * CAMERA_DRAG_Y;
         Path drag = new Path();
@@ -3120,8 +3129,10 @@ public class ClickService extends AccessibilityService {
             if (handShowing) {
                 lootIgnoreUntil = now + LOOT_IGNORE_MS;
                 // A few failures in a row with nothing picked up: the bag is full (12:55, the user).
-                // Stop pausing the fight for loot for a while, and say so.
-                if (++lootFailStreak >= LOOT_FAILS_TO_PAUSE) {
+                // Stop pausing the fight for loot for a while, and say so. Only full-length tries
+                // count: three quick 5 s give-ups while the leash pulled it about paused looting for
+                // 5 min (08:49), and the user saw "not looting".
+                if (now - lootStartedAt >= LOOT_MAX_PAUSE_MS && ++lootFailStreak >= LOOT_FAILS_TO_PAUSE) {
                     lootFailStreak = 0;
                     lootIgnoreUntil = now + LOOT_FULL_PAUSE_MS;
                     Log.w(TAG, "farmer: " + LOOT_FAILS_TO_PAUSE + " pickups failed in a row, inventory full?"
@@ -3139,7 +3150,7 @@ public class ClickService extends AccessibilityService {
             schedulePump(0);
             return;
         }
-        if (handShowing && now >= lootIgnoreUntil) {
+        if (handShowing && now >= lootIgnoreUntil && !returning) {
             lastHandSeenAt = now;
             // No skill while the hand shows, even if the pickup must wait for a cast to end: a full
             // buff (Power Kick, Blood Lust) and an attack went out with the hand up (07:13:57).
@@ -3600,7 +3611,7 @@ public class ClickService extends AccessibilityService {
     // joystick push moves which way in map coordinates is learned by two probe walks (E, N), and
     // learned again after a camera turn or when walking home stops getting closer.
     private static final float COORD_L = 0f, COORD_T = 0.95f, COORD_W = 0.35f, COORD_H = 0.05f;
-    private static final int COORD_EVERY_MS = 6000, LEASH_R = 6, LEASH_PROBE_MS = 1200;
+    private static final int COORD_EVERY_MS = 6000, LEASH_R = 6, LEASH_PROBE_MS = 2500;
     private static final java.util.regex.Pattern COORD_TEXT =
             java.util.regex.Pattern.compile("([A-Za-z_]{3,})\\s*\\[\\s*(\\d{1,4})\\s*[,.]\\s*(\\d{1,4})\\s*\\]");
     private String homeMap, posMap;
@@ -3618,6 +3629,7 @@ public class ClickService extends AccessibilityService {
     // run to the next monster, farther out, and spoiled the direction probes.
     private static final int LEASH_BACK_R = 3, RETURN_MAX_MS = 90_000, RETURN_COORD_MS = 1500;
     private boolean returning;
+    private int calSign = 1;                                   // probe E/N, or W/S after a blocked try
     private long returnStartedAt, returnGiveUpUntil, leashWalkEnd;
     private long calWalkEnd;
     private boolean lastOcrHadDialog;
