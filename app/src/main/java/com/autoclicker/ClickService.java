@@ -3489,7 +3489,7 @@ public class ClickService extends AccessibilityService {
         StringBuilder seen = new StringBuilder();
         for (MathQuestion.Line l : lines) {
             if (!inTeamList(l.box) || l.text.toLowerCase(java.util.Locale.ROOT).contains("team")) continue;
-            if (header == null && leaderKey != null) continue;
+            if (header == null) continue;                     // Team list hidden (big map open)
             if (header != null && (l.box.top < header.top + header.height() / 2 || l.box.top > header.bottom + screenH * 0.12f
                     || l.box.left > header.left + screenW * 0.08f)) continue;
             seen.append(" | ").append(l.text.trim());
@@ -3592,6 +3592,13 @@ public class ClickService extends AccessibilityService {
     private static final float MINIMAP_X = 2300 / 2560f, MINIMAP_Y = 270 / 1600f;
     private static final int MAP_OPEN_MS = 1200, MAP_FOLLOW_GAP_MS = 5000, MAP_WALK_MS = 4000;
     private long lastMapFollowAt;
+    // Through portals (the user, 12:53: "the bot has to follow it after the portal"): the M leaves
+    // the map where the master stepped through, so walk to where it was last seen, then a little
+    // past it the same way to step in. The new map shows the M again.
+    private static final int LAST_M_KEEP_MS = 120_000, PORTAL_PUSHES = 3;
+    private int[] lastMapM, lastMapArrow;
+    private long lastMapMAt;
+    private int portalPushes;
 
     private void mapFollow(long now) {
         lastMapFollowAt = now;
@@ -3600,7 +3607,7 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(() -> captureRegionForOcr(0f, 0f, 1f, 1f, shot -> {
             if (shot == null) return;
             boolean open = mapIsOpen(shot);
-            int[] arrow = open ? mapCluster(shot, true) : null, m = open ? mapCluster(shot, false) : null;
+            int[] arrow = open ? mapCluster(shot, true) : null, m = open ? findMapM(shot) : null;
             shot.recycle();
             long t = SystemClock.uptimeMillis();
             if (!open) {
@@ -3609,11 +3616,39 @@ public class ClickService extends AccessibilityService {
                 Log.i(TAG, "follow: the map didn't open");
                 return;
             }
+            if (m == null && arrow != null && lastMapM != null && t - lastMapMAt < LAST_M_KEEP_MS) {
+                float away = (float) Math.hypot(lastMapM[0] - arrow[0], lastMapM[1] - arrow[1]);
+                if (away > screenW * 0.025f) {
+                    Log.i(TAG, "follow: no M on this map - walking to where it was last seen " + lastMapM[0] + "," + lastMapM[1]
+                            + " (a portal?)");
+                    tapAt(lastMapM[0], lastMapM[1], "map last M");
+                } else if (portalPushes < PORTAL_PUSHES) {
+                    // There already: a bit further the way we came, to step into the portal.
+                    float dx = lastMapM[0] - lastMapArrow[0], dy = lastMapM[1] - lastMapArrow[1];
+                    float len = Math.max(1f, (float) Math.hypot(dx, dy));
+                    float step = screenW * 0.02f * ++portalPushes;
+                    float tx = lastMapM[0] + dx / len * step, ty = lastMapM[1] + dy / len * step;
+                    Log.i(TAG, "follow: at the spot the M left from, stepping on toward " + Math.round(tx) + "," + Math.round(ty)
+                            + " (" + portalPushes + "/" + PORTAL_PUSHES + ")");
+                    tapAt(tx, ty, "map past last M");
+                } else {
+                    Log.i(TAG, "follow: no M on this map and the portal steps didn't take me through");
+                    lastMapM = null;
+                }
+                followHoldUntil = t + MAP_WALK_MS;
+                handler.postDelayed(this::closeMap, 600);
+                return;
+            }
             if (arrow == null || m == null) {
                 Log.i(TAG, "follow: map open, " + (m == null ? "no M icon on it (party master on another map?)" : "can't find our arrow"));
                 closeMap();
                 return;
             }
+            // Seen on this map: remember where, and from where we were looking (the way in).
+            if (lastMapM == null || Math.hypot(m[0] - lastMapM[0], m[1] - lastMapM[1]) > 4) lastMapArrow = arrow;
+            lastMapM = m;
+            lastMapMAt = t;
+            portalPushes = 0;
             float d = (float) Math.hypot(m[0] - arrow[0], m[1] - arrow[1]);
             if (d < screenW * 0.03f) {
                 Log.i(TAG, "follow: map: the M is right by us");
@@ -3626,6 +3661,99 @@ public class ClickService extends AccessibilityService {
             followHoldUntil = t + MAP_WALK_MS;
             handler.postDelayed(this::closeMap, 600);
         }), MAP_OPEN_MS);
+    }
+
+    // The party master's icon on the big map: an orange-edged grey square with a yellow M, 50 px
+    // (assets/map_m_icon.png, 25 px at half size). By colour alone the dirt strips, sand and brick
+    // paths were taken for it (12:49), so it's matched as a picture: mean RGB difference at half
+    // size, 10 on the real icon vs 38+ anywhere else. Only windows holding about as much orange
+    // and yellow as the icon get compared (~130 of 60,000).
+    private static final int M_TPL = 25, M_MATCH_MAX = 22;
+    private int[] mTemplate;
+
+    private int[] findMapM(Bitmap shot) {
+        if (mTemplate == null) {
+            try (java.io.InputStream in = getAssets().open("map_m_icon.png")) {
+                Bitmap t = android.graphics.BitmapFactory.decodeStream(in);
+                mTemplate = new int[M_TPL * M_TPL];
+                t.getPixels(mTemplate, 0, M_TPL, 0, 0, M_TPL, M_TPL);
+                t.recycle();
+            } catch (java.io.IOException | RuntimeException e) {
+                Log.w(TAG, "follow: no M icon picture: " + e);
+                return null;
+            }
+        }
+        Bitmap half;
+        try {
+            half = Bitmap.createScaledBitmap(shot, shot.getWidth() / 2, shot.getHeight() / 2, true);
+        } catch (RuntimeException | OutOfMemoryError e) {
+            return null;
+        }
+        int w = half.getWidth(), h = half.getHeight();
+        int[] px = new int[w * h];
+        half.getPixels(px, 0, w, 0, 0, w, h);
+        if (half != shot) half.recycle();
+        // Integral images of "orange" and "yellow" pixels.
+        int[] io = new int[(w + 1) * (h + 1)], iy = new int[(w + 1) * (h + 1)];
+        for (int y = 0; y < h; y++) {
+            int ro = 0, ry = 0;
+            for (int x = 0; x < w; x++) {
+                int c = px[y * w + x], r = (c >> 16) & 0xff, g = (c >> 8) & 0xff, b = c & 0xff;
+                if (r > 200 && g > 100 && g < 200 && b < 110 && r - b > 100) ro++;
+                if (r > 200 && g > 170 && b < 120 && r - b > 90) ry++;
+                io[(y + 1) * (w + 1) + x + 1] = io[y * (w + 1) + x + 1] + ro;
+                iy[(y + 1) * (w + 1) + x + 1] = iy[y * (w + 1) + x + 1] + ry;
+            }
+        }
+        int y0 = Math.round(h * 0.09f), y1 = Math.round(h * 0.86f) - M_TPL, x0 = Math.round(w * 0.07f), x1 = Math.round(w * 0.97f) - M_TPL;
+        double best = Double.MAX_VALUE;
+        int bx = -1, by = -1;
+        for (int y = y0; y <= y1; y += 2) {
+            for (int x = x0; x <= x1; x += 2) {
+                int o = box(io, w, x, y), yl = box(iy, w, x, y);
+                if (o < 60 || o > 220 || yl < 25 || yl > 200) continue;
+                double sc = mDiff(px, w, x, y, best);
+                if (sc < best) {
+                    best = sc;
+                    bx = x;
+                    by = y;
+                }
+            }
+        }
+        if (bx < 0) return null;
+        // Refine around the best at 1 px.
+        for (int y = Math.max(0, by - 2); y <= Math.min(h - M_TPL, by + 2); y++) {
+            for (int x = Math.max(0, bx - 2); x <= Math.min(w - M_TPL, bx + 2); x++) {
+                double sc = mDiff(px, w, x, y, best);
+                if (sc < best) {
+                    best = sc;
+                    bx = x;
+                    by = y;
+                }
+            }
+        }
+        Log.d(TAG, "follow: map M match " + Math.round(best) + " at " + (bx + M_TPL / 2) * 2 + "," + (by + M_TPL / 2) * 2);
+        return best <= M_MATCH_MAX ? new int[]{(bx + M_TPL / 2) * 2, (by + M_TPL / 2) * 2} : null;
+    }
+
+    private static int box(int[] ii, int w, int x, int y) {
+        int s = w + 1;
+        return ii[(y + M_TPL) * s + x + M_TPL] - ii[y * s + x + M_TPL] - ii[(y + M_TPL) * s + x] + ii[y * s + x];
+    }
+
+    /** Mean absolute RGB difference to the template (gives up once past the best so far). */
+    private double mDiff(int[] px, int w, int x, int y, double bestSoFar) {
+        long sum = 0, cap = (long) (bestSoFar * M_TPL * M_TPL * 3);
+        for (int ty = 0; ty < M_TPL; ty++) {
+            int row = (y + ty) * w + x;
+            for (int tx = 0; tx < M_TPL; tx++) {
+                int a = px[row + tx], t = mTemplate[ty * M_TPL + tx];
+                sum += Math.abs(((a >> 16) & 0xff) - ((t >> 16) & 0xff)) + Math.abs(((a >> 8) & 0xff) - ((t >> 8) & 0xff))
+                        + Math.abs((a & 0xff) - (t & 0xff));
+            }
+            if (sum > cap) return Double.MAX_VALUE;
+        }
+        return sum / (double) (M_TPL * M_TPL * 3);
     }
 
     /** The big map has a light grey title bar right across the top (100% of a row vs <=51% otherwise). */
