@@ -1477,10 +1477,112 @@ public class ClickService extends AccessibilityService {
     private static final float CAMPUS_CARD_X = 2470 / 2560f, CAMPUS_CARD_Y = 756 / 1600f;
     private long lastPartyReadAt;
 
+    /*
+     * The quick bar has two pages: A/S/D (cards) and Q/W/E (pots), and the user flips it now and
+     * then (23:10). The third slot's letter tells which is showing: "D" or "E", matched as white
+     * pixels against assets/bar_label_d|e.png, shifted around (the letter sits ~10 px off on the
+     * other page). A swipe left brings A/S/D back (right goes to Q/W/E, measured 23:13).
+     */
+    private static final float BAR_LBL_L = 2390 / 2560f, BAR_LBL_T = 690 / 1600f, BAR_LBL_W = 80 / 2560f, BAR_LBL_H = 70 / 1600f;
+    private static final float BAR_SWIPE_Y = 760 / 1600f, BAR_SWIPE_HI = 2470 / 2560f, BAR_SWIPE_LO = 2130 / 2560f;
+    private boolean[][] lblD, lblE;
+
+    /** Runs then once the A/S/D page shows; flips the bar if it's on Q/W/E; never taps when unsure. */
+    private void onCardPage(Runnable then, String what) {
+        onCardPage(then, what, 4);
+    }
+
+    private void onCardPage(Runnable then, String what, int tries) {
+        captureRegionForOcr(BAR_LBL_L, BAR_LBL_T, BAR_LBL_W, BAR_LBL_H, crop -> {
+            char page = crop != null ? barPage(crop) : '?';
+            if (crop != null) crop.recycle();
+            if (page == 'D') {
+                then.run();
+                return;
+            }
+            if (tries <= 1) {
+                Log.w(TAG, "quick bar: couldn't get the A/S/D page for the " + what + " card (" + page + ")");
+                Telegram.send(this, "\u26A0 Ran Online: couldn't find the A/S/D quick bar page for the " + what
+                        + " card - please check the quick bar.");
+                return;
+            }
+            if (page == 'E') {
+                // Left first; if that didn't flip it last time, right.
+                boolean left = tries % 2 == 0;
+                Log.i(TAG, "quick bar on Q/W/E - swiping " + (left ? "left" : "right") + " for the " + what + " card");
+                swipeBar(left);
+            }
+            handler.postDelayed(() -> onCardPage(then, what, tries - 1), page == 'E' ? 900 : 1200);
+        });
+    }
+
+    private void swipeBar(boolean left) {
+        float y = screenH * BAR_SWIPE_Y, a = screenW * BAR_SWIPE_HI, b = screenW * BAR_SWIPE_LO;
+        Path path = new Path();
+        path.moveTo(left ? a : b, y);
+        path.lineTo(left ? b : a, y);
+        if (!gestureClear(300, () -> swipeBar(left))) return;
+        ownTapUntil = Math.max(ownTapUntil, SystemClock.uptimeMillis() + 300 + OWN_TAP_SLACK_MS);
+        dispatchGesture(new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 300)).build(), null, null);
+    }
+
+    /** 'D' (A/S/D page), 'E' (Q/W/E) or '?' (covered, unclear). */
+    private char barPage(Bitmap crop) {
+        if (lblD == null) {
+            lblD = loadMask("bar_label_d.png");
+            lblE = loadMask("bar_label_e.png");
+            if (lblD == null || lblE == null) return '?';
+        }
+        int w = crop.getWidth(), h = crop.getHeight();
+        boolean[][] m = new boolean[h][w];
+        int[] row = new int[w];
+        for (int y = 0; y < h; y++) {
+            crop.getPixels(row, 0, w, 0, y, w, 1);
+            for (int x = 0; x < w; x++) {
+                int c = row[x];
+                m[y][x] = Math.min((c >> 16) & 0xff, Math.min((c >> 8) & 0xff, c & 0xff)) > 185;
+            }
+        }
+        int dD = bestFit(m, lblD), dE = bestFit(m, lblE);
+        if (dD < 40 && dD < dE * 0.6) return 'D';
+        if (dE < 40 && dE < dD * 0.6) return 'E';
+        return '?';
+    }
+
+    private static int bestFit(boolean[][] m, boolean[][] t) {
+        int h = t.length, w = t[0].length, best = Integer.MAX_VALUE;
+        for (int y = 0; y + h <= m.length; y++) {
+            for (int x = 0; x + w <= m[0].length; x++) {
+                int d = 0;
+                for (int ty = 0; ty < h && d < best; ty++) {
+                    for (int tx = 0; tx < w; tx++) if (m[y + ty][x + tx] != t[ty][tx]) d++;
+                }
+                best = Math.min(best, d);
+            }
+        }
+        return best;
+    }
+
+    private boolean[][] loadMask(String asset) {
+        try (java.io.InputStream in = getAssets().open(asset)) {
+            Bitmap b = android.graphics.BitmapFactory.decodeStream(in);
+            boolean[][] t = new boolean[b.getHeight()][b.getWidth()];
+            for (int y = 0; y < b.getHeight(); y++) {
+                for (int x = 0; x < b.getWidth(); x++) t[y][x] = (b.getPixel(x, y) & 0xff) > 128;
+            }
+            b.recycle();
+            return t;
+        } catch (java.io.IOException | RuntimeException e) {
+            Log.w(TAG, "quick bar: no " + asset + ": " + e);
+            return null;
+        }
+    }
+
     private void partyLeft(int before, int members) {
         if (!running || manual || !fsMode()) return;
         Log.w(TAG, "party down from " + before + " to " + members + ": Campus Return card (slot D), then stopping");
-        tapAt(screenW * CAMPUS_CARD_X, screenH * CAMPUS_CARD_Y, "campus return");
+        onCardPage(() -> tapAt(screenW * CAMPUS_CARD_X, screenH * CAMPUS_CARD_Y, "campus return"), "Campus Return");
         Telegram.send(this, "\uD83C\uDFEB Ran Online: the party went from " + before + " to " + members
                 + " - used the Campus Return card (D) and stopped FS.");
         handler.postDelayed(() -> {
@@ -4455,7 +4557,7 @@ public class ClickService extends AccessibilityService {
             backPointTries++;
             Log.i(TAG, "died: in " + map + ", using the Back Point card (slot S) to return to " + deathMap
                     + " (try " + backPointTries + ")");
-            tapAt(screenW * BACK_POINT_X, screenH * BACK_POINT_Y, "back point");
+            onCardPage(() -> tapAt(screenW * BACK_POINT_X, screenH * BACK_POINT_Y, "back point"), "Back Point");
             deadUntil = t + BACK_POINT_LOAD_MS;
             busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
             handler.postDelayed(backAtSpot, BACK_POINT_LOAD_MS);
