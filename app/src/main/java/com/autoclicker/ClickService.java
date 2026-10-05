@@ -4090,7 +4090,9 @@ public class ClickService extends AccessibilityService {
     private static final float COORD_L = 0f, COORD_T = 0.95f, COORD_W = 0.35f, COORD_H = 0.05f;
     private static final int COORD_EVERY_MS = 6000, LEASH_R = 6, LEASH_PROBE_MS = 2500;
     private static final java.util.regex.Pattern COORD_TEXT =
-            java.util.regex.Pattern.compile("([A-Za-z_]{3,})\\s*\\[\\s*(\\d{1,4})\\s*[,.]\\s*(\\d{1,4})\\s*\\]");
+            // "[" is sometimes read as l, I, | or ( ("TradingHolel123,119]", 19:02): the name stops
+            // as early as it can so the slipped bracket isn't taken as part of it.
+            java.util.regex.Pattern.compile("([A-Za-z_]{3,}?)\\s*[\\[(|lI]\\s*(\\d{1,4})\\s*[,.]\\s*(\\d{1,4})");
     private String homeMap, posMap;
     // ⚓ on the bar (Farmer): set home to where the character stands now; kept across restarts.
     private static final String KEY_HOME = "farm_home";
