@@ -3478,19 +3478,34 @@ public class ClickService extends AccessibilityService {
 
     private void followStep(List<MathQuestion.Line> lines) {
         long now = SystemClock.uptimeMillis();
-        // The party master: the first name under "Team" at the top left (the M row).
+        // The party master: the first name under "Team" at the top left (the M row). Personal store
+        // signs overlap that corner in town ("ELITE SET +5 SCROLLS REFINES..." was taken for the
+        // master, 12:36), so rows hang under the "Team" header and must look like a player name.
+        Rect header = null;
+        for (MathQuestion.Line l : lines) {
+            if (inTeamList(l.box) && l.text.trim().toLowerCase(java.util.Locale.ROOT).matches("team\\W*")) header = l.box;
+        }
         MathQuestion.Line first = null;
+        StringBuilder seen = new StringBuilder();
         for (MathQuestion.Line l : lines) {
             if (!inTeamList(l.box) || l.text.toLowerCase(java.util.Locale.ROOT).contains("team")) continue;
-            if (nameKey(stripRowMark(l.text)).length() < 3) continue;
+            if (header != null && (l.box.top < header.top + header.height() / 2 || l.box.top > header.bottom + screenH * 0.12f
+                    || l.box.left > header.left + screenW * 0.08f)) continue;
+            seen.append(" | ").append(l.text.trim());
+            if (!looksLikePlayerName(stripRowMark(l.text))) continue;
             if (first == null || l.box.top < first.box.top) first = l;
+        }
+        if (now - lastTeamDumpAt > 10_000) {
+            lastTeamDumpAt = now;
+            Log.d(TAG, "follow: team rows" + (header == null ? " (no header)" : "") + ":" + seen);
         }
         if (first != null) {
             String name = stripRowMark(first.text);
             String key = nameKey(name);
-            if (!key.equals(leaderKey)) {
+            if (leaderKey == null || !looseName(key, leaderKey)) {
                 leaderKey = key;
                 leaderShown = name;
+                leaderSeenAt = 0;
                 Log.i(TAG, "follow: party master is \"" + name + "\"");
             }
             followNoPartyLogged = false;
@@ -3501,16 +3516,25 @@ public class ClickService extends AccessibilityService {
         }
         // Their name tag in the world (not the Team list, the top strip or the minimap).
         Rect tag = null;
+        String tagKey = null;
         float tagDist = Float.MAX_VALUE;
         for (MathQuestion.Line l : lines) {
             if (inTeamList(l.box) || l.box.bottom <= screenH * HUD_TOP_H
                     || (l.box.right > screenW * 0.76f && l.box.top < screenH * 0.32f)) continue;
-            if (!sameName(nameKey(l.text), leaderKey)) continue;
+            String k = nameKey(l.text);
+            if (!looseName(k, leaderKey) || !looksLikePlayerName(l.text)) continue;
             float d = fromCharacter(l.box);
             if (d < tagDist) {
                 tag = l.box;
                 tagDist = d;
+                tagKey = k;
             }
+        }
+        if (tag != null && !tagKey.equals(leaderKey)) {
+            // The name tag in the world reads cleanly (no HP bar behind it): learn that spelling.
+            Log.i(TAG, "follow: party master's name tag reads \"" + tagKey + "\" (Team list read \"" + leaderKey + "\")");
+            leaderKey = tagKey;
+            leaderShown = tagKey;
         }
         float push = screenW * FARM_PUSH;
         if (tag != null) {
@@ -3539,6 +3563,12 @@ public class ClickService extends AccessibilityService {
         }
         // Not on screen: head the way they were last seen for a few steps, then wait and say so.
         lastWalkLeaderDist = 0;
+        if (leaderSeenAt == 0) {
+            if (!followWaitLogged) Log.i(TAG, "follow: waiting for " + leaderShown + " to come on screen");
+            followWaitLogged = true;
+            return;
+        }
+        followWaitLogged = false;
         if (followLostSteps < FOLLOW_LOST_STEPS && now - leaderSeenAt < FOLLOW_LOST_ALERT_MS) {
             followLostSteps++;
             Log.i(TAG, "follow: " + leaderShown + " not on screen, walking where they were last seen ("
@@ -3562,6 +3592,38 @@ public class ClickService extends AccessibilityService {
     /** The Team list at the top left: under the portrait/buffs, left of ~0.2 of the width. */
     private boolean inTeamList(Rect box) {
         return box.left < screenW * 0.2f && box.top > screenH * 0.17f && box.bottom < screenH * 0.42f;
+    }
+
+    private long lastTeamDumpAt;
+    private boolean followWaitLogged;
+
+    /** Like sameName but allowing ~a third of the letters misread (OCR over the Team row's HP bar). */
+    private static boolean looseName(String a, String b) {
+        if (sameName(a, b)) return true;
+        if (a == null || b == null || a.length() < 4 || b.length() < 4) return false;
+        int allowed = Math.max(2, b.length() / 3);
+        return Math.abs(a.length() - b.length()) <= allowed && editDistance(a, b) <= allowed;
+    }
+
+    private static int editDistance(String a, String b) {
+        int[] prev = new int[b.length() + 1], cur = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) prev[j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            cur[0] = i;
+            for (int j = 1; j <= b.length(); j++) {
+                cur[j] = Math.min(Math.min(cur[j - 1], prev[j]) + 1, prev[j - 1] + (a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1));
+            }
+            int[] t = prev;
+            prev = cur;
+            cur = t;
+        }
+        return prev[b.length()];
+    }
+
+    /** One word of 3-16 letters/digits (dashes around it allowed): not a store sign or a sentence. */
+    private static boolean looksLikePlayerName(String text) {
+        String t = text.trim().replaceAll("^[-`'~_.]+|[-`'~_.]+$", "");
+        return !t.contains(" ") && nameKey(t).length() >= 3 && t.length() <= 18;
     }
 
     /** "M kYjheLe26" / "2 VANGIELYNROSE" -> the name without the row mark. */
