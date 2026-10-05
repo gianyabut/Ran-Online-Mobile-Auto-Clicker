@@ -589,6 +589,7 @@ public class ClickService extends AccessibilityService {
         float recastAt = SMART_RECAST_AT;
         long backoffUntil;
         long lastFullAt;
+        long castAt;                                           // Farmer: last time this buff was tapped
 
         boolean isSmart() {
             return smartBuff && buffIcon != null;
@@ -1352,6 +1353,7 @@ public class ClickService extends AccessibilityService {
         if (next.isSmart()) {
             lastBuffTapAt = now;
             lastBuffRing = next;
+            next.castAt = now;
         }
         tap(next);
         if (next.forced) {
@@ -1814,9 +1816,19 @@ public class ClickService extends AccessibilityService {
         return farmer ? KEY_TARGETS_FARM : KEY_TARGETS;
     }
 
+    // Farmer: the game took every Lightspeed tap (its log shows the cast 50 ms later), but the buff
+    // row read it as missing or low right after, so it was recast 2.5 s later or "didn't take" and
+    // backed off (13 of 22 failed buffs, 08:30-09:04) - each extra cast holds attacks ~2.5 s.
+    private static final int BUFF_TRUST_MS = 30_000;
+
+    private boolean buffTrusted(Target t) {
+        return farmer && t.castAt > 0 && SystemClock.uptimeMillis() - t.castAt < BUFF_TRUST_MS;
+    }
+
     private boolean buffNeeded(Target t) {
         // End Game: buffs only go out in full buffs; every other slot is a heal.
         if (!t.forced && eg()) return false;
+        if (buffTrusted(t)) return false;
         return buffBelowRecast(t);
     }
 
@@ -2389,7 +2401,7 @@ public class ClickService extends AccessibilityService {
             // Only buffs actually read since the start: right after ▶ every reading is "unknown",
             // and all five went out, two of them at 95-98% (06:59:36). Missing ones still get their
             // own recast once read.
-            if (t.buffKnown && (!t.buffFound || t.buffFill <= FARM_TOPUP_AT)) low.add(t);
+            if (t.buffKnown && (!t.buffFound || t.buffFill <= FARM_TOPUP_AT) && !buffTrusted(t)) low.add(t);
         }
         if (low.isEmpty()) return;
         lastFarmFullBuffAt = now;
@@ -2808,7 +2820,9 @@ public class ClickService extends AccessibilityService {
         }
         if (best == null) {
             Log.d(TAG, "farmer: target \"" + key + "\" - its name tag not found on screen");
-            if (++tagMissStreak >= CAMERA_TAG_MISSES) {
+            // Only worth it when the fight isn't going anywhere: most misses are misread names
+            // ("todel", "hoda") on a monster dying normally (6 turns in 7 min, 08:56-09:03).
+            if (++tagMissStreak >= CAMERA_TAG_MISSES && SystemClock.uptimeMillis() - farmProgressAt > 5000) {
                 tagMissStreak = 0;
                 turnCamera("the target's name tag is hidden");
             }
