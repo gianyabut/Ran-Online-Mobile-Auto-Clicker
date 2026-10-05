@@ -1582,12 +1582,15 @@ public class ClickService extends AccessibilityService {
     private void partyLeft(int before, int members) {
         if (!running || manual || !fsMode()) return;
         Log.w(TAG, "party down from " + before + " to " + members + ": Campus Return card (slot D), then stopping");
-        onCardPage(() -> tapAt(screenW * CAMPUS_CARD_X, screenH * CAMPUS_CARD_Y, "campus return"), "Campus Return");
-        Telegram.send(this, "\uD83C\uDFEB Ran Online: the party went from " + before + " to " + members
-                + " - used the Campus Return card (D) and stopped FS.");
-        handler.postDelayed(() -> {
-            if (running) setRunning(false, "party left");
-        }, 1500);
+        // Stop only after the tap: stopping clears the handler, which would drop a pending bar flip.
+        onCardPage(() -> {
+            tapAt(screenW * CAMPUS_CARD_X, screenH * CAMPUS_CARD_Y, "campus return");
+            Telegram.send(this, "\uD83C\uDFEB Ran Online: the party went from " + before + " to " + members
+                    + " - used the Campus Return card (D) and stopped FS.");
+            handler.postDelayed(() -> {
+                if (running) setRunning(false, "party left");
+            }, 1500);
+        }, "Campus Return");
     }
 
     /** Big until a small party has been seen, so it behaves as before until the list is read. */
