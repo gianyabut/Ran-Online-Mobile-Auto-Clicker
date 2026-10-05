@@ -2540,6 +2540,7 @@ public class ClickService extends AccessibilityService {
 
     private void loadHome() {
         homeMap = null;
+        refreshLeashButton();                                   // grey unless a home loads below
         String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_HOME, null);
         if (saved == null) return;
         String[] p = saved.split(",");
