@@ -2634,10 +2634,24 @@ public class ClickService extends AccessibilityService {
             for (MathQuestion.Line l : lines) {
                 java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
                 if (!m.find()) continue;
-                posMap = m.group(1);
-                posX = Integer.parseInt(m.group(2));
-                posY = Integer.parseInt(m.group(3));
-                posAt = SystemClock.uptimeMillis();
+                String map = m.group(1);
+                int rx = Integer.parseInt(m.group(2).replace(" ", "")), ry = Integer.parseInt(m.group(3).replace(" ", ""));
+                long t = SystemClock.uptimeMillis();
+                // A dropped digit ("[126,11" for [126,115], 19:05) looks like a 100-unit jump: the
+                // character covers ~1-2 units a second, so take a big jump only when read twice.
+                if (posMap != null && sameMap(map, posMap) && t - posAt < 15_000) {
+                    double jump = Math.hypot(rx - posX, ry - posY), allowed = 6 + 3 * (t - posAt) / 1000.0;
+                    if (jump > allowed && !(rx == jumpX && ry == jumpY)) {
+                        jumpX = rx;
+                        jumpY = ry;
+                        Log.d(TAG, "coordinates: [" + rx + "," + ry + "] is " + Math.round(jump) + " from the last read, ignoring once");
+                        return;
+                    }
+                }
+                posMap = map;
+                posX = rx;
+                posY = ry;
+                posAt = t;
                 if (homeMap != null) {
                     Log.d(TAG, "position " + posMap + "[" + posX + "," + posY + "], "
                             + Math.round(Math.hypot(homeX - posX, homeY - posY)) + " from home");
@@ -4092,13 +4106,15 @@ public class ClickService extends AccessibilityService {
     private static final java.util.regex.Pattern COORD_TEXT =
             // "[" is sometimes read as l, I, | or ( ("TradingHolel123,119]", 19:02): the name stops
             // as early as it can so the slipped bracket isn't taken as part of it.
-            java.util.regex.Pattern.compile("([A-Za-z_]{3,}?)\\s*[\\[(|lI]\\s*(\\d{1,4})\\s*[,.]\\s*(\\d{1,4})");
+            // A stray space inside a number too ("[1 31,118]", 19:04).
+            java.util.regex.Pattern.compile("([A-Za-z_]{3,}?)\\s*[\\[(|lI]\\s*(\\d(?: ?\\d){0,3})\\s*[,.]\\s*(\\d(?: ?\\d){0,3})");
     private String homeMap, posMap;
     // ⚓ on the bar (Farmer): set home to where the character stands now; kept across restarts.
     private static final String KEY_HOME = "farm_home";
     private TextView leashButton;
     private int homeX, homeY, posX, posY;
     private long posAt, lastCoordReadAt, lastChatReadAt, lastCoordMissLogAt;
+    private int jumpX = -1, jumpY = -1;
     private static final int CHAT_READ_MS = 4000;
     private int calStage, leashMisses;
     private boolean calValid;
