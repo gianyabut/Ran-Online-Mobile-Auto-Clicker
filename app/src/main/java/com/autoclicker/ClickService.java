@@ -1001,6 +1001,8 @@ public class ClickService extends AccessibilityService {
         if (run && fsMode()) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // chat-FB is FS only
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
         deadUntil = 0;
+        returning = false;
+        returnGiveUpUntil = 0;
         if (run) {
             loadHome();                                         // the ⚓ spot; none set = roam (the user, 08:03)
             calStage = 0;
@@ -1253,7 +1255,7 @@ public class ClickService extends AccessibilityService {
 
     private void pumpQueue() {
         if (!running || pending.isEmpty()) return;
-        if (SystemClock.uptimeMillis() < deadUntil) {          // dead / on the way back: no skills
+        if (SystemClock.uptimeMillis() < deadUntil || returning) {   // dead / walking home: no skills
             schedulePump(1000);
             return;
         }
@@ -2116,6 +2118,7 @@ public class ClickService extends AccessibilityService {
             farmMobsSeenAt = lastTargetBarAt = now;
             return;
         }
+        if (!luring && returnHome(targetHp, now)) return;
         if (lastTargetBarAt == 0 || lootStartedAt > 0 || luring) lastTargetBarAt = Math.max(lastTargetBarAt, now - FARM_NO_BAR_MS / 2);
         if (now - lastTargetBarAt >= FARM_NO_BAR_MS && now - lastAnyTapAt < 3000 && canFarmMove(now)) {
             Log.i(TAG, "farmer: attacking for " + (now - lastTargetBarAt) / 1000 + " s with no target bar,"
@@ -2124,7 +2127,6 @@ public class ClickService extends AccessibilityService {
             farmWalk(now);
             return;
         }
-        if (!luring && lootStartedAt == 0 && now >= postKillUntil && leashStep(now, false)) return;
         if (now - farmMobsSeenAt < FARM_IDLE_MS || !canFarmMove(now)) return;
         // Searching while already halfway out: search back toward home.
         if (!luring && leashStep(now, true)) return;
@@ -2593,12 +2595,62 @@ public class ClickService extends AccessibilityService {
      * Walks back toward home when farther than LEASH_R (or LEASH_R/2 when searching anyway).
      * Returns true if it started a walk (or a calibration step).
      */
+    /** The return-home state: true while it owns the character (walking home, nothing else). */
+    private boolean returnHome(float targetHp, long now) {
+        if (homeMap == null) {
+            returning = false;
+            return false;
+        }
+        boolean fresh = posMap != null && sameMap(posMap, homeMap) && now - posAt <= 6000;
+        if (!fresh) {
+            if (returning && ((posMap != null && !sameMap(posMap, homeMap)) || now - returnStartedAt > RETURN_MAX_MS)) {
+                returning = false;
+                Log.i(TAG, "farmer: lost the home spot's map, attacking again");
+                schedulePump(0);
+            }
+            return returning;
+        }
+        float dist = (float) Math.hypot(homeX - posX, homeY - posY);
+        if (!returning) {
+            // The hand and a fresh kill's drop come first.
+            if (dist <= LEASH_R || lootStartedAt > 0 || now < postKillUntil || now < returnGiveUpUntil) return false;
+            returning = true;
+            returnStartedAt = now;
+            leashMisses = 0;
+            leashLastDist = 0;
+            leashWalkEnd = 0;
+            calStage = 0;
+            Log.i(TAG, "farmer: " + Math.round(dist) + " from home " + homeMap + "[" + homeX + "," + homeY + "] at ["
+                    + posX + "," + posY + "], no attacks until back");
+            if (targetHp >= 0) tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "deselect (going home)");
+            return true;
+        }
+        if (dist <= LEASH_BACK_R) {
+            returning = false;
+            Log.i(TAG, "farmer: back home (" + Math.round(dist) + " away, " + (now - returnStartedAt) / 1000 + " s), attacking again");
+            farmMobsSeenAt = lastTargetBarAt = now;
+            schedulePump(0);
+            return false;
+        }
+        if (now - returnStartedAt > RETURN_MAX_MS) {
+            returning = false;
+            returnGiveUpUntil = now + 60_000;
+            Log.w(TAG, "farmer: couldn't get home in " + RETURN_MAX_MS / 1000 + " s (still " + Math.round(dist) + " away), farming here a minute");
+            Telegram.send(this, "\u26A0 Ran Online: couldn't walk back to the home spot " + homeMap + "[" + homeX + "," + homeY
+                    + "], stuck at [" + posX + "," + posY + "]. Farming there; trying again in a minute.");
+            schedulePump(0);
+            return false;
+        }
+        if (canFarmMove(now) && posAt > leashWalkEnd) leashStep(now, false);
+        return true;
+    }
+
     private boolean leashStep(long now, boolean searching) {
         if (homeMap == null || posMap == null || !sameMap(posMap, homeMap) || now - posAt > 6000) return false;
-        if (!canFarmMove(now) || farmTargetHp >= 0) return false;
+        if (!canFarmMove(now) || (!returning && farmTargetHp >= 0)) return false;
         float gx = homeX - posX, gy = homeY - posY;
         float dist = (float) Math.hypot(gx, gy);
-        if (dist <= (searching ? LEASH_R / 2f : LEASH_R)) {
+        if (dist <= (searching ? LEASH_R / 2f : returning ? LEASH_BACK_R : LEASH_R)) {
             calStage = calValid ? calStage : 0;
             return false;
         }
@@ -2630,7 +2682,7 @@ public class ClickService extends AccessibilityService {
             calNy = posY - calP0y;
             float det = calEx * calNy - calNx * calEy;
             calStage = 0;
-            if (Math.abs(det) < 0.5f) {
+            if (Math.abs(det) < 0.5f || Math.hypot(calEx, calEy) < 1.5 || Math.hypot(calNx, calNy) < 1.5) {
                 Log.i(TAG, "farmer: couldn't learn the directions (blocked?), trying again later");
                 return false;
             }
@@ -2669,6 +2721,7 @@ public class ClickService extends AccessibilityService {
     }
 
     private void leashWalk(float dx, float dy, int ms, long now) {
+        leashWalkEnd = now + FARM_PUSH_MS + ms + 300;            // the next step waits for a reading after this
         walkStartThumb = lastSceneThumb;
         lastWalkShort = false;
         farmMobsSeenAt = now;
@@ -2692,6 +2745,11 @@ public class ClickService extends AccessibilityService {
         Log.i(TAG, "farmer: turning the camera (" + why + ")");
         calValid = false;
         calStage = 0;
+        cameraDrag(drag);
+    }
+
+    private void cameraDrag(Path drag) {
+        if (!gestureClear(CAMERA_DRAG_MS, () -> cameraDrag(drag))) return;
         dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(drag, 0, CAMERA_DRAG_MS)).build(), null, null);
     }
@@ -3097,6 +3155,7 @@ public class ClickService extends AccessibilityService {
     /** Push the joystick from the centre by (dx, dy) and hold it there for holdMs, then release. */
     private void joystickHold(float dx, float dy, int holdMs) {
         if (!running) return;
+        if (!gestureClear(FARM_PUSH_MS + holdMs + 100, () -> joystickHold(dx, dy, holdMs))) return;
         float cx = screenW * JOYSTICK_X;
         float cy = screenH * JOYSTICK_Y;
         Path out = new Path();
@@ -3119,6 +3178,7 @@ public class ClickService extends AccessibilityService {
     /** One brief joystick push from the centre by dx pixels, then released. */
     private void joystickPush(float dx) {
         if (!running) return;
+        if (!gestureClear(MOVE_MS, () -> joystickPush(dx))) return;
         float cx = screenW * JOYSTICK_X;
         float cy = screenH * JOYSTICK_Y;
         Path path = new Path();
@@ -3532,6 +3592,12 @@ public class ClickService extends AccessibilityService {
     private int calStage, leashMisses;
     private boolean calValid;
     private float calEx, calEy, calNx, calNy, calP0x, calP0y, leashLastDist;
+    // Past the leash: no attacks or buffs at all until back within LEASH_BACK_R (the user, 08:13:
+    // "it wont attack until it goes near the leash position"). Attacking on the way made the game
+    // run to the next monster, farther out, and spoiled the direction probes.
+    private static final int LEASH_BACK_R = 5, RETURN_MAX_MS = 90_000, RETURN_COORD_MS = 1500;
+    private boolean returning;
+    private long returnStartedAt, returnGiveUpUntil, leashWalkEnd;
     private long calWalkEnd;
     private boolean lastOcrHadDialog;
 
@@ -3735,7 +3801,54 @@ public class ClickService extends AccessibilityService {
         tapAt(x, y, "target " + (targets.indexOf(t) + 1) + " at " + Math.round(x) + "," + Math.round(y));
     }
 
+    /*
+     * The system crashes (6 watchdog kills, 2026-10-04/05) are one MIUI deadlock: an accessibility
+     * screenshot holds the display lock and wants DisplayManagerGlobal's, while MIUI's gesture
+     * listener (MiuiCvwGestureController), handling a touch, holds that one and wants the display
+     * lock. So a screenshot and a touch must never overlap: screenshots wait for our gestures to
+     * end (and for your finger), and gestures wait for a screenshot in flight.
+     */
+    private static final int GESTURE_SLACK_MS = 150, SHOT_MAX_MS = 1500, USER_TOUCH_SHOT_MS = 2000;
+    private long gestureBusyUntil, shotStartedAt;
+    private boolean shotInFlight;
+
+    private void shoot(TakeScreenshotCallback cb) {
+        long now = SystemClock.uptimeMillis();
+        long wait = Math.max(gestureBusyUntil - now, userTouchAt + USER_TOUCH_SHOT_MS - now);
+        if (wait > 0) {
+            handler.postDelayed(() -> shoot(cb), wait + 20);
+            return;
+        }
+        shotInFlight = true;
+        shotStartedAt = now;
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult result) {
+                shotInFlight = false;
+                cb.onSuccess(result);
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                shotInFlight = false;
+                cb.onFailure(errorCode);
+            }
+        });
+    }
+
+    /** False (and retries later) while a screenshot is being taken; else marks the gesture's time. */
+    private boolean gestureClear(long durationMs, Runnable retry) {
+        long now = SystemClock.uptimeMillis();
+        if (shotInFlight && now - shotStartedAt < SHOT_MAX_MS) {
+            handler.postDelayed(retry, 30);
+            return false;
+        }
+        gestureBusyUntil = Math.max(gestureBusyUntil, now + durationMs + GESTURE_SLACK_MS);
+        return true;
+    }
+
     private void tapAt(float x, float y, String which) {
+        if (!gestureClear(TAP_MS, () -> tapAt(x, y, which))) return;
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription gesture = new GestureDescription.Builder()
@@ -3844,7 +3957,7 @@ public class ClickService extends AccessibilityService {
                         lastChatReadAt = now;
                         farmChatRead(shot);
                     }
-                    if (now - lastCoordReadAt >= COORD_EVERY_MS - 100) {
+                    if (now - lastCoordReadAt >= (returning ? RETURN_COORD_MS : COORD_EVERY_MS) - 100) {
                         lastCoordReadAt = now;
                         farmCoordRead(shot);
                     }
@@ -4037,7 +4150,7 @@ public class ClickService extends AccessibilityService {
             onShot.accept(null);
             return;
         }
-        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+        shoot(new TakeScreenshotCallback() {
             @Override
             public void onSuccess(ScreenshotResult result) {
                 HardwareBuffer buffer = result.getHardwareBuffer();
@@ -4071,7 +4184,7 @@ public class ClickService extends AccessibilityService {
             onShot.accept(null);
             return;
         }
-        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+        shoot(new TakeScreenshotCallback() {
             @Override
             public void onSuccess(ScreenshotResult result) {
                 HardwareBuffer buffer = result.getHardwareBuffer();
@@ -4114,7 +4227,7 @@ public class ClickService extends AccessibilityService {
      */
     private void captureScreen(Consumer<Bitmap> onShot, boolean buffRowOnly) {
         if (!canReadScreen()) return;
-        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+        shoot(new TakeScreenshotCallback() {
             @Override
             public void onSuccess(ScreenshotResult result) {
                 HardwareBuffer buffer = result.getHardwareBuffer();
