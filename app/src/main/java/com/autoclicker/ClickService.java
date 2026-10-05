@@ -2535,11 +2535,15 @@ public class ClickService extends AccessibilityService {
     private void refreshLeashButton() {
         if (leashButton != null) {
             leashButton.setBackground(circle(homeMap != null ? Color.rgb(30, 130, 140) : Color.rgb(110, 110, 110)));
+            leashButton.setText(homeMap != null ? "\u2693\n" + leashR : "\u2693");
+            leashButton.setTextSize(homeMap != null ? 12 : 18);
         }
     }
 
     private void loadHome() {
         homeMap = null;
+        int r = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_LEASH_R, 10);
+        leashR = r == 6 || r == 10 || r == 15 ? r : 10;
         refreshLeashButton();                                   // grey unless a home loads below
         String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_HOME, null);
         if (saved == null) return;
@@ -2557,6 +2561,21 @@ public class ClickService extends AccessibilityService {
     /** ⚓: no home set -> make where the character stands home; home set -> clear it and roam. */
     private void onSetLeash() {
         shake(leashButton);
+        if (homeMap != null && leashR < LEASH_RADII[LEASH_RADII.length - 1]) {
+            // Home set: next radius, same home.
+            for (int r : LEASH_RADII) {
+                if (r > leashR) {
+                    leashR = r;
+                    break;
+                }
+            }
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LEASH_R, leashR).apply();
+            refreshLeashButton();
+            Log.i(TAG, "farmer: leash radius " + leashR + " (button)");
+            android.widget.Toast.makeText(this, "Leash: within " + leashR + " of " + homeMap + "[" + homeX + "," + homeY + "]",
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
         if (homeMap != null) {
             homeMap = null;
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_HOME).apply();
@@ -2566,6 +2585,8 @@ public class ClickService extends AccessibilityService {
             return;
         }
         homeCandMap = null;
+        leashR = LEASH_RADII[0];                                    // a new home starts on the tightest leash
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LEASH_R, leashR).apply();
         readHomeSpot(4);
     }
 
@@ -2600,7 +2621,7 @@ public class ClickService extends AccessibilityService {
                     getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                             .putString(KEY_HOME, homeMap + "," + homeX + "," + homeY).apply();
                     refreshLeashButton();
-                    String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + LEASH_R;
+                    String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + leashR;
                     Log.i(TAG, "farmer: " + msg + " (button)");
                     android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
                     return;
@@ -2637,7 +2658,7 @@ public class ClickService extends AccessibilityService {
             calStage = 0;
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_HOME, homeMap + "," + homeX + "," + homeY).apply();
             refreshLeashButton();
-            String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + LEASH_R;
+            String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + leashR;
             Log.i(TAG, "farmer: " + msg + " (button, last reading)");
             android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
             return;
@@ -2735,7 +2756,7 @@ public class ClickService extends AccessibilityService {
     private boolean searchTowardHome(long now) {
         if (homeMap == null || posMap == null || !sameMap(posMap, homeMap) || now - posAt > 6000) return false;
         if (!canFarmMove(now) || now - lastMapHomeAt < MAP_HOME_GAP_MS * 2) return false;
-        if (Math.hypot(homeX - posX, homeY - posY) <= LEASH_R / 2f) return false;
+        if (Math.hypot(homeX - posX, homeY - posY) <= leashR / 2f) return false;
         mapWalkHome(now);
         return true;
     }
@@ -2876,7 +2897,7 @@ public class ClickService extends AccessibilityService {
         }
         if (!returning) {
             // The hand and a fresh kill's drop come first.
-            if (dist <= LEASH_R || lootStartedAt > 0 || now < postKillUntil || now < returnGiveUpUntil) return false;
+            if (dist <= leashR || lootStartedAt > 0 || now < postKillUntil || now < returnGiveUpUntil) return false;
             returning = true;
             returnStartedAt = now;
             leashMisses = 0;
@@ -2888,7 +2909,7 @@ public class ClickService extends AccessibilityService {
             if (targetHp >= 0) tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "deselect (going home)");
             return true;
         }
-        if (dist <= LEASH_BACK_R) {
+        if (dist <= leashBackR()) {
             returning = false;
             Log.i(TAG, "farmer: back home (" + Math.round(dist) + " away, " + (now - returnStartedAt) / 1000 + " s), attacking again");
             farmMobsSeenAt = lastTargetBarAt = now;
@@ -2904,7 +2925,7 @@ public class ClickService extends AccessibilityService {
         if (!canFarmMove(now) || (!returning && farmTargetHp >= 0)) return false;
         float gx = homeX - posX, gy = homeY - posY;
         float dist = (float) Math.hypot(gx, gy);
-        if (dist <= (searching ? LEASH_R / 2f : returning ? LEASH_BACK_R : LEASH_R)) {
+        if (dist <= (searching ? leashR / 2f : returning ? leashBackR() : leashR)) {
             calStage = calValid ? calStage : 0;
             return false;
         }
@@ -4278,7 +4299,11 @@ public class ClickService extends AccessibilityService {
     // learned again after a camera turn or when walking home stops getting closer.
     private static final float COORD_L = 0f, COORD_T = 0.95f, COORD_W = 0.35f, COORD_H = 0.05f;
     // 10 since walking home by the map works well (the user, 19:24).
-    private static final int COORD_EVERY_MS = 6000, LEASH_R = 10, LEASH_PROBE_MS = 2500;
+    // The leash radius is the user's pick on the anchor button: 6, 10 or 15 (the user, 22:40).
+    private static final int COORD_EVERY_MS = 6000, LEASH_PROBE_MS = 2500;
+    private static final int[] LEASH_RADII = {6, 10, 15};
+    private static final String KEY_LEASH_R = "farm_leash_r";
+    private int leashR = 10;
     private static final java.util.regex.Pattern COORD_TEXT =
             // "[" is sometimes read as l, I, | or ( ("TradingHolel123,119]", 19:02): the name stops
             // as early as it can so the slipped bracket isn't taken as part of it.
@@ -4296,11 +4321,16 @@ public class ClickService extends AccessibilityService {
     private int calStage, leashMisses;
     private boolean calValid;
     private float calEx, calEy, calNx, calNy, calP0x, calP0y, leashLastDist;
-    // Past the leash: no attacks or buffs at all until back within LEASH_BACK_R (the user, 08:13:
+    // Past the leash: no attacks or buffs at all until back within leashBackR() (the user, 08:13:
     // "it wont attack until it goes near the leash position"). Attacking on the way made the game
     // run to the next monster, farther out, and spoiled the direction probes.
     private static final int HOME_MAX_DIST = 150;
-    private static final int LEASH_BACK_R = 3, RETURN_MAX_MS = 90_000, RETURN_COORD_MS = 1500;
+    private static final int RETURN_MAX_MS = 90_000, RETURN_COORD_MS = 1500;
+
+    /** Back home when this close: 3, or 2 on the tight 6 leash. */
+    private int leashBackR() {
+        return leashR <= 6 ? 2 : 3;
+    }
     private boolean returning;
     private int calSign = 1;                                   // probe E/N, or W/S after a blocked try
     private long returnStartedAt, returnGiveUpUntil, leashWalkEnd;
