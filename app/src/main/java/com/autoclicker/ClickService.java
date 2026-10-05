@@ -2172,7 +2172,7 @@ public class ClickService extends AccessibilityService {
         }
         if (now - Math.max(farmMobsSeenAt, lastBuffTapAt + 5000) < FARM_IDLE_MS || !canFarmMove(now)) return;
         // Searching while already halfway out: search back toward home.
-        if (!luring && leashStep(now, true)) return;
+        if (!luring && searchTowardHome(now)) return;
         Log.i(TAG, "farmer: no target for " + (now - farmMobsSeenAt) / 1000 + " s (monsters ~" + mobs
                 + "), walking " + "ENWS".charAt(farmWalkStep));
         farmWalk(now);
@@ -2674,6 +2674,114 @@ public class ClickService extends AccessibilityService {
      * Walks back toward home when farther than LEASH_R (or LEASH_R/2 when searching anyway).
      * Returns true if it started a walk (or a calibration step).
      */
+    // Walking home by the big map (the user, 19:08: "like in the follow"): tap the home spot on it
+    // and the game walks there around walls. Our arrow sits mid-map; home is MAP_K px per unit
+    // away (TradingHole 15.6, X right, Y up: measured 19:09 with the map's corner readout, which
+    // shows the coordinates of the last spot touched). Each tap's readout corrects the scale.
+    private static final float MAP_K_DEFAULT = 15.6f;
+    private static final float MAP_RO_L = 0.86f, MAP_RO_T = 0.785f, MAP_RO_W = 0.11f, MAP_RO_H = 0.06f;
+    private static final int MAP_HOME_GAP_MS = 4000;
+    private static final java.util.regex.Pattern MAP_READOUT = java.util.regex.Pattern.compile("(\\d{1,4})\\s+(\\d{1,4})");
+    private long lastMapHomeAt;
+
+    private float mapScale(String map) {
+        if (map == null) return MAP_K_DEFAULT;
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getFloat("map_k_" + mapKey(map), MAP_K_DEFAULT);
+    }
+
+    private static String mapKey(String map) {
+        String k = map.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+        return k.length() > 6 ? k.substring(0, 6) : k;
+    }
+
+    /** No monsters and halfway out already: search back toward home. */
+    private boolean searchTowardHome(long now) {
+        if (homeMap == null || posMap == null || !sameMap(posMap, homeMap) || now - posAt > 6000) return false;
+        if (!canFarmMove(now) || now - lastMapHomeAt < MAP_HOME_GAP_MS * 2) return false;
+        if (Math.hypot(homeX - posX, homeY - posY) <= LEASH_R / 2f) return false;
+        mapWalkHome(now);
+        return true;
+    }
+
+    private void mapWalkHome(long now) {
+        lastMapHomeAt = now;
+        leashWalkEnd = now + 3000;                                  // next step after a fresh position
+        busyUntil = farmHoldUntil = Math.max(busyUntil, now + MAP_OPEN_MS + 1500);
+        final int hx = homeX, hy = homeY, px0 = posX, py0 = posY;
+        final String map = posMap;
+        tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
+        handler.postDelayed(() -> captureHalfScreen(shot -> {
+            if (shot == null) return;
+            boolean open = mapIsOpen(shot, 1f);
+            int[] a = open ? mapCluster(shot, true) : null;
+            shot.recycle();
+            if (!open) {
+                Log.i(TAG, "farmer: the map didn't open (walking home)");
+                return;
+            }
+            if (a == null) {
+                Log.i(TAG, "farmer: map open but our arrow isn't on it");
+                closeMap();
+                return;
+            }
+            float k = mapScale(map);
+            float dx = (hx - px0) * k, dy = -(hy - py0) * k;
+            // Home off the visible map: go as far as the map shows that way.
+            float minX = screenW * 0.05f, maxX = screenW * 0.95f, minY = screenH * 0.15f, maxY = screenH * 0.82f, f = 1f;
+            if (dx > 0 && a[0] + dx > maxX) f = Math.min(f, (maxX - a[0]) / dx);
+            if (dx < 0 && a[0] + dx < minX) f = Math.min(f, (minX - a[0]) / dx);
+            if (dy > 0 && a[1] + dy > maxY) f = Math.min(f, (maxY - a[1]) / dy);
+            if (dy < 0 && a[1] + dy < minY) f = Math.min(f, (minY - a[1]) / dy);
+            f = Math.max(0f, f);
+            float tx = a[0] + dx * f, ty = a[1] + dy * f;
+            Log.i(TAG, "farmer: walking home by the map: [" + px0 + "," + py0 + "] -> [" + hx + "," + hy + "], tapping "
+                    + Math.round(tx) + "," + Math.round(ty) + (f < 1f ? " (map edge)" : ""));
+            tapAt(tx, ty, "map home");
+            busyUntil = farmHoldUntil = Math.max(busyUntil, SystemClock.uptimeMillis() + 1500);
+            // The corner readout now shows where that tap is: correct the scale for this map.
+            handler.postDelayed(() -> captureHalfScreen(s2 -> {
+                if (s2 == null) {
+                    closeMap();
+                    return;
+                }
+                Bitmap ro = null;
+                try {
+                    ro = Bitmap.createBitmap(s2, Math.round(s2.getWidth() * MAP_RO_L), Math.round(s2.getHeight() * MAP_RO_T),
+                            Math.round(s2.getWidth() * MAP_RO_W), Math.round(s2.getHeight() * MAP_RO_H));
+                } catch (RuntimeException | OutOfMemoryError ignored) {
+                }
+                s2.recycle();
+                closeMap();
+                if (ro == null || map == null) return;
+                Ocr.read(ro, (lines, words) -> {
+                    for (MathQuestion.Line l : lines) {
+                        java.util.regex.Matcher m = MAP_READOUT.matcher(l.text);
+                        if (!m.find()) continue;
+                        int rx = Integer.parseInt(m.group(1)), ry = Integer.parseInt(m.group(2));
+                        float ux = rx - px0, uy = ry - py0, sum = 0;
+                        int n = 0;
+                        if (Math.abs(ux) >= 3) {
+                            sum += (tx - a[0]) / ux;
+                            n++;
+                        }
+                        if (Math.abs(uy) >= 3) {
+                            sum += -(ty - a[1]) / uy;
+                            n++;
+                        }
+                        if (n == 0) return;
+                        float nk = sum / n;
+                        if (nk < 5 || nk > 40) return;
+                        if (Math.abs(nk - k) > 0.5f) {
+                            Log.i(TAG, "farmer: map scale for " + map + " " + k + " -> " + nk + " px per unit (tap read [" + rx + "," + ry + "])");
+                            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putFloat("map_k_" + mapKey(map), nk).apply();
+                        }
+                        return;
+                    }
+                });
+            }), 500);
+        }), MAP_OPEN_MS);
+    }
+
     /** The return-home state: true while it owns the character (walking home, nothing else). */
     private boolean returnHome(float targetHp, long now) {
         if (homeMap == null) {
@@ -2728,7 +2836,7 @@ public class ClickService extends AccessibilityService {
             schedulePump(0);
             return false;
         }
-        if (canFarmMove(now) && posAt > leashWalkEnd) leashStep(now, false);
+        if (canFarmMove(now) && posAt > leashWalkEnd && now - lastMapHomeAt > MAP_HOME_GAP_MS) mapWalkHome(now);
         return true;
     }
 
