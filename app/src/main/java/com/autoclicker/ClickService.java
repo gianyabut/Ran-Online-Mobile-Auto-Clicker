@@ -213,7 +213,12 @@ public class ClickService extends AccessibilityService {
     // after walking to gold labels kept stopping short and attacks pulled the character away).
     // While the hand shows, attacks pause until it's picked up (farmLootCheck).
     private static final float LOOT_HAND_X = 1735 / 2560f, LOOT_HAND_Y = 1430 / 1600f;
-    private static final int LOOT_MAX_PAUSE_MS = 10_000, LOOT_RETAP_MS = 700, LOOT_IGNORE_MS = 8000;
+    private static final int LOOT_MAX_PAUSE_MS = 12_000, LOOT_RETAP_MS = 700, LOOT_IGNORE_MS = 8000;
+    // Pickups take 3-4 s; an item the game won't hand over kept it tapping for 10 s with monsters
+    // around (08:25:19-30, "stuck and didn't loot"). Give up LOOT_STALL_MS after the last pickup
+    // (the chat says "Pick up item"/"Gained gold"; read every LOOT_CHAT_MS while looting).
+    private static final int LOOT_STALL_MS = 5000, LOOT_CHAT_MS = 1500;
+    private long lastPickupAt;
     // Not faster while looting: 1 s screenshots under memory pressure preceded Android's own
     // system process hanging and restarting (12:35-12:37, watchdog kill), as at 11:43.
     private static final int LOOT_SCAN_MS = 2000;
@@ -2833,6 +2838,7 @@ public class ClickService extends AccessibilityService {
             // what's new at the bottom rather than everything (no double counts).
             lastChatLines = curKeys;
             if (firstRead) return;                           // what's already there isn't ours to count
+            if (overlap < cur.size()) lastPickupAt = SystemClock.uptimeMillis();
             for (int i = overlap; i < cur.size(); i++) countLootEntry(cur.get(i));
         });
     }
@@ -3082,7 +3088,8 @@ public class ClickService extends AccessibilityService {
      */
     private void farmLootCheck(boolean handShowing, long now) {
         if (lootStartedAt > 0) {                            // a pickup is under way
-            boolean gaveUp = now - lootStartedAt >= LOOT_MAX_PAUSE_MS;
+            boolean gaveUp = now - lootStartedAt >= LOOT_MAX_PAUSE_MS
+                    || now - Math.max(lootStartedAt, lastPickupAt) >= LOOT_STALL_MS;
             if (handShowing && !gaveUp) {
                 // Still there: two more taps, then wait for the next screenshot to say it's still
                 // showing. Tapping on blind hit the ground once it was gone ("empty-ground tap ->
@@ -3094,7 +3101,7 @@ public class ClickService extends AccessibilityService {
                 }
                 return;
             }
-            Log.i(TAG, "farmer: " + (handShowing ? "couldn't pick it up in " + LOOT_MAX_PAUSE_MS / 1000
+            Log.i(TAG, "farmer: " + (handShowing ? "couldn't pick it up in " + (now - lootStartedAt) / 1000
                     + " s, leaving it" : "picked up") + ", attacking again");
             if (handShowing) {
                 lootIgnoreUntil = now + LOOT_IGNORE_MS;
@@ -3953,7 +3960,7 @@ public class ClickService extends AccessibilityService {
                             MobCounter.targetHp(shot, screenW, screenH), now);
                     // Each text read costs memory and CPU on the Pad 5 (system froze again 07:49 with
                     // reads every scan): chat every CHAT_READ_MS, coordinates every COORD_EVERY_MS.
-                    if (now - lastChatReadAt >= CHAT_READ_MS - 100) {
+                    if (now - lastChatReadAt >= (lootStartedAt > 0 ? LOOT_CHAT_MS : CHAT_READ_MS) - 100) {
                         lastChatReadAt = now;
                         farmChatRead(shot);
                     }
