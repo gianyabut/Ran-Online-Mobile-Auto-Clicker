@@ -4230,14 +4230,22 @@ public class ClickService extends AccessibilityService {
     private void questionWatchTick() {
         watchHandler.postDelayed(questionWatchTick, QUESTION_WATCH_MS);
         if (running && (farmer || follow)) return;   // Farmer/Follow read it from their own screenshots
+        // The scan loop's screenshots read it too (FS); a second screenshot would only be refused.
+        if (running && SystemClock.uptimeMillis() - lastScanShotAt < QUESTION_WATCH_MS) return;
         if (!canReadScreen()) return;
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         if (!game.equals(foregroundPackage())) return;
         // From the top-left corner, so OCR boxes are already screen pixels.
         captureRegionForOcr(0f, 0f, 1f, QUESTION_SCAN_H, top -> {
             if (top != null) Ocr.read(top, (lines, words) -> checkForQuestion(game, lines));
+            else if (SystemClock.uptimeMillis() - lastQuestionShotFailLogAt > 60_000) {
+                lastQuestionShotFailLogAt = SystemClock.uptimeMillis();
+                Log.w(TAG, "question watch: no screenshot");
+            }
         });
     }
+
+    private long lastScanShotAt, lastScanQuestionAt, lastQuestionShotFailLogAt;
 
     private long lastReviveAt;
     // After a death (the user, 07:38): no attacks in town; once revived, use the Back Point card in
@@ -4723,6 +4731,21 @@ public class ClickService extends AccessibilityService {
                 if (keyboardShowing() || (gamePackage != null && !gamePackage.equals(foregroundPackage()))) return;
                 List<BuffReader.Icon> icons = scanBuffs ? BuffReader.scan(shot, screenW, screenH) : null;
                 long now = SystemClock.uptimeMillis();
+                lastScanShotAt = now;
+                // FS: the math question from this same screenshot. Its own screenshot, between the
+                // 0.35 s cooldown ones, was refused as too soon and the question went unanswered
+                // (20:23). Farmer reads it in farmOcr.
+                if (!farmer && now - lastScanQuestionAt >= QUESTION_WATCH_MS - 100) {
+                    lastScanQuestionAt = now;
+                    String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+                    Bitmap top = null;
+                    try {
+                        top = Bitmap.createBitmap(shot, 0, 0, shot.getWidth(),
+                                Math.min(shot.getHeight(), Math.round(screenH * QUESTION_SCAN_H)));
+                    } catch (RuntimeException | OutOfMemoryError ignored) {
+                    }
+                    if (top != null) Ocr.read(top, (lines, words) -> checkForQuestion(game, lines));
+                }
                 // Screenshots come every 0.35 s while a ring watches a cooldown; counting once
                 // per BUFF_SCAN_EVERY_MS is plenty.
                 if (eg() && scanBuffs && now - lastMobCountAt >= BUFF_SCAN_EVERY_MS - 100) {
