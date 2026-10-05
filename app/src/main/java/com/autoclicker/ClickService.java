@@ -2580,7 +2580,7 @@ public class ClickService extends AccessibilityService {
                     java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
                     if (!m.find()) continue;
                     String rm = m.group(1);
-                    int rx = Integer.parseInt(m.group(2).replace(" ", "")), ry = Integer.parseInt(m.group(3).replace(" ", ""));
+                    int rx = coordNumber(m.group(2)), ry = coordNumber(m.group(3));
                     // Two reads that agree: one read saved [124,1166] for [124,116] (19:13).
                     if (homeCandMap == null || !sameMap(rm, homeCandMap) || Math.abs(rx - homeCandX) > 2 || Math.abs(ry - homeCandY) > 2) {
                         homeCandMap = rm;
@@ -2607,6 +2607,16 @@ public class ClickService extends AccessibilityService {
                 homeReadFailed(tries);
             });
         });
+    }
+
+    /**
+     * A coordinate as read: stray spaces out, and at most 3 digits - the map's own readout pads
+     * them to 3 ("091 095"), and the closing "]" read as a digit made [124,117] into [124,1171].
+     */
+    private static int coordNumber(String digits) {
+        String d = digits.replace(" ", "");
+        if (d.length() > 3) d = d.substring(0, 3);
+        return Integer.parseInt(d);
     }
 
     private String homeCandMap;
@@ -2651,7 +2661,7 @@ public class ClickService extends AccessibilityService {
                 java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
                 if (!m.find()) continue;
                 String map = m.group(1);
-                int rx = Integer.parseInt(m.group(2).replace(" ", "")), ry = Integer.parseInt(m.group(3).replace(" ", ""));
+                int rx = coordNumber(m.group(2)), ry = coordNumber(m.group(3));
                 long t = SystemClock.uptimeMillis();
                 // A dropped digit ("[126,11" for [126,115], 19:05) looks like a 100-unit jump: the
                 // character covers ~1-2 units a second, so take a big jump only when read twice.
@@ -2846,6 +2856,12 @@ public class ClickService extends AccessibilityService {
             return returning;
         }
         float dist = (float) Math.hypot(homeX - posX, homeY - posY);
+        if (dist > HOME_MAX_DIST && homeX < 1000 && homeY < 1000) {
+            // Most likely the position was misread, not the home (19:29): skip this reading.
+            Log.w(TAG, "farmer: position [" + posX + "," + posY + "] is " + Math.round(dist) + " from home - ignoring that read");
+            posAt = 0;
+            return returning;
+        }
         if (dist > HOME_MAX_DIST) {
             Log.w(TAG, "farmer: home " + homeMap + "[" + homeX + "," + homeY + "] is " + Math.round(dist) + " away - misread, clearing it");
             Telegram.send(this, "\u2693 Ran Online: the home spot " + homeMap + "[" + homeX + "," + homeY + "] looks misread ("
