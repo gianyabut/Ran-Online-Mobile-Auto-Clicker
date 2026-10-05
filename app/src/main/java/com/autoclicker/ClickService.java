@@ -2564,7 +2564,8 @@ public class ClickService extends AccessibilityService {
             android.widget.Toast.makeText(this, "Leash off: roaming", android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
-        readHomeSpot(3);
+        homeCandMap = null;
+        readHomeSpot(4);
     }
 
     /** Reads the coordinates for ⚓; the read misses about half the time (08:05), so try a few times. */
@@ -2578,9 +2579,21 @@ public class ClickService extends AccessibilityService {
                 for (MathQuestion.Line l : lines) {
                     java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
                     if (!m.find()) continue;
-                    homeMap = m.group(1);
-                    homeX = Integer.parseInt(m.group(2));
-                    homeY = Integer.parseInt(m.group(3));
+                    String rm = m.group(1);
+                    int rx = Integer.parseInt(m.group(2).replace(" ", "")), ry = Integer.parseInt(m.group(3).replace(" ", ""));
+                    // Two reads that agree: one read saved [124,1166] for [124,116] (19:13).
+                    if (homeCandMap == null || !sameMap(rm, homeCandMap) || Math.abs(rx - homeCandX) > 2 || Math.abs(ry - homeCandY) > 2) {
+                        homeCandMap = rm;
+                        homeCandX = rx;
+                        homeCandY = ry;
+                        if (tries > 1) handler.postDelayed(() -> readHomeSpot(tries - 1), 400);
+                        else homeReadFailed(1);
+                        return;
+                    }
+                    homeCandMap = null;
+                    homeMap = rm;
+                    homeX = rx;
+                    homeY = ry;
                     calValid = false;
                     calStage = 0;
                     getSharedPreferences(PREFS, MODE_PRIVATE).edit()
@@ -2595,6 +2608,9 @@ public class ClickService extends AccessibilityService {
             });
         });
     }
+
+    private String homeCandMap;
+    private int homeCandX, homeCandY;
 
     private void homeReadFailed(int tries) {
         if (tries > 1) {
@@ -2825,6 +2841,17 @@ public class ClickService extends AccessibilityService {
             return returning;
         }
         float dist = (float) Math.hypot(homeX - posX, homeY - posY);
+        if (dist > HOME_MAX_DIST) {
+            Log.w(TAG, "farmer: home " + homeMap + "[" + homeX + "," + homeY + "] is " + Math.round(dist) + " away - misread, clearing it");
+            Telegram.send(this, "\u2693 Ran Online: the home spot " + homeMap + "[" + homeX + "," + homeY + "] looks misread ("
+                    + Math.round(dist) + " away), so I cleared it - farming without a leash. Tap the anchor again at your spot.");
+            homeMap = null;
+            returning = false;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_HOME).apply();
+            refreshLeashButton();
+            schedulePump(0);
+            return false;
+        }
         if (!returning) {
             // The hand and a fresh kill's drop come first.
             if (dist <= LEASH_R || lootStartedAt > 0 || now < postKillUntil || now < returnGiveUpUntil) return false;
@@ -4241,6 +4268,7 @@ public class ClickService extends AccessibilityService {
     // Past the leash: no attacks or buffs at all until back within LEASH_BACK_R (the user, 08:13:
     // "it wont attack until it goes near the leash position"). Attacking on the way made the game
     // run to the next monster, farther out, and spoiled the direction probes.
+    private static final int HOME_MAX_DIST = 150;
     private static final int LEASH_BACK_R = 3, RETURN_MAX_MS = 90_000, RETURN_COORD_MS = 1500;
     private boolean returning;
     private int calSign = 1;                                   // probe E/N, or W/S after a blocked try
