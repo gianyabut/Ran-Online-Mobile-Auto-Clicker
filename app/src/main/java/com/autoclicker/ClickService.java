@@ -3473,13 +3473,14 @@ public class ClickService extends AccessibilityService {
             // A big map left open hides the Team list (and nothing else would close it, 13:00).
             if (mapIsOpen(shot)) {
                 shot.recycle();
-                // X doesn't close it while a portal's "Move to the area" is up (13:04, 10 tries):
-                // two tries, then leave it and say so once.
-                if (++mapCloseTries <= 2) {
+                // X doesn't close it while a portal's "Move to the area" is up (13:04, 10 tries).
+                // Then tap the map a little off our arrow: walking off the portal drops the popup
+                // (the user, 13:05), and X works again.
+                if (++mapCloseTries % 2 == 1) {
                     Log.i(TAG, "follow: the big map is open, closing it");
                     closeMap();
-                } else if (mapCloseTries == 3) {
-                    Log.w(TAG, "follow: the big map won't close (a portal popup in front?), waiting");
+                } else {
+                    stepOffViaMap();
                 }
                 return;
             }
@@ -3849,6 +3850,24 @@ public class ClickService extends AccessibilityService {
             if (n >= tot * 0.9f) return true;
         }
         return false;
+    }
+
+    /** Big map open and stuck: tap ~80 px from our arrow toward the map's middle to walk off a portal. */
+    private void stepOffViaMap() {
+        captureRegionForOcr(0f, 0f, 1f, 1f, shot -> {
+            if (shot == null) return;
+            int[] arrow = mapIsOpen(shot) ? mapCluster(shot, true) : null;
+            shot.recycle();
+            if (arrow == null) return;
+            float cx = screenW * 0.5f, cy = screenH * 0.48f;
+            float dx = cx - arrow[0], dy = cy - arrow[1], len = Math.max(1f, (float) Math.hypot(dx, dy));
+            float step = screenW * 0.03f;
+            float tx = arrow[0] + dx / len * step, ty = arrow[1] + dy / len * step;
+            Log.i(TAG, "follow: map won't close (portal popup?) - tapping it at " + Math.round(tx) + "," + Math.round(ty)
+                    + " to walk off");
+            tapAt(tx, ty, "map step off");
+            followHoldUntil = SystemClock.uptimeMillis() + 2500;
+        });
     }
 
     private void closeMap() {
