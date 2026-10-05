@@ -1589,12 +1589,20 @@ public class ClickService extends AccessibilityService {
     // still shows "Team") and no member rows read: Campus Return without the 60 s wait. Only
     // once a party was seen since the start, and only after NO_PARTY_MS of both (several reads).
     private static final int NO_PARTY_MS = 10_000;
-    private long lastTeamSeenAt, lastTopReadAt, partyZeroSince;
+    private long lastTeamSeenAt, lastTopReadAt, partyZeroSince, lastNoHudReadAt;
 
     /** From the FS question read (top 66% of the screen): is the "Team" header there? */
     private void noteTeamHeader(List<MathQuestion.Line> lines) {
         long now = SystemClock.uptimeMillis();
         lastTopReadAt = now;
+        // Our own panel ("Lv. 106", "MMR") says it's the game screen: the login screen after a
+        // disconnect has no Team list either and fired the Campus Return (23:44:53).
+        boolean hud = false;
+        for (MathQuestion.Line l : lines) {
+            String t = l.text.trim().toLowerCase(java.util.Locale.ROOT);
+            if (l.box.left < screenW * 0.2f && l.box.top < screenH * 0.12f && (t.contains("mmr") || t.startsWith("lv"))) hud = true;
+        }
+        if (!hud) lastNoHudReadAt = now;
         for (MathQuestion.Line l : lines) {
             if (l.box.left < screenW * 0.2f && l.box.top < screenH * 0.35f
                     && l.text.trim().toLowerCase(java.util.Locale.ROOT).startsWith("team")) {
@@ -1612,7 +1620,8 @@ public class ClickService extends AccessibilityService {
         if (partyZeroSince == 0) partyZeroSince = now;
         if (partySize <= 0 || !running || manual || !fsMode()) return;   // never had a party this run
         boolean headerGone = lastTopReadAt > lastTeamSeenAt && now - lastTeamSeenAt >= NO_PARTY_MS
-                && now - lastTopReadAt < 5000;
+                && now - lastTopReadAt < 5000
+                && now - lastNoHudReadAt >= NO_PARTY_MS;                // our panel on every read meanwhile
         if (headerGone && now - partyZeroSince >= NO_PARTY_MS) {
             int before = partySize;
             partySize = 0;
