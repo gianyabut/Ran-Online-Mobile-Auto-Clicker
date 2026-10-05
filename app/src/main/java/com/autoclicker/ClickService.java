@@ -2798,9 +2798,11 @@ public class ClickService extends AccessibilityService {
                             n++;
                         }
                         if (n == 0) return;
-                        float nk = sum / n;
-                        if (nk < 5 || nk > 40) return;
-                        if (Math.abs(nk - k) > 0.5f) {
+                        float measured = sum / n;
+                        if (measured < 8 || measured > 30) return;
+                        // One tap is noisy (17.2 then 14.7 against 15.6, 19:21-19:24): move 30% of the way.
+                        float nk = k + (measured - k) * 0.3f;
+                        if (Math.abs(nk - k) > 0.2f) {
                             Log.i(TAG, "farmer: map scale for " + map + " " + k + " -> " + nk + " px per unit (tap read [" + rx + "," + ry + "])");
                             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putFloat("map_k_" + mapKey(map), nk).apply();
                         }
@@ -4250,7 +4252,8 @@ public class ClickService extends AccessibilityService {
     // joystick push moves which way in map coordinates is learned by two probe walks (E, N), and
     // learned again after a camera turn or when walking home stops getting closer.
     private static final float COORD_L = 0f, COORD_T = 0.95f, COORD_W = 0.35f, COORD_H = 0.05f;
-    private static final int COORD_EVERY_MS = 6000, LEASH_R = 6, LEASH_PROBE_MS = 2500;
+    // 10 since walking home by the map works well (the user, 19:24).
+    private static final int COORD_EVERY_MS = 6000, LEASH_R = 10, LEASH_PROBE_MS = 2500;
     private static final java.util.regex.Pattern COORD_TEXT =
             // "[" is sometimes read as l, I, | or ( ("TradingHolel123,119]", 19:02): the name stops
             // as early as it can so the slipped bracket isn't taken as part of it.
