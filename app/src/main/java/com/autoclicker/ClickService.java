@@ -3471,7 +3471,7 @@ public class ClickService extends AccessibilityService {
         captureRegionForOcr(0f, 0f, 0.92f, 0.74f, shot -> {
             if (shot == null) return;
             // A big map left open hides the Team list (and nothing else would close it, 13:00).
-            if (mapIsOpen(shot)) {
+            if (mapIsOpen(shot, 0.74f)) {
                 shot.recycle();
                 // X doesn't close it while a portal's "Move to the area" is up (13:04, 10 tries).
                 // Then tap the map a little off our arrow: walking off the portal drops the popup
@@ -3648,11 +3648,14 @@ public class ClickService extends AccessibilityService {
 
     private void mapFollow(long now) {
         lastMapFollowAt = now;
-        followHoldUntil = now + MAP_OPEN_MS + 2000;
+        followHoldUntil = now + MAP_OPEN_MS + 3500;             // room for a refused screenshot's retry
         tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
-        handler.postDelayed(() -> captureRegionForOcr(0f, 0f, 1f, 1f, shot -> {
-            if (shot == null) return;
-            boolean open = mapIsOpen(shot);
+        handler.postDelayed(() -> captureHalfScreen(shot -> {
+            if (shot == null) {
+                Log.w(TAG, "follow: couldn't take the map screenshot");
+                return;
+            }
+            boolean open = mapIsOpen(shot, 1f);
             int[] arrow = open ? mapCluster(shot, true) : null, m = open ? findMapM(shot) : null;
             Bitmap coord = null;
             try {
@@ -3760,16 +3763,10 @@ public class ClickService extends AccessibilityService {
                 return null;
             }
         }
-        Bitmap half;
-        try {
-            half = Bitmap.createScaledBitmap(shot, shot.getWidth() / 2, shot.getHeight() / 2, true);
-        } catch (RuntimeException | OutOfMemoryError e) {
-            return null;
-        }
-        int w = half.getWidth(), h = half.getHeight();
+        // shot is the half-size screenshot (captureHalfScreen): the template's scale.
+        int w = shot.getWidth(), h = shot.getHeight();
         int[] px = new int[w * h];
-        half.getPixels(px, 0, w, 0, 0, w, h);
-        if (half != shot) half.recycle();
+        shot.getPixels(px, 0, w, 0, 0, w, h);
         // Integral images of "orange" and "yellow" pixels.
         int[] io = new int[(w + 1) * (h + 1)], iy = new int[(w + 1) * (h + 1)];
         for (int y = 0; y < h; y++) {
@@ -3834,12 +3831,13 @@ public class ClickService extends AccessibilityService {
     }
 
     /** The big map has a light grey title bar right across the top (100% of a row vs <=51% otherwise). */
-    private boolean mapIsOpen(Bitmap shot) {
+    private boolean mapIsOpen(Bitmap shot, float heightShare) {
         int w = shot.getWidth(), h = shot.getHeight();
+        float fullH = h / heightShare;
         int[] row = new int[w];
         // Rows as a share of the screen: follow captures only the top 74%, which put 13% of the
         // capture just above the bar and the open map went unnoticed (13:02).
-        for (int y = Math.round(screenH * 0.08f); y < Math.min(h, Math.round(screenH * 0.13f)); y++) {
+        for (int y = Math.round(fullH * 0.08f); y < Math.min(h, Math.round(fullH * 0.13f)); y++) {
             shot.getPixels(row, 0, w, 0, y, w, 1);
             int n = 0, tot = 0;
             for (int x = Math.round(w * 0.05f); x < Math.round(w * 0.95f); x += 4) {
@@ -3854,9 +3852,9 @@ public class ClickService extends AccessibilityService {
 
     /** Big map open and stuck: tap ~80 px from our arrow toward the map's middle to walk off a portal. */
     private void stepOffViaMap() {
-        captureRegionForOcr(0f, 0f, 1f, 1f, shot -> {
+        captureHalfScreen(shot -> {
             if (shot == null) return;
-            int[] arrow = mapIsOpen(shot) ? mapCluster(shot, true) : null;
+            int[] arrow = mapIsOpen(shot, 1f) ? mapCluster(shot, true) : null;
             shot.recycle();
             if (arrow == null) return;
             float cx = screenW * 0.5f, cy = screenH * 0.48f;
@@ -3880,16 +3878,17 @@ public class ClickService extends AccessibilityService {
      * bars on top, and for the arrow the minimap corner (its own small arrow).
      */
     private int[] mapCluster(Bitmap shot, boolean arrow) {
+        // shot is half size: bins of 16 px and every pixel = 32 px bins at every 2nd pixel full size.
         int w = shot.getWidth(), h = shot.getHeight();
         int x0 = Math.round(w * 0.07f), x1 = Math.round(w * 0.97f), y0 = Math.round(h * 0.09f), y1 = Math.round(h * 0.86f);
-        final int bin = 32;
+        final int bin = 16;
         int bw = w / bin + 1, bh = h / bin + 1;
         int[] counts = new int[bw * bh];
         long[] sx = new long[bw * bh], sy = new long[bw * bh];
         int[] row = new int[w];
-        for (int y = y0; y < y1; y += 2) {
+        for (int y = y0; y < y1; y++) {
             shot.getPixels(row, 0, w, 0, y, w, 1);
-            for (int x = x0; x < x1; x += 2) {
+            for (int x = x0; x < x1; x++) {
                 int c = row[x], r = (c >> 16) & 0xff, g = (c >> 8) & 0xff, b = c & 0xff;
                 boolean hit = arrow
                         ? r < 110 && g > 100 && g < 165 && b > 130 && b > g + 5 && !(x > w * 0.78f && y < h * 0.3f)
@@ -3930,7 +3929,7 @@ public class ClickService extends AccessibilityService {
                 ay += sy[k];
             }
         }
-        return new int[]{(int) (ax / n), (int) (ay / n)};
+        return new int[]{(int) (ax / n) * 2, (int) (ay / n) * 2};
     }
 
     private void followWalk(float dx, float dy, int ms, long now) {
@@ -4352,10 +4351,18 @@ public class ClickService extends AccessibilityService {
     private boolean shotInFlight;
 
     private void shoot(TakeScreenshotCallback cb) {
+        shoot(cb, 0);
+    }
+
+    // Android refuses an accessibility screenshot taken too soon after the last one: the big map's
+    // came right after follow's own read and failed every time (13:14).
+    private static final int SHOT_RETRY_MS = 1100, SHOT_RETRIES = 2;
+
+    private void shoot(TakeScreenshotCallback cb, int retry) {
         long now = SystemClock.uptimeMillis();
         long wait = Math.max(gestureBusyUntil - now, userTouchAt + USER_TOUCH_SHOT_MS - now);
         if (wait > 0) {
-            handler.postDelayed(() -> shoot(cb), wait + 20);
+            handler.postDelayed(() -> shoot(cb, retry), wait + 20);
             return;
         }
         shotInFlight = true;
@@ -4370,6 +4377,11 @@ public class ClickService extends AccessibilityService {
             @Override
             public void onFailure(int errorCode) {
                 shotInFlight = false;
+                if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT && retry < SHOT_RETRIES) {
+                    handler.postDelayed(() -> shoot(cb, retry + 1), SHOT_RETRY_MS);
+                    return;
+                }
+                if (errorCode != ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) Log.w(TAG, "screenshot failed: " + errorCode);
                 cb.onFailure(errorCode);
             }
         });
@@ -4718,6 +4730,46 @@ public class ClickService extends AccessibilityService {
      * small area like the chat log is cheap to grab often. The callback owns the bitmap (OCR recycles
      * it), or gets null if nothing could be read.
      */
+    /**
+     * The whole screen at half size (~4 MB instead of 16): the full-size copy for the big map came
+     * back empty again and again under memory pressure (13:11-13:12), and follow just stood there.
+     */
+    private void captureHalfScreen(Consumer<Bitmap> onShot) {
+        if (!canReadScreen()) {
+            onShot.accept(null);
+            return;
+        }
+        shoot(new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult result) {
+                HardwareBuffer buffer = result.getHardwareBuffer();
+                Bitmap hw = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
+                buffer.close();
+                if (hw == null) {
+                    onShot.accept(null);
+                    return;
+                }
+                screenW = hw.getWidth();
+                screenH = hw.getHeight();
+                Bitmap soft = null;
+                try {
+                    Bitmap scaled = Bitmap.createScaledBitmap(hw, screenW / 2, screenH / 2, true);
+                    soft = scaled.copy(Bitmap.Config.ARGB_8888, false);
+                    if (scaled != hw) scaled.recycle();
+                } catch (RuntimeException | OutOfMemoryError e) {
+                    Log.w(TAG, "couldn't copy the half screen: " + e);
+                }
+                hw.recycle();
+                onShot.accept(soft);
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                onShot.accept(null);
+            }
+        });
+    }
+
     private void captureRegionForOcr(float fl, float ft, float fw, float fh, Consumer<Bitmap> onShot) {
         if (!canReadScreen()) {
             onShot.accept(null);
