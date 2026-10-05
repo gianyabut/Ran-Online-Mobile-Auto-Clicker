@@ -3554,8 +3554,11 @@ public class ClickService extends AccessibilityService {
             }
             followNoPartyLogged = false;
         } else if (leaderKey == null) {
-            if (!followNoPartyLogged) Log.i(TAG, "follow: no Team list on screen, nobody to follow");
+            // Team list collapsed (13:19): no name to look for on screen, but the big map's M is
+            // the party master all the same.
+            if (!followNoPartyLogged) Log.i(TAG, "follow: no Team list on screen - following the M on the map");
             followNoPartyLogged = true;
+            if (now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) mapFollow(now);
             return;
         }
         // Their name tag in the world (not the Team list, the top strip or the minimap).
