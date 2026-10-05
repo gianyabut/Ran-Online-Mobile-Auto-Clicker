@@ -2644,6 +2644,15 @@ public class ClickService extends AccessibilityService {
                 }
                 return;
             }
+            // Reads stopped matching for 80 s while walking home (18:57:13-18:58:39) with the line
+            // plainly on screen: say what was read, now and then.
+            long t = SystemClock.uptimeMillis();
+            if (t - lastCoordMissLogAt > 30_000) {
+                lastCoordMissLogAt = t;
+                StringBuilder sb = new StringBuilder();
+                for (MathQuestion.Line l : lines) sb.append(" | ").append(l.text);
+                Log.d(TAG, "coordinates not read (" + w + "x" + h + "):" + sb);
+            }
         });
     }
 
@@ -2665,6 +2674,13 @@ public class ClickService extends AccessibilityService {
                     + "]), farming here a minute");
             Telegram.send(this, "\u26A0 Ran Online: couldn't walk back to the home spot " + homeMap + "[" + homeX + "," + homeY
                     + "], at [" + posX + "," + posY + "]. Farming there; trying again in a minute.");
+            schedulePump(0);
+            return false;
+        }
+        if (!fresh && returning && now - Math.max(posAt, returnStartedAt) > 15_000) {
+            returning = false;
+            returnGiveUpUntil = now + 60_000;
+            Log.w(TAG, "farmer: no position read for 15 s while walking home, farming here a minute");
             schedulePump(0);
             return false;
         }
@@ -4080,7 +4096,7 @@ public class ClickService extends AccessibilityService {
     private static final String KEY_HOME = "farm_home";
     private TextView leashButton;
     private int homeX, homeY, posX, posY;
-    private long posAt, lastCoordReadAt, lastChatReadAt;
+    private long posAt, lastCoordReadAt, lastChatReadAt, lastCoordMissLogAt;
     private static final int CHAT_READ_MS = 4000;
     private int calStage, leashMisses;
     private boolean calValid;
