@@ -3496,6 +3496,23 @@ public class ClickService extends AccessibilityService {
             if (!looksLikePlayerName(stripRowMark(l.text))) continue;
             if (first == null || l.box.top < first.box.top) first = l;
         }
+        if (portalChase) {
+            Rect moveBtn = null;
+            boolean asked = false;
+            for (MathQuestion.Line l : lines) {
+                String tl = l.text.toLowerCase(java.util.Locale.ROOT);
+                if (tl.contains("move to the area")) asked = true;
+                else if (tl.replaceAll("[^a-z]", "").equals("move")) moveBtn = l.box;
+            }
+            if (asked && moveBtn != null) {
+                Log.i(TAG, "follow: at the portal the master took - Move");
+                tapAt(moveBtn.exactCenterX(), moveBtn.exactCenterY(), "portal move");
+                portalChase = false;
+                lastMapM = null;
+                followHoldUntil = now + 6000;                   // the new map loads
+                return;
+            }
+        }
         if (now - lastTeamDumpAt > 10_000) {
             lastTeamDumpAt = now;
             Log.d(TAG, "follow: team rows" + (header == null ? " (no header)" : "") + ":" + seen);
@@ -3597,6 +3614,8 @@ public class ClickService extends AccessibilityService {
     // past it the same way to step in. The new map shows the M again.
     private static final int LAST_M_KEEP_MS = 120_000, PORTAL_PUSHES = 3;
     private int[] lastMapM, lastMapArrow;
+    private String lastMapMMap;
+    private boolean portalChase;
     private long lastMapMAt;
     private int portalPushes;
 
@@ -3608,7 +3627,32 @@ public class ClickService extends AccessibilityService {
             if (shot == null) return;
             boolean open = mapIsOpen(shot);
             int[] arrow = open ? mapCluster(shot, true) : null, m = open ? findMapM(shot) : null;
+            Bitmap coord = null;
+            try {
+                int cx = Math.round(shot.getWidth() * COORD_L), cy = Math.round(shot.getHeight() * COORD_T);
+                coord = Bitmap.createBitmap(shot, cx, cy, Math.round(shot.getWidth() * COORD_W),
+                        Math.min(Math.round(shot.getHeight() * COORD_H), shot.getHeight() - cy));
+            } catch (RuntimeException | OutOfMemoryError ignored) {
+            }
             shot.recycle();
+            if (coord == null) {
+                mapDecide(open, arrow, m, null);
+                return;
+            }
+            Ocr.read(coord, (lines, words) -> {
+                String map = null;
+                for (MathQuestion.Line l : lines) {
+                    java.util.regex.Matcher mm = COORD_TEXT.matcher(l.text);
+                    if (mm.find()) map = mm.group(1);
+                }
+                mapDecide(open, arrow, m, map);
+            });
+        }), MAP_OPEN_MS);
+    }
+
+    /** What to do with one look at the big map (map = the map's name from the coordinates line). */
+    private void mapDecide(boolean open, int[] arrow, int[] m, String map) {
+        {
             long t = SystemClock.uptimeMillis();
             if (!open) {
                 // Skill buttons pass for the arrow and an orange pole for the M on the normal screen,
@@ -3616,7 +3660,10 @@ public class ClickService extends AccessibilityService {
                 Log.i(TAG, "follow: the map didn't open");
                 return;
             }
-            if (m == null && arrow != null && lastMapM != null && t - lastMapMAt < LAST_M_KEEP_MS) {
+            // The last M spot only means something on the map it was seen on (not after a portal).
+            boolean sameMapAsLastM = lastMapMMap == null || map == null || sameMap(map, lastMapMMap);
+            if (m == null && arrow != null && lastMapM != null && t - lastMapMAt < LAST_M_KEEP_MS && sameMapAsLastM) {
+                portalChase = true;
                 float away = (float) Math.hypot(lastMapM[0] - arrow[0], lastMapM[1] - arrow[1]);
                 if (away > screenW * 0.025f) {
                     Log.i(TAG, "follow: no M on this map - walking to where it was last seen " + lastMapM[0] + "," + lastMapM[1]
@@ -3640,7 +3687,8 @@ public class ClickService extends AccessibilityService {
                 return;
             }
             if (arrow == null || m == null) {
-                Log.i(TAG, "follow: map open, " + (m == null ? "no M icon on it (party master on another map?)" : "can't find our arrow"));
+                Log.i(TAG, "follow: map open" + (map != null ? " (" + map + ")" : "") + ", "
+                        + (m == null ? "no M on it (another map, or right under our arrow)" : "can't find our arrow"));
                 closeMap();
                 return;
             }
@@ -3648,7 +3696,9 @@ public class ClickService extends AccessibilityService {
             if (lastMapM == null || Math.hypot(m[0] - lastMapM[0], m[1] - lastMapM[1]) > 4) lastMapArrow = arrow;
             lastMapM = m;
             lastMapMAt = t;
+            lastMapMMap = map;
             portalPushes = 0;
+            portalChase = false;
             float d = (float) Math.hypot(m[0] - arrow[0], m[1] - arrow[1]);
             if (d < screenW * 0.03f) {
                 Log.i(TAG, "follow: map: the M is right by us");
@@ -3660,7 +3710,7 @@ public class ClickService extends AccessibilityService {
             tapAt(m[0], m[1], "map M");
             followHoldUntil = t + MAP_WALK_MS;
             handler.postDelayed(this::closeMap, 600);
-        }), MAP_OPEN_MS);
+        }
     }
 
     // The party master's icon on the big map: an orange-edged grey square with a yellow M, 50 px
