@@ -3489,6 +3489,7 @@ public class ClickService extends AccessibilityService {
         StringBuilder seen = new StringBuilder();
         for (MathQuestion.Line l : lines) {
             if (!inTeamList(l.box) || l.text.toLowerCase(java.util.Locale.ROOT).contains("team")) continue;
+            if (header == null && leaderKey != null) continue;
             if (header != null && (l.box.top < header.top + header.height() / 2 || l.box.top > header.bottom + screenH * 0.12f
                     || l.box.left > header.left + screenW * 0.08f)) continue;
             seen.append(" | ").append(l.text.trim());
@@ -3561,8 +3562,13 @@ public class ClickService extends AccessibilityService {
             followWalk(dx * push, dy * push, ms, now);
             return;
         }
-        // Not on screen: head the way they were last seen for a few steps, then wait and say so.
+        // Not on screen: the big map shows the party master as an "M" icon, and tapping a spot on
+        // it walks there by itself, around walls (the user's idea, 12:45).
         lastWalkLeaderDist = 0;
+        if (now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
+            mapFollow(now);
+            return;
+        }
         if (leaderSeenAt == 0) {
             if (!followWaitLogged) Log.i(TAG, "follow: waiting for " + leaderShown + " to come on screen");
             followWaitLogged = true;
@@ -3580,6 +3586,126 @@ public class ClickService extends AccessibilityService {
             Telegram.send(this, "\uD83E\uDDED Ran Online: lost the party master (" + leaderShown
                     + ") for a minute. Follow is waiting where it is.");
         }
+    }
+
+    // The minimap (top right) opens the big map; X (top right) closes it.
+    private static final float MINIMAP_X = 2300 / 2560f, MINIMAP_Y = 270 / 1600f;
+    private static final int MAP_OPEN_MS = 1200, MAP_FOLLOW_GAP_MS = 5000, MAP_WALK_MS = 4000;
+    private long lastMapFollowAt;
+
+    private void mapFollow(long now) {
+        lastMapFollowAt = now;
+        followHoldUntil = now + MAP_OPEN_MS + 2000;
+        tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
+        handler.postDelayed(() -> captureRegionForOcr(0f, 0f, 1f, 1f, shot -> {
+            if (shot == null) return;
+            boolean open = mapIsOpen(shot);
+            int[] arrow = open ? mapCluster(shot, true) : null, m = open ? mapCluster(shot, false) : null;
+            shot.recycle();
+            long t = SystemClock.uptimeMillis();
+            if (!open) {
+                // Skill buttons pass for the arrow and an orange pole for the M on the normal screen,
+                // so only the map's own title bar says it's open. Don't press X (Server List).
+                Log.i(TAG, "follow: the map didn't open");
+                return;
+            }
+            if (arrow == null || m == null) {
+                Log.i(TAG, "follow: map open, " + (m == null ? "no M icon on it (party master on another map?)" : "can't find our arrow"));
+                closeMap();
+                return;
+            }
+            float d = (float) Math.hypot(m[0] - arrow[0], m[1] - arrow[1]);
+            if (d < screenW * 0.03f) {
+                Log.i(TAG, "follow: map: the M is right by us");
+                closeMap();
+                return;
+            }
+            Log.i(TAG, "follow: map: M at " + m[0] + "," + m[1] + ", us at " + arrow[0] + "," + arrow[1]
+                    + " (" + Math.round(d) + " px), tapping it");
+            tapAt(m[0], m[1], "map M");
+            followHoldUntil = t + MAP_WALK_MS;
+            handler.postDelayed(this::closeMap, 600);
+        }), MAP_OPEN_MS);
+    }
+
+    /** The big map has a light grey title bar right across the top (100% of a row vs <=51% otherwise). */
+    private boolean mapIsOpen(Bitmap shot) {
+        int w = shot.getWidth(), h = shot.getHeight();
+        int[] row = new int[w];
+        for (int y = Math.round(h * 0.08f); y < Math.round(h * 0.13f); y++) {
+            shot.getPixels(row, 0, w, 0, y, w, 1);
+            int n = 0, tot = 0;
+            for (int x = Math.round(w * 0.05f); x < Math.round(w * 0.95f); x += 4) {
+                int c = row[x], r = (c >> 16) & 0xff, g = (c >> 8) & 0xff, b = c & 0xff;
+                tot++;
+                if (r > 165 && g > 165 && b > 165 && Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b)) < 25) n++;
+            }
+            if (n >= tot * 0.9f) return true;
+        }
+        return false;
+    }
+
+    private void closeMap() {
+        tapAt(screenW * PANEL_X_X, screenH * PANEL_X_Y, "close map");
+    }
+
+    /**
+     * Centre of the densest patch of the big map's party-master icon (orange border, arrow=false)
+     * or our own arrow (teal ring, arrow=true), or null. Skips the bot's bar on the left, the HP
+     * bars on top, and for the arrow the minimap corner (its own small arrow).
+     */
+    private int[] mapCluster(Bitmap shot, boolean arrow) {
+        int w = shot.getWidth(), h = shot.getHeight();
+        int x0 = Math.round(w * 0.07f), x1 = Math.round(w * 0.97f), y0 = Math.round(h * 0.09f), y1 = Math.round(h * 0.86f);
+        final int bin = 32;
+        int bw = w / bin + 1, bh = h / bin + 1;
+        int[] counts = new int[bw * bh];
+        long[] sx = new long[bw * bh], sy = new long[bw * bh];
+        int[] row = new int[w];
+        for (int y = y0; y < y1; y += 2) {
+            shot.getPixels(row, 0, w, 0, y, w, 1);
+            for (int x = x0; x < x1; x += 2) {
+                int c = row[x], r = (c >> 16) & 0xff, g = (c >> 8) & 0xff, b = c & 0xff;
+                boolean hit = arrow
+                        ? r < 110 && g > 100 && g < 165 && b > 130 && b > g + 5 && !(x > w * 0.78f && y < h * 0.3f)
+                        : r > 215 && g > 120 && g < 185 && b < 100 && r - b > 130;
+                if (!hit) continue;
+                int k = (y / bin) * bw + x / bin;
+                counts[k]++;
+                sx[k] += x;
+                sy[k] += y;
+            }
+        }
+        int best = -1, bestSum = 0;
+        for (int by = 0; by < bh; by++) {
+            for (int bx = 0; bx < bw; bx++) {
+                int sum = 0;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int nx = bx + dx, ny = by + dy;
+                        if (nx >= 0 && ny >= 0 && nx < bw && ny < bh) sum += counts[ny * bw + nx];
+                    }
+                }
+                if (sum > bestSum) {
+                    bestSum = sum;
+                    best = by * bw + bx;
+                }
+            }
+        }
+        if (best < 0 || bestSum < 6) return null;
+        int bx = best % bw, by = best / bw;
+        long n = 0, ax = 0, ay = 0;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int nx = bx + dx, ny = by + dy;
+                if (nx < 0 || ny < 0 || nx >= bw || ny >= bh) continue;
+                int k = ny * bw + nx;
+                n += counts[k];
+                ax += sx[k];
+                ay += sy[k];
+            }
+        }
+        return new int[]{(int) (ax / n), (int) (ay / n)};
     }
 
     private void followWalk(float dx, float dy, int ms, long now) {
