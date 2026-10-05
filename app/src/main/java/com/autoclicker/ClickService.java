@@ -4231,7 +4231,7 @@ public class ClickService extends AccessibilityService {
         watchHandler.postDelayed(questionWatchTick, QUESTION_WATCH_MS);
         if (running && (farmer || follow)) return;   // Farmer/Follow read it from their own screenshots
         // The scan loop's screenshots read it too (FS); a second screenshot would only be refused.
-        if (running && SystemClock.uptimeMillis() - lastScanShotAt < QUESTION_WATCH_MS) return;
+        if (running && SystemClock.uptimeMillis() - lastScanShotAt < QUESTION_WATCH_MS * 3) return;   // gaps of a few s happen
         if (!canReadScreen()) return;
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         if (!game.equals(foregroundPackage())) return;
