@@ -243,11 +243,20 @@ public class ClickService extends AccessibilityService {
     // shows. None by DROP_DECIDE_MS: nothing dropped, attack at once. Attacking "right away" walked
     // off from drops whose hand hadn't shown yet (the user, 07:34).
     private static final int DROP_DECIDE_MS = 1500, DROP_MAX_STEPS = 3;
+    private static final float KILL_MAX_HP = 0.6f;
     private static final String KEY_LOOT_NAMES = "farm_loot_names";
     private static final String[] LOOT_WORDS = {"potion", "burr", "box", "scroll", "card", "ore", "stone",
             "gem", "crystal", "protection", "coin", "gold", "elixir", "pill", "ticket", "chest"};
     private final java.util.Set<String> knownLoot = new java.util.HashSet<>();
     private float dropX, dropY;
+    // Screen text that only looked like a drop (the "10" on the A quick slot read as gold, 08:03:
+    // three walks away from the monsters after every kill). A label whose distance doesn't change
+    // while walking to it is part of the screen, not the ground: that spot is ignored from then on.
+    private final List<Rect> staticLabels = new ArrayList<>();
+    private Rect dropBox;
+    private String dropText;
+    private float dropFirstD;
+    private long dropStepAt;
     private long dropSeenAt, postKillOcrAt;
     private int dropSteps;
     // Camera: one-finger drag across empty ground turns it (the user; a 400 px drag turned the view
@@ -815,6 +824,12 @@ public class ClickService extends AccessibilityService {
         LinearLayout.LayoutParams manualGap = new LinearLayout.LayoutParams(dp(48), dp(48));
         manualGap.topMargin = dp(8);
         bar.addView(manualButton, manualGap);
+        leashButton = roundButton("\u2693");
+        leashButton.setTextSize(18);
+        leashButton.setBackground(circle(Color.rgb(30, 130, 140)));
+        LinearLayout.LayoutParams leashGap = new LinearLayout.LayoutParams(dp(48), dp(48));
+        leashGap.topMargin = dp(8);
+        bar.addView(leashButton, leashGap);
         barParams = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
         barParams.x = dp(8);
         barParams.y = dp(200);
@@ -822,6 +837,8 @@ public class ClickService extends AccessibilityService {
         makeDraggable(add, bar, barParams, this::addTargetFromBar, null);
         makeDraggable(fullBuffButton, bar, barParams, this::onFullBuffButton, null);
         makeDraggable(manualButton, bar, barParams, this::onManualButton, null);
+        makeDraggable(leashButton, bar, barParams, this::onSetLeash, null);
+        loadHome();
         makeDraggable(modeButton, bar, barParams, this::onModeButton, null);
         if (!safeAdd(bar, barParams)) {
             // Half connected (switched back on too soon after a crash): nothing will work until
@@ -985,7 +1002,7 @@ public class ClickService extends AccessibilityService {
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
         deadUntil = 0;
         if (run) {
-            homeMap = null;                                     // home = where this start happens
+            loadHome();                                         // the ⚓ spot; none set = roam (the user, 08:03)
             calStage = 0;
             calValid = false;
             leashMisses = 0;
@@ -1046,6 +1063,7 @@ public class ClickService extends AccessibilityService {
         // FB and EG/LL only mean something in FS.
         fullBuffButton.setVisibility(on || !fsMode() ? View.GONE : View.VISIBLE);
         modeButton.setVisibility(on || booster ? View.GONE : View.VISIBLE);   // EG/LL, or KILL/LURE in Farmer
+        leashButton.setVisibility(!on && farmer ? View.VISIBLE : View.GONE);
         LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) manualButton.getLayoutParams();
         lp.topMargin = on ? 0 : dp(8);
         manualButton.setLayoutParams(lp);
@@ -1736,6 +1754,7 @@ public class ClickService extends AccessibilityService {
         if (!manual) {
             fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
             modeButton.setVisibility(booster ? View.GONE : View.VISIBLE);
+            leashButton.setVisibility(farmer ? View.VISIBLE : View.GONE);
         }
         for (Target t : targets) {
             t.root.setVisibility(on || manual || overlaysHidden ? View.GONE : View.VISIBLE);
@@ -1767,6 +1786,7 @@ public class ClickService extends AccessibilityService {
         if (!manual) {
             fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
             modeButton.setVisibility(booster ? View.GONE : View.VISIBLE);
+            leashButton.setVisibility(farmer ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -1996,7 +2016,14 @@ public class ClickService extends AccessibilityService {
         // and the hand then walked the character all the way back (the user, 12:55).
         // Drops show their hand ~1 s or ~5 s after the kill (12 min of kills, 2026-10-05 06:45-06:57:
         // 0.9-1.0 s or 4.96-5.02 s), so wait up to POST_KILL_HOLD_MS; the hand ends it early.
-        if (!target && farmTargetHp >= 0 && lootStartedAt == 0 && now >= lootIgnoreUntil) {
+        // Only a bar that went away reading low is a kill: skating monsters slide out of the selection
+        // with HP left, and holding for their "drop" walked away from a live monster (the user, 08:05).
+        // One punch takes ~40% (kills from 37-40% dropped loot, 08:07), so "low" is up to KILL_MAX_HP.
+        if (!target && farmTargetHp > KILL_MAX_HP && lootStartedAt == 0) {
+            Log.i(TAG, "farmer: target lost at " + Math.round(farmTargetHp * 100) + "%, not a kill - attacking on");
+            schedulePump(0);
+        }
+        if (!target && farmTargetHp >= 0 && farmTargetHp <= KILL_MAX_HP && lootStartedAt == 0 && now >= lootIgnoreUntil) {
             postKillUntil = now + POST_KILL_HOLD_MS;
             busyUntil = Math.max(busyUntil, postKillUntil);
             killAt = now;
@@ -2009,8 +2036,21 @@ public class ClickService extends AccessibilityService {
                 // A drop lies there but the hand isn't up: walk to it (short steps).
                 float dx = dropX - screenW * 0.5f, dy = dropY - screenH * 0.53f;
                 float d = (float) Math.hypot(dx, dy);
-                if (dropSteps < DROP_MAX_STEPS && now - killAt >= 900 && d > screenW * 0.03f && canFarmMove(now)) {
+                if (dropSteps == 0) dropFirstD = d;
+                if (dropSteps > 0 && dropSeenAt > dropStepAt + 800 && Math.abs(d - dropFirstD) < screenW * 0.008f && dropBox != null
+                        && canFarmMove(now)) {
+                    // Walked toward it and it stayed put on the screen: screen text, not a drop.
+                    if (staticLabels.size() >= 8) staticLabels.remove(0);
+                    staticLabels.add(new Rect(dropBox));
+                    Log.i(TAG, "farmer: \"" + dropText + "\" at " + dropBox.centerX() + "," + dropBox.centerY()
+                            + " didn't move while walking - screen text, ignoring it; attacking");
+                    dropSeenAt = 0;
+                    postKillUntil = now;
+                    busyUntil = now;
+                    schedulePump(0);
+                } else if (dropSteps < DROP_MAX_STEPS && now - killAt >= 900 && d > screenW * 0.03f && canFarmMove(now)) {
                     dropSteps++;
+                    dropStepAt = now;
                     int ms = (int) Math.max(300, Math.min(1000, d * 900f / LURE_RUN_PX_PER_S));
                     float push = screenW * FARM_PUSH;
                     long window = FARM_PUSH_MS + ms;
@@ -2389,19 +2429,41 @@ public class ClickService extends AccessibilityService {
             Rect b = l.box;
             if (b.bottom <= screenH * HUD_TOP_H || (b.right > screenW * 0.76f && b.top < screenH * 0.32f)) continue;
             if (b.left < screenW * HUD_LEFT_W && b.top < screenH * HUD_LEFT_H) continue;
+            if (onGameControls(b) || isStaticLabel(b)) continue;
             if (!isDropLabel(l.text, b)) continue;
             float d = fromCharacter(b);
             if (d < bestD) {
                 bestD = d;
                 best = b;
+                dropText = l.text.trim();
             }
         }
         postKillOcrAt = now;
         if (best == null) return;
+        dropBox = new Rect(best);
         dropX = best.exactCenterX();
         dropY = best.bottom + best.height() * 1.2f;               // the item lies under its label
-        if (dropSeenAt <= killAt) Log.i(TAG, "farmer: drop on the ground " + Math.round(bestD) + " px away");
+        if (dropSeenAt <= killAt) Log.i(TAG, "farmer: drop on the ground " + Math.round(bestD) + " px away (\"" + dropText
+                + "\" at " + best.centerX() + "," + best.centerY() + ")");
         dropSeenAt = now;
+    }
+
+    /** The game's own controls: skills and quick slots (right), chat box, joystick, coordinates line. */
+    private boolean onGameControls(Rect b) {
+        float x = b.exactCenterX() / screenW, y = b.exactCenterY() / screenH;
+        if (x > 0.70f && y > 0.18f) return true;
+        if (x > 0.27f && x < 0.63f && y > 0.71f) return true;
+        if (x < 0.20f && y > 0.60f) return true;
+        return y > 0.95f;
+    }
+
+    private boolean isStaticLabel(Rect b) {
+        for (Rect r : staticLabels) {
+            if (Math.abs(r.centerX() - b.centerX()) < screenW * 0.015f && Math.abs(r.centerY() - b.centerY()) < screenH * 0.015f) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isDropLabel(String text, Rect box) {
@@ -2413,6 +2475,94 @@ public class ClickService extends AccessibilityService {
         for (String w : LOOT_WORDS) if (k.contains(w)) return true;
         for (String n : knownLoot) if (k.equals(n) || (k.length() >= 6 && (n.contains(k) || k.contains(n)))) return true;
         return false;
+    }
+
+    /** Teal when a home is set (leashed), grey when roaming. */
+    private void refreshLeashButton() {
+        if (leashButton != null) {
+            leashButton.setBackground(circle(homeMap != null ? Color.rgb(30, 130, 140) : Color.rgb(110, 110, 110)));
+        }
+    }
+
+    private void loadHome() {
+        homeMap = null;
+        String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_HOME, null);
+        if (saved == null) return;
+        String[] p = saved.split(",");
+        if (p.length != 3) return;
+        try {
+            homeX = Integer.parseInt(p[1]);
+            homeY = Integer.parseInt(p[2]);
+            homeMap = p[0];
+        } catch (NumberFormatException ignored) {
+        }
+        refreshLeashButton();
+    }
+
+    /** ⚓: no home set -> make where the character stands home; home set -> clear it and roam. */
+    private void onSetLeash() {
+        shake(leashButton);
+        if (homeMap != null) {
+            homeMap = null;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_HOME).apply();
+            refreshLeashButton();
+            Log.i(TAG, "farmer: home cleared, roaming (button)");
+            android.widget.Toast.makeText(this, "Leash off: roaming", android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+        readHomeSpot(3);
+    }
+
+    /** Reads the coordinates for ⚓; the read misses about half the time (08:05), so try a few times. */
+    private void readHomeSpot(int tries) {
+        captureRegionForOcr(COORD_L, COORD_T, COORD_W, COORD_H, crop -> {
+            if (crop == null) {
+                homeReadFailed(tries);
+                return;
+            }
+            Ocr.read(crop, (lines, words) -> {
+                for (MathQuestion.Line l : lines) {
+                    java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
+                    if (!m.find()) continue;
+                    homeMap = m.group(1);
+                    homeX = Integer.parseInt(m.group(2));
+                    homeY = Integer.parseInt(m.group(3));
+                    calValid = false;
+                    calStage = 0;
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                            .putString(KEY_HOME, homeMap + "," + homeX + "," + homeY).apply();
+                    refreshLeashButton();
+                    String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + LEASH_R;
+                    Log.i(TAG, "farmer: " + msg + " (button)");
+                    android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                homeReadFailed(tries);
+            });
+        });
+    }
+
+    private void homeReadFailed(int tries) {
+        if (tries > 1) {
+            handler.postDelayed(() -> readHomeSpot(tries - 1), 500);
+            return;
+        }
+        if (posMap != null && SystemClock.uptimeMillis() - posAt < 15_000) {
+            // The farming loop read the coordinates moments ago: use those.
+            homeMap = posMap;
+            homeX = posX;
+            homeY = posY;
+            calValid = false;
+            calStage = 0;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_HOME, homeMap + "," + homeX + "," + homeY).apply();
+            refreshLeashButton();
+            String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + LEASH_R;
+            Log.i(TAG, "farmer: " + msg + " (button, last reading)");
+            android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Log.i(TAG, "farmer: couldn't read the coordinates for the home spot");
+        android.widget.Toast.makeText(this, "Couldn't read the coordinates, tap again", android.widget.Toast.LENGTH_SHORT).show();
     }
 
     private void farmCoordRead(Bitmap shot) {
@@ -2434,12 +2584,6 @@ public class ClickService extends AccessibilityService {
                 posX = Integer.parseInt(m.group(2));
                 posY = Integer.parseInt(m.group(3));
                 posAt = SystemClock.uptimeMillis();
-                if (homeMap == null) {
-                    homeMap = posMap;
-                    homeX = posX;
-                    homeY = posY;
-                    Log.i(TAG, "farmer: home spot " + homeMap + "[" + homeX + "," + homeY + "], staying within " + LEASH_R);
-                }
                 return;
             }
         });
@@ -3379,6 +3523,9 @@ public class ClickService extends AccessibilityService {
     private static final java.util.regex.Pattern COORD_TEXT =
             java.util.regex.Pattern.compile("([A-Za-z_]{3,})\\s*\\[\\s*(\\d{1,4})\\s*[,.]\\s*(\\d{1,4})\\s*\\]");
     private String homeMap, posMap;
+    // ⚓ on the bar (Farmer): set home to where the character stands now; kept across restarts.
+    private static final String KEY_HOME = "farm_home";
+    private TextView leashButton;
     private int homeX, homeY, posX, posY;
     private long posAt, lastCoordReadAt, lastChatReadAt;
     private static final int CHAT_READ_MS = 4000;
@@ -4445,9 +4592,15 @@ public class ClickService extends AccessibilityService {
         if (!running || manual) return;
         CharSequence cls = event.getClassName(), pkg = event.getPackageName();
         String c = cls != null ? cls.toString() : "";
-        boolean usb = c.contains("UsbDetails") || c.contains("UsbModeChooser") || c.contains("UsbPermission");
+        // MtpConnectionActivity = the "USB connection error ... Got it" screen (07:51).
+        // Never a permission/consent dialog: those are the user's call, not something to auto-close.
+        if (c.contains("Permission") || c.contains("Debugging")) return;
+        boolean usb = c.contains("UsbDetails") || c.contains("UsbModeChooser")
+                || c.contains("MtpConnection") || c.contains("connecteddevice.usb");
+        boolean infoOnly = c.contains("MtpConnection");
         if (!usb && pkg != null && (pkg.toString().equals("com.android.settings") || pkg.toString().equals("com.android.systemui"))) {
             String lower = windowText(event).toLowerCase(java.util.Locale.ROOT);
+            if (lower.contains("allow") || lower.contains("permission")) return;   // a consent dialog
             usb = lower.contains("usb") && (lower.contains("file transfer") || lower.contains("charging only")
                     || lower.contains("use usb") || lower.contains("usb preferences") || lower.contains("transfer files"));
         }
@@ -4455,11 +4608,52 @@ public class ClickService extends AccessibilityService {
         String what = c.isEmpty() ? String.valueOf(pkg) : c;
         handler.postDelayed(() -> {
             String front = foregroundPackage();
-            if (front != null && (front.equals("com.android.settings") || front.equals("com.android.systemui"))) {
-                Log.i(TAG, "USB popup over the game (" + what + "), closing it with Back");
-                performGlobalAction(GLOBAL_ACTION_BACK);
+            if (front != null && (front.equals("com.android.settings") || front.equals("com.android.systemui"))
+                    && !activeWindowAsksConsent()) {
+                // Its own button first ("Got it" / "OK" / "Cancel"), Back if there's none.
+                // Only the informational "USB connection error" screen gets its button pressed.
+                if (infoOnly && clickButton("got it", "close")) {
+                    Log.i(TAG, "USB popup over the game (" + what + "), pressed its button");
+                } else {
+                    Log.i(TAG, "USB popup over the game (" + what + "), closing it with Back");
+                    performGlobalAction(GLOBAL_ACTION_BACK);
+                }
             }
         }, 700);
+    }
+
+    /** The window in front asks to allow/permit something (USB debugging, device access): hands off. */
+    private boolean activeWindowAsksConsent() {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) return true;                      // can't tell: leave it alone
+            for (String w : new String[]{"allow", "permission", "debugging", "always"}) {
+                if (!root.findAccessibilityNodeInfosByText(w).isEmpty()) return true;
+            }
+        } catch (RuntimeException e) {
+            return true;
+        }
+        return false;
+    }
+
+    /** Clicks the first button in the active window whose text is one of names (any case). */
+    private boolean clickButton(String... names) {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) return false;
+            for (String n : names) {
+                for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(n)) {
+                    CharSequence t = node.getText();
+                    if (t == null || !t.toString().trim().equalsIgnoreCase(n)) continue;
+                    AccessibilityNodeInfo c = node;
+                    while (c != null && !c.isClickable()) c = c.getParent();
+                    if (c != null && c.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // window changed while looking
+        }
+        return false;
     }
 
     private void checkGameDialog(AccessibilityEvent event) {
