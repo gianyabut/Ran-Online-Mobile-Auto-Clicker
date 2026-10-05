@@ -1461,12 +1461,31 @@ public class ClickService extends AccessibilityService {
         boolean first = partySize < 0;
         int oldStart = waveStartMobs();
         int oldEnd = waveEndMobs();
+        int before = partySize;
         partySize = members;
+        if (before > CAMPUS_PARTY && members <= CAMPUS_PARTY) partyLeft(before, members);
         // Only say so when the numbers it goes by change.
         if (first || waveStartMobs() != oldStart || waveEndMobs() != oldEnd) {
             Log.i(TAG, "party of " + members + ": wave at " + waveStartMobs() + "+ monsters, cleared at "
                     + waveEndMobs() + " or fewer");
         }
+    }
+
+    // FS (the user, 23:10): the party down to 3 or fewer (for PARTY_SHRINK_MS, so not a misread)
+    // -> the Campus Return card in quick slot D, then stop: there's nobody left to support.
+    private static final int CAMPUS_PARTY = 3;
+    private static final float CAMPUS_CARD_X = 2470 / 2560f, CAMPUS_CARD_Y = 756 / 1600f;
+    private long lastPartyReadAt;
+
+    private void partyLeft(int before, int members) {
+        if (!running || manual || !fsMode()) return;
+        Log.w(TAG, "party down from " + before + " to " + members + ": Campus Return card (slot D), then stopping");
+        tapAt(screenW * CAMPUS_CARD_X, screenH * CAMPUS_CARD_Y, "campus return");
+        Telegram.send(this, "\uD83C\uDFEB Ran Online: the party went from " + before + " to " + members
+                + " - used the Campus Return card (D) and stopped FS.");
+        handler.postDelayed(() -> {
+            if (running) setRunning(false, "party left");
+        }, 1500);
     }
 
     /** Big until a small party has been seen, so it behaves as before until the list is read. */
@@ -4782,6 +4801,9 @@ public class ClickService extends AccessibilityService {
                     lastMobCountAt = now;
                     updateParty(MobCounter.partySize(shot, screenW, screenH));
                     updateWave(MobCounter.count(shot, screenW, screenH));
+                } else if (fsMode() && !eg() && now - lastPartyReadAt >= BUFF_SCAN_EVERY_MS - 100) {
+                    lastPartyReadAt = now;
+                    updateParty(MobCounter.partySize(shot, screenW, screenH));
                 }
                 if (farmer && now - lastMobCountAt >= farmScanMs() - 100) {
                     lastMobCountAt = now;
