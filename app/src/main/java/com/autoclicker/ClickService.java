@@ -2639,15 +2639,25 @@ public class ClickService extends AccessibilityService {
                 long t = SystemClock.uptimeMillis();
                 // A dropped digit ("[126,11" for [126,115], 19:05) looks like a 100-unit jump: the
                 // character covers ~1-2 units a second, so take a big jump only when read twice.
-                if (posMap != null && sameMap(map, posMap) && t - posAt < 15_000) {
-                    double jump = Math.hypot(rx - posX, ry - posY), allowed = 6 + 3 * (t - posAt) / 1000.0;
-                    if (jump > allowed && !(rx == jumpX && ry == jumpY)) {
+                // Two reads that agree with each other win, though: a misread first read ([127,17],
+                // 19:12) otherwise made every right one look like a jump, for good.
+                // No recent good read (a start, a new map): it has to agree with the next one too
+                // ([124,1166] for [124,116] got straight in after a restart, 19:13).
+                boolean fits = posMap != null && sameMap(map, posMap) && t - posAt < 15_000
+                        && Math.hypot(rx - posX, ry - posY) <= 6 + 3 * (t - posAt) / 1000.0;
+                {
+                    double jump = posMap != null ? Math.hypot(rx - posX, ry - posY) : -1;
+                    boolean agrees = jumpAt > 0 && t - jumpAt < 20_000 && Math.hypot(rx - jumpX, ry - jumpY) <= 4 + 3 * (t - jumpAt) / 1000.0;
+                    if (!fits && !agrees) {
                         jumpX = rx;
                         jumpY = ry;
-                        Log.d(TAG, "coordinates: [" + rx + "," + ry + "] is " + Math.round(jump) + " from the last read, ignoring once");
+                        jumpAt = t;
+                        Log.d(TAG, "coordinates: [" + rx + "," + ry + "] unconfirmed (" + (jump < 0 ? "no earlier read" : Math.round(jump) + " from the last")
+                                + "), waiting for a second read");
                         return;
                     }
                 }
+                jumpAt = 0;
                 posMap = map;
                 posX = rx;
                 posY = ry;
@@ -4223,6 +4233,7 @@ public class ClickService extends AccessibilityService {
     private int homeX, homeY, posX, posY;
     private long posAt, lastCoordReadAt, lastChatReadAt, lastCoordMissLogAt;
     private int jumpX = -1, jumpY = -1;
+    private long jumpAt;
     private static final int CHAT_READ_MS = 4000;
     private int calStage, leashMisses;
     private boolean calValid;
