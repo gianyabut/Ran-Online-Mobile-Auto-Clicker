@@ -204,7 +204,8 @@ public class ClickService extends AccessibilityService {
     // Until when a walk, a target drop or a trip to loot is still going (attacks hold off too).
     private long farmHoldUntil;
     // The shared "pause after tap" (3 s, set for heals) spaced attacks ~4 s apart.
-    private static final int FARM_TAP_GAP_MS = 800;
+    // 800 ms: the game accepted 62% of the taps (08:36, cooldowns/locks), each refusal costing 0.84 s.
+    private static final int FARM_TAP_GAP_MS = 500;
     // Buffs in Farmer: hold attacks this long after a buff so its cast isn't cancelled; wait at most
     // FARM_BUFF_MAX_WAIT_MS before one; a cast that didn't take is retried after FARM_BUFF_RETRY_MS.
     private static final int FARM_AFTER_BUFF_MS = 1500, FARM_BUFF_MAX_WAIT_MS = 1500, FARM_BUFF_RETRY_MS = 15_000;
@@ -221,7 +222,7 @@ public class ClickService extends AccessibilityService {
     private long lastPickupAt;
     // Not faster while looting: 1 s screenshots under memory pressure preceded Android's own
     // system process hanging and restarting (12:35-12:37, watchdog kill), as at 11:43.
-    private static final int LOOT_SCAN_MS = 2000;
+    private static final int LOOT_SCAN_MS = 1000;
     // A skill still animating ignores other input; give it this long after the last attack tap.
     private static final int LOOT_AFTER_SKILL_MS = 700;
     private long lootStartedAt, lootIgnoreUntil;
@@ -2132,7 +2133,7 @@ public class ClickService extends AccessibilityService {
             farmWalk(now);
             return;
         }
-        if (now - farmMobsSeenAt < FARM_IDLE_MS || !canFarmMove(now)) return;
+        if (now - Math.max(farmMobsSeenAt, lastBuffTapAt + 5000) < FARM_IDLE_MS || !canFarmMove(now)) return;
         // Searching while already halfway out: search back toward home.
         if (!luring && leashStep(now, true)) return;
         Log.i(TAG, "farmer: no target for " + (now - farmMobsSeenAt) / 1000 + " s (monsters ~" + mobs
@@ -2446,7 +2447,16 @@ public class ClickService extends AccessibilityService {
             }
         }
         postKillOcrAt = now;
-        if (best == null) return;
+        if (best == null) {
+            if (now - killAt >= DROP_DECIDE_MS && dropSeenAt <= killAt && now - lastHandSeenAt > 2000
+                    && lootStartedAt == 0 && now < postKillUntil && farmTargetHp < 0) {
+                Log.i(TAG, "farmer: no drop after the kill, attacking (" + (now - killAt) + " ms)");
+                postKillUntil = now;
+                busyUntil = now;
+                schedulePump(0);
+            }
+            return;
+        }
         dropBox = new Rect(best);
         dropX = best.exactCenterX();
         dropY = best.bottom + best.height() * 1.2f;               // the item lies under its label
@@ -2591,6 +2601,10 @@ public class ClickService extends AccessibilityService {
                 posX = Integer.parseInt(m.group(2));
                 posY = Integer.parseInt(m.group(3));
                 posAt = SystemClock.uptimeMillis();
+                if (homeMap != null) {
+                    Log.d(TAG, "position " + posMap + "[" + posX + "," + posY + "], "
+                            + Math.round(Math.hypot(homeX - posX, homeY - posY)) + " from home");
+                }
                 return;
             }
         });
@@ -3586,7 +3600,7 @@ public class ClickService extends AccessibilityService {
     // joystick push moves which way in map coordinates is learned by two probe walks (E, N), and
     // learned again after a camera turn or when walking home stops getting closer.
     private static final float COORD_L = 0f, COORD_T = 0.95f, COORD_W = 0.35f, COORD_H = 0.05f;
-    private static final int COORD_EVERY_MS = 6000, LEASH_R = 12, LEASH_PROBE_MS = 1200;
+    private static final int COORD_EVERY_MS = 6000, LEASH_R = 6, LEASH_PROBE_MS = 1200;
     private static final java.util.regex.Pattern COORD_TEXT =
             java.util.regex.Pattern.compile("([A-Za-z_]{3,})\\s*\\[\\s*(\\d{1,4})\\s*[,.]\\s*(\\d{1,4})\\s*\\]");
     private String homeMap, posMap;
@@ -3602,7 +3616,7 @@ public class ClickService extends AccessibilityService {
     // Past the leash: no attacks or buffs at all until back within LEASH_BACK_R (the user, 08:13:
     // "it wont attack until it goes near the leash position"). Attacking on the way made the game
     // run to the next monster, farther out, and spoiled the direction probes.
-    private static final int LEASH_BACK_R = 5, RETURN_MAX_MS = 90_000, RETURN_COORD_MS = 1500;
+    private static final int LEASH_BACK_R = 3, RETURN_MAX_MS = 90_000, RETURN_COORD_MS = 1500;
     private boolean returning;
     private long returnStartedAt, returnGiveUpUntil, leashWalkEnd;
     private long calWalkEnd;
