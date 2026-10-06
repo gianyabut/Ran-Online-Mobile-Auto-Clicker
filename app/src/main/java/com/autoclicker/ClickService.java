@@ -3713,9 +3713,11 @@ public class ClickService extends AccessibilityService {
 
     private void checkInventoryLine(String text) {
         if (text.contains("(#") || text.contains("]:")) return;     // a player's message ("[Name(#123)]:...")
-        String k = text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
-        if (!(k.contains("inventor") || k.contains("bag"))) return;
-        if (!(k.contains("full") || k.contains("space") || k.contains("room") || k.contains("notenough"))) return;
+        // The game says "Inventory is full." in red (14:36), and red text reads with look-alikes:
+        // l as I, 1 or |, so "full" can come out "fuII".
+        String k = text.toLowerCase(java.util.Locale.ROOT).replaceAll("[1|!]", "l").replaceAll("[^a-z]", "");
+        if (!(k.contains("nventor") || k.contains("bag"))) return;
+        if (!(k.matches(".*fu[li]{2}.*") || k.contains("space") || k.contains("room") || k.contains("notenough"))) return;
         long now = SystemClock.uptimeMillis();
         boolean fresh = bagFullAt == 0 || now - bagFullAt > 60_000;
         bagFullAt = now;
