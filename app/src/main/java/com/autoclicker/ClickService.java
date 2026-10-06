@@ -896,38 +896,39 @@ public class ClickService extends AccessibilityService {
 
         bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.VERTICAL);
+        barRow = null;
         toggle = roundButton("");
         add = roundButton("+");
         barText(toggle, 22);
         barText(add, 22);
         LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
         gap.topMargin = barDp(8);
-        bar.addView(toggle, new LinearLayout.LayoutParams(barDp(48), barDp(48)));
-        bar.addView(add, gap);
+        barAdd(toggle, new LinearLayout.LayoutParams(barDp(48), barDp(48)));
+        barAdd(add, gap);
         fullBuffButton = roundButton("FB");
         barText(fullBuffButton, 15);
         fullBuffButton.setTypeface(Typeface.DEFAULT_BOLD);
         fullBuffButton.setBackground(circle(Color.rgb(210, 120, 20)));
         LinearLayout.LayoutParams fbGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
         fbGap.topMargin = barDp(8);
-        bar.addView(fullBuffButton, fbGap);
+        barAdd(fullBuffButton, fbGap);
         modeButton = roundButton("");
         barText(modeButton, 15);
         modeButton.setTypeface(Typeface.DEFAULT_BOLD);
         LinearLayout.LayoutParams modeGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
         modeGap.topMargin = barDp(8);
-        bar.addView(modeButton, modeGap);
+        barAdd(modeButton, modeGap);
         manualButton = roundButton("");
         barText(manualButton, 20);
         LinearLayout.LayoutParams manualGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
         manualGap.topMargin = barDp(8);
-        bar.addView(manualButton, manualGap);
+        barAdd(manualButton, manualGap);
         leashButton = roundButton("\u2693");
         barText(leashButton, 18);
         leashButton.setBackground(circle(Color.rgb(30, 130, 140)));
         LinearLayout.LayoutParams leashGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
         leashGap.topMargin = barDp(8);
-        bar.addView(leashButton, leashGap);
+        barAdd(leashButton, leashGap);
         barParams = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
         barParams.x = dp(8);
         barParams.y = dp(200);
@@ -1139,6 +1140,7 @@ public class ClickService extends AccessibilityService {
             lootItems.clear();
             repReset();
             sessKills = sessGold = 0;
+            sessEstimate = 0;
             sessExp = 0;
             sessStart = System.currentTimeMillis();
             lastChatLines = new ArrayList<>();
@@ -4729,6 +4731,28 @@ public class ClickService extends AccessibilityService {
     private int repLevelUps;
     private static final java.util.regex.Pattern EXP_TEXT = java.util.regex.Pattern.compile("(\\d{1,3})[.,](\\d{2,4})\\s*%");
 
+    // Selling prices for the estimate (the user, 2026-10-07): gear costume pieces 35k, Protection
+    // and Luxury Protection Potion 55k, Burr and Fine Burr 195k. Anything else counts 0.
+    private static final String[] GEAR_WORDS = {"gloves", "shoes", "pants", "cloth", "suit", "coat", "robe", "legging",
+            "boots", "helmet", "jacket", "armor", "vest", "skirt"};
+
+    private static long itemPrice(String item) {
+        String k = item.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+        if (k.contains("burr")) return 195_000;
+        if (k.contains("protectionpotion")) return 55_000;
+        for (String w : GEAR_WORDS) if (k.contains(w)) return 35_000;
+        return 0;
+    }
+
+    private static String itemKind(String item) {
+        String k = item.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+        if (k.contains("burr")) return "Burr";
+        if (k.contains("protectionpotion")) return "Protection Potion";
+        return "gear";
+    }
+
+    private long sessEstimate;
+
     private void repReset() {
         repKills = repLost = repPickups = repLootLeft = repHomeTrips = repSearchWalks = repDeaths = repLevelUps = 0;
         repMobSum = repMobScans = repLootMs = repHomeMs = 0;
@@ -4792,6 +4816,29 @@ public class ClickService extends AccessibilityService {
         if (repLost > 0) sb.append(" \u00B7 got away: ").append(repLost);
         sb.append("\n\uD83D\uDCB0 Gold: ").append(String.format(L, "%,d", lootGold));
         if (repKills > 0) sb.append(String.format(L, " (%,d/kill", lootGold / repKills)).append(String.format(L, ", ~%,d/h)", Math.round(lootGold * 60 / mins)));
+        // Estimate: the gold plus what the items sell for.
+        long itemsWorth = 0;
+        java.util.LinkedHashMap<String, Integer> kinds = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<String, Integer> e : lootItems.entrySet()) {
+            long price = itemPrice(e.getKey());
+            if (price <= 0) continue;
+            itemsWorth += price * e.getValue();
+            kinds.merge(itemKind(e.getKey()), e.getValue(), Integer::sum);
+        }
+        long estimate = lootGold + itemsWorth;
+        sessEstimate += estimate;
+        sb.append("\n\uD83D\uDC8E Estimate: ").append(String.format(L, "%,d", estimate));
+        if (itemsWorth > 0) {
+            sb.append(" (gold + ");
+            boolean first = true;
+            for (java.util.Map.Entry<String, Integer> e : kinds.entrySet()) {
+                if (!first) sb.append(", ");
+                first = false;
+                sb.append(e.getValue()).append(' ').append(e.getKey());
+            }
+            sb.append(String.format(L, " = %,d)", itemsWorth));
+        }
+        sb.append(String.format(L, " \u00B7 ~%,d/h", Math.round(estimate * 60 / mins)));
         sb.append("\n\uD83C\uDF92 Picked up: ").append(repPickups);
         if (repLootLeft > 0) sb.append(" \u00B7 left behind: ").append(repLootLeft);
         for (java.util.Map.Entry<String, Integer> e : lootItems.entrySet()) {
@@ -4813,8 +4860,8 @@ public class ClickService extends AccessibilityService {
         if (repPetLevel >= 0) sb.append("\n\uD83D\uDC3E Pet food: ").append(Math.round(repPetLevel * 100)).append("%");
         if (sessStart > 0 && now - sessStart > LOOT_REPORT_MS + 60_000) {
             long m = (now - sessStart) / 60_000;
-            sb.append(String.format(L, "\n\uD83D\uDCC8 Since %s (%dh%02d): %,d kills \u00B7 %,d gold \u00B7 +%.2f%% EXP",
-                    hm.format(new java.util.Date(sessStart)), m / 60, m % 60, sessKills, sessGold, sessExp));
+            sb.append(String.format(L, "\n\uD83D\uDCC8 Since %s (%dh%02d): %,d kills \u00B7 %,d gold \u00B7 estimate %,d \u00B7 +%.2f%% EXP",
+                    hm.format(new java.util.Date(sessStart)), m / 60, m % 60, sessKills, sessGold, sessEstimate, sessExp));
         }
         Telegram.send(this, sb.toString());
         Log.i(TAG, "farm report sent: " + sb.toString().replace('\n', '|'));
@@ -5155,6 +5202,9 @@ public class ClickService extends AccessibilityService {
     private void testPush(int dy, int ms, float dxShare) {
         float cx = screenW * JOYSTICK_X, cy = screenH * JOYSTICK_Y + dy, dx = screenW * dxShare;
         Log.i(TAG, "test push from " + Math.round(cx) + "," + Math.round(cy) + ", " + ms + " ms, " + Math.round(dx) + " px");
+        long now = SystemClock.uptimeMillis(), window = 2L * ms + 400;
+        ownTapUntil = now + window + OWN_TAP_SLACK_MS;                 // no heal/skill tap cancels it
+        busyUntil = Math.max(busyUntil, now + window + MOVE_SETTLE_MS);
         for (int k = 0; k < 2; k++) {
             float sign = k == 0 ? -1 : 1;
             handler.postDelayed(() -> {
@@ -8049,6 +8099,30 @@ public class ClickService extends AccessibilityService {
         android.util.DisplayMetrics m = getResources().getDisplayMetrics();
         float shortDp = Math.min(m.widthPixels, m.heightPixels) / m.density;
         return Math.max(0.5f, Math.min(1f, shortDp / UI_REF_SHORT_DP));
+    }
+
+    // Small screens: the bar in two columns. One column of finger-sized buttons ran down onto the
+    // joystick - ✋ sat on it, and the jiggle's push landed on ✋ instead (phone, 02:23).
+    private LinearLayout barRow;
+
+    private void barAdd(View v, LinearLayout.LayoutParams lp) {
+        if (uiScale() >= BAR_MIN_SCALE) {
+            bar.addView(v, lp);
+            return;
+        }
+        if (barRow == null || barRow.getChildCount() >= 2) {
+            barRow = new LinearLayout(this);
+            barRow.setOrientation(LinearLayout.HORIZONTAL);
+            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            rowLp.topMargin = bar.getChildCount() == 0 ? 0 : lp.topMargin;
+            bar.addView(barRow, rowLp);
+            lp.topMargin = 0;
+        } else {
+            lp.leftMargin = barDp(8);
+            lp.topMargin = 0;
+        }
+        barRow.addView(v, lp);
     }
 
     // The bar's buttons stay big enough for a finger on small screens (the user, phone: "too hard
