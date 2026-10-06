@@ -3925,8 +3925,17 @@ public class ClickService extends AccessibilityService {
     private long lastSeenMapAt;
 
     private boolean inCampus() {
-        return lastSeenMap != null && SystemClock.uptimeMillis() - lastSeenMapAt < 20_000
-                && lastSeenMap.toLowerCase(java.util.Locale.ROOT).contains("campus");
+        return lastSeenMap != null && SystemClock.uptimeMillis() - lastSeenMapAt < 20_000 && isTownCampus(lastSeenMap);
+    }
+
+    // The schools' town campus (SG_Campus1F, read "SG_Campus", "SG_Campús1F"), not a hunting map that
+    // merely has "Campus" in its name: on LeonineCampusB3 Farmer took it for town and never attacked
+    // (2026-10-07 02:50).
+    private static final java.util.regex.Pattern TOWN_CAMPUS =
+            java.util.regex.Pattern.compile("^(sg|mp|phx?)[\\W_]*camp\\S?s");
+
+    private static boolean isTownCampus(String map) {
+        return map != null && TOWN_CAMPUS.matcher(map.toLowerCase(java.util.Locale.ROOT).trim()).find();
     }
 
     private static final int SELL_LOAD_MS = 8000, SELL_CARD_TRIES = 2, SELL_ARRIVE_MAX_MS = 60_000;
@@ -3957,7 +3966,7 @@ public class ClickService extends AccessibilityService {
 
     private void startSellTripAt(String map) {
         returning = false;
-        if (map.toLowerCase(java.util.Locale.ROOT).contains("campus")) {
+        if (isTownCampus(map)) {
             // On the campus already (the card used by hand): straight to the walk.
             Log.w(TAG, "sell trip: already in " + map + " - no card, walking to the Sword Section");
             sellStage = 2;
@@ -4030,7 +4039,7 @@ public class ClickService extends AccessibilityService {
                 setManual(true, "sell trip: map unreadable");
                 return;
             }
-            boolean moved = map.toLowerCase(java.util.Locale.ROOT).contains("campus")
+            boolean moved = isTownCampus(map)
                     || (sellFromMap != null && !sameMap(map, sellFromMap));
             if (!moved) {
                 if (sellCardTries < SELL_CARD_TRIES) {
@@ -4277,7 +4286,7 @@ public class ClickService extends AccessibilityService {
                 handler.postDelayed(this::sellBackCheck, 2000);
                 return;
             }
-            boolean away = map != null && !map.toLowerCase(java.util.Locale.ROOT).contains("campus");
+            boolean away = map != null && !isTownCampus(map);
             if (!away) {
                 if (sellBackTries < SELL_BACK_TRIES) {
                     sellBackPoint();
