@@ -1875,9 +1875,12 @@ public class ClickService extends AccessibilityService {
             textSize(modeButton, 11);
             modeButton.setBackground(circle(Color.rgb(150, 90, 30)));
         } else {
-            modeButton.setText(endGame ? "EG" : "LL");
-            textSize(modeButton, 15);
-            modeButton.setBackground(circle(endGame ? Color.rgb(170, 40, 40) : Color.rgb(40, 130, 130)));
+            // FS + follow shows "LL·F" / "EG·F" on purple, like FS·F on the start menu (the user,
+            // 21:47: it looked just like FS).
+            modeButton.setText((endGame ? "EG" : "LL") + (follow ? "·F" : ""));
+            textSize(modeButton, follow ? 12 : 15);
+            modeButton.setBackground(circle(follow ? Color.rgb(120, 40, 120)
+                    : endGame ? Color.rgb(170, 40, 40) : Color.rgb(40, 130, 130)));
         }
     }
 
@@ -2017,6 +2020,7 @@ public class ClickService extends AccessibilityService {
         if (changed || !why.equals("restored")) {
             Log.i(TAG, "follow mode " + (on ? "on: staying close to the party master" : "off") + " (" + why + ")");
         }
+        if (modeButton != null) refreshModeButton();            // LL <-> LL·F
     }
 
     private void closeModeChooser() {
