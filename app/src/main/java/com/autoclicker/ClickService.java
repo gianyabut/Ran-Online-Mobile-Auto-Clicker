@@ -5710,6 +5710,8 @@ public class ClickService extends AccessibilityService {
     private long lastScanShotAt, lastScanQuestionAt, lastQuestionShotFailLogAt;
 
     private long lastReviveAt;
+    private int reviveUseTries;
+    private static final int USE_REVIVE_TRIES = 2;
     // After a death (the user, 07:38): no attacks in town; once revived, use the Back Point card in
     // quick slot S to return to the farming spot, then farm on. S = the middle of A/S/D (07:39).
     private static final float BACK_POINT_X = 2317 / 2560f, BACK_POINT_Y = 755 / 1600f;
@@ -5863,22 +5865,38 @@ public class ClickService extends AccessibilityService {
             }
         }
         if (ask == null) return;
-        Rect button = null;
+        Rect button = null, use = null;
         for (MathQuestion.Line l : lines) {
             String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
-            if (l != ask && k.equals("revive") && l.box.top > ask.box.bottom && l.box.top < ask.box.bottom + ask.box.height() * 6) {
-                button = l.box;
-                break;
-            }
+            boolean below = l != ask && l.box.top > ask.box.bottom && l.box.top < ask.box.bottom + ask.box.height() * 6;
+            if (!below) continue;
+            if (k.equals("revive") && button == null) button = l.box;
+            if ((k.equals("use") || k.startsWith("use") && k.length() <= 8) && use == null) use = l.box;
         }
-        float x = button != null ? button.exactCenterX() : ask.box.exactCenterX();
-        float y = button != null ? button.exactCenterY() : ask.box.bottom + ask.box.height() * 2.6f;   // measured 07:37
+        // "Use" first (the user, 21:44): the revive item brings the character back on the spot. A
+        // dialog still up after USE_REVIVE_TRIES Use taps (no item left?) gets Revive instead.
+        if (now - lastReviveAt > 30_000) reviveUseTries = 0;
+        boolean inPlace = use != null && reviveUseTries < USE_REVIVE_TRIES;
+        Rect pick = inPlace ? use : button;
+        float x = pick != null ? pick.exactCenterX() : ask.box.exactCenterX();
+        float y = pick != null ? pick.exactCenterY() : ask.box.bottom + ask.box.height() * 2.6f;   // measured 07:37
         lastReviveAt = now;
-        Log.w(TAG, "died: \"" + ask.text.trim() + "\", tapping Revive at " + Math.round(x) + "," + Math.round(y));
-        tapAt(x, y, "revive");
+        if (inPlace) reviveUseTries++;
+        String what = inPlace ? "Use" : "Revive";
+        Log.w(TAG, "died: \"" + ask.text.trim() + "\", tapping " + what + " at " + Math.round(x) + "," + Math.round(y));
+        tapAt(x, y, inPlace ? "revive use" : "revive");
         if (!running || manual) {
             // Not farming: just the revive, no Back Point or death rules.
-            Telegram.send(this, "💀 Ran Online: your character died - tapped Revive.");
+            Telegram.send(this, "💀 Ran Online: your character died - tapped " + what + ".");
+            return;
+        }
+        if (inPlace) {
+            // Back on the spot: no trip to town, no Back Point - carry on after a moment.
+            deadUntil = now + 3000;
+            busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+            handler.removeCallbacks(useBackPoint);
+            handler.removeCallbacks(backAtSpot);
+            Telegram.send(this, "💀 Ran Online: your character died - tapped Use (revive item), carrying on here.");
             return;
         }
         deathMap = posMap;
