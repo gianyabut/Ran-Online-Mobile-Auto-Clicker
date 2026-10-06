@@ -501,6 +501,7 @@ public class ClickService extends AccessibilityService {
     private TextView modeButton;
     private View editor;
     private View modeChooser;
+    private static final int CHOOSER_OPEN_MS = 15_000;          // closes by itself after this
     private boolean running;
     private long busyUntil;
     private long lastAnyTapAt;
@@ -1936,10 +1937,19 @@ public class ClickService extends AccessibilityService {
         p.y = at[1] + (anchor.getHeight() - size) / 2;
         p.flags |= WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
         panel.setOnTouchListener((v, e) -> {
-            if (e.getActionMasked() == MotionEvent.ACTION_OUTSIDE) closeModeChooser();
+            // Our own ring taps land outside it too (the ⚓ menu opens while farming): only a
+            // touch of yours closes it.
+            if (e.getActionMasked() == MotionEvent.ACTION_OUTSIDE && SystemClock.uptimeMillis() >= ownTapUntil) {
+                closeModeChooser();
+            }
             return false;
         });
-        if (safeAdd(panel, p)) modeChooser = panel;
+        if (safeAdd(panel, p)) {
+            modeChooser = panel;
+            handler.postDelayed(() -> {
+                if (modeChooser == panel) closeModeChooser();
+            }, CHOOSER_OPEN_MS);
+        }
     }
 
     private void startInMode(boolean boostMode, boolean farmMode, boolean followMode) {
