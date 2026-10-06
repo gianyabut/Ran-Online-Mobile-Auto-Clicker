@@ -5535,6 +5535,35 @@ public class ClickService extends AccessibilityService {
         return false;
     }
 
+    // Every spelling the master's name has been read as. Replacing the one key with each new read
+    // drifted it ("kyjhele26" -> "kvihele26p" -> "slyihele26p"), the next tag no longer matched,
+    // and the map opened with the master in plain sight (phone, 02:58).
+    private final java.util.LinkedHashSet<String> leaderAliases = new java.util.LinkedHashSet<>();
+    private String pendingLeaderKey;
+
+    private void setLeader(String key, String shown) {
+        leaderKey = key;
+        leaderShown = shown;
+        leaderSeenAt = 0;
+        leaderAliases.clear();
+        leaderAliases.add(key);
+        pendingLeaderKey = null;
+        Log.i(TAG, "follow: party master is \"" + shown + "\"");
+    }
+
+    private void addLeaderAlias(String key) {
+        if (key == null || key.length() < 4 || leaderAliases.contains(key)) return;
+        leaderAliases.add(key);
+        while (leaderAliases.size() > 16) leaderAliases.remove(leaderAliases.iterator().next());
+    }
+
+    private boolean isLeader(String key) {
+        if (key == null || leaderKey == null) return false;
+        if (looseName(key, leaderKey)) return true;
+        for (String a : leaderAliases) if (looseName(key, a)) return true;
+        return false;
+    }
+
     private void followStep(List<MathQuestion.Line> lines) {
         long now = SystemClock.uptimeMillis();
         // The party master: the first name under "Team" at the top left (the M row). Personal store
@@ -5591,11 +5620,15 @@ public class ClickService extends AccessibilityService {
         if (first != null) {
             String name = stripRowMark(first.text);
             String key = nameKey(name);
-            if (leaderKey == null || !looseName(key, leaderKey)) {
-                leaderKey = key;
-                leaderShown = name;
-                leaderSeenAt = 0;
-                Log.i(TAG, "follow: party master is \"" + name + "\"");
+            if (leaderKey == null) {
+                setLeader(key, name);
+            } else if (isLeader(key)) {
+                addLeaderAlias(key);
+                pendingLeaderKey = null;
+            } else if (key.length() >= 4 && pendingLeaderKey != null && looseName(key, pendingLeaderKey)) {
+                setLeader(key, name);                           // a new master, read twice in a row
+            } else {
+                pendingLeaderKey = key;                         // one odd read ("Khe") isn't a new master
             }
             followNoPartyLogged = false;
         } else if (leaderKey == null) {
@@ -5614,7 +5647,7 @@ public class ClickService extends AccessibilityService {
             if (inTeamList(l.box) || l.box.bottom <= screenH * HUD_TOP_H
                     || (l.box.right > screenW * 0.76f && l.box.top < screenH * 0.32f)) continue;
             String k = nameKey(l.text);
-            if (!looseName(k, leaderKey) || !looksLikePlayerName(l.text)) continue;
+            if (!isLeader(k) || !looksLikePlayerName(l.text)) continue;
             float d = fromCharacter(l.box);
             if (d < tagDist) {
                 tag = l.box;
@@ -5622,12 +5655,7 @@ public class ClickService extends AccessibilityService {
                 tagKey = k;
             }
         }
-        if (tag != null && !tagKey.equals(leaderKey)) {
-            // The name tag in the world reads cleanly (no HP bar behind it): learn that spelling.
-            Log.i(TAG, "follow: party master's name tag reads \"" + tagKey + "\" (Team list read \"" + leaderKey + "\")");
-            leaderKey = tagKey;
-            leaderShown = tagKey;
-        }
+        if (tag != null) addLeaderAlias(tagKey);
         float push = screenW * FARM_PUSH;
         if (tag != null) {
             leaderSeenAt = now;
@@ -5707,7 +5735,7 @@ public class ClickService extends AccessibilityService {
                 return;
             }
             boolean open = mapIsOpen(shot, 1f);
-            int[] arrow = open ? mapCluster(shot, true) : null, m = open ? findMapM(shot) : null;
+            int[] arrow = open ? mapCluster(shot, true) : null, m = open ? findMapMScaled(shot) : null;
             Bitmap coord = null;
             try {
                 int cx = Math.round(shot.getWidth() * COORD_L), cy = Math.round(shot.getHeight() * COORD_T);
@@ -5801,6 +5829,28 @@ public class ClickService extends AccessibilityService {
     // and yellow as the icon get compared (~130 of 60,000).
     private static final int M_TPL = 25, M_MATCH_MAX = 22;
     private int[] mTemplate;
+
+    /**
+     * findMapM at the tablet's scale: on a smaller screen the map's M icon is smaller than the
+     * 25 px template (the phone never found it, 02:58), so search an enlarged copy and scale back.
+     */
+    private int[] findMapMScaled(Bitmap shot) {
+        float sy = Layout.sy();
+        if (!Layout.active() || sy >= 0.97f || sy <= 0.3f) return findMapM(shot);
+        Bitmap big;
+        try {
+            big = Bitmap.createScaledBitmap(shot, Math.round(shot.getWidth() / sy), Math.round(shot.getHeight() / sy), true);
+        } catch (RuntimeException | OutOfMemoryError e) {
+            return findMapM(shot);
+        }
+        int[] m;
+        try {
+            m = findMapM(big);
+        } finally {
+            if (big != shot) big.recycle();
+        }
+        return m == null ? null : new int[]{Math.round(m[0] * sy), Math.round(m[1] * sy)};
+    }
 
     private int[] findMapM(Bitmap shot) {
         if (mTemplate == null) {
