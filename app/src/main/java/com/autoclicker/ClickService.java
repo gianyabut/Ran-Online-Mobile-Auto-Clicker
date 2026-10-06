@@ -1041,6 +1041,7 @@ public class ClickService extends AccessibilityService {
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
         deadUntil = 0;
         pkHold = false;                                         // its re-check was cleared above
+        sellStage = 0;                                          // a sell trip's checks too
         returning = false;
         returnGiveUpUntil = 0;
         lootIgnoreUntil = 0;                                    // a start always loots again
@@ -3722,9 +3723,67 @@ public class ClickService extends AccessibilityService {
         boolean fresh = bagFullAt == 0 || now - bagFullAt > 60_000;
         bagFullAt = now;
         if (fresh) Log.w(TAG, "bag full: \"" + text.trim() + "\"");
+        if (farmer && running && !manual && sellStage == 0) handler.post(this::startSellTrip);
         if (bagFullAlertAt != 0 && now - bagFullAlertAt < BAG_FULL_ALERT_GAP_MS) return;
         bagFullAlertAt = now;
         Telegram.send(this, "🎒 Ran Online: the inventory is full (\"" + text.trim() + "\").");
+    }
+
+    /*
+     * Sell trip (the user, 14:40): "Inventory is full." -> the Campus Return card (quick slot D) ->
+     * walk to the sword section by the map -> sell all equipment and rings. Built a step at a time
+     * with the user: for now it goes to town and stops there.
+     */
+    private static final int SELL_LOAD_MS = 8000, SELL_CARD_TRIES = 2;
+    private int sellStage, sellCardTries;                     // sellStage 1: on the way to town
+    private String sellFromMap;
+
+    private void startSellTrip() {
+        if (!running || !farmer || manual || sellStage != 0 || pkHold || SystemClock.uptimeMillis() < deadUntil) return;
+        sellStage = 1;
+        sellCardTries = 0;
+        sellFromMap = posMap != null ? posMap : homeMap;
+        returning = false;
+        Log.w(TAG, "sell trip: bag full - Campus Return card (D) to town");
+        useSellCard();
+    }
+
+    private void useSellCard() {
+        if (!running || sellStage != 1) return;
+        long now = SystemClock.uptimeMillis();
+        busyUntil = farmHoldUntil = Math.max(busyUntil, now + SELL_LOAD_MS + 5000);   // no skills, no walking
+        lootStartedAt = 0;
+        handler.removeCallbacks(lootTapTick);
+        sellCardTries++;
+        onCardPage(() -> tapAt(screenW * CAMPUS_CARD_X, screenH * CAMPUS_CARD_Y, "campus return (sell trip)"), "Campus Return");
+        handler.postDelayed(this::sellArrivedCheck, SELL_LOAD_MS);
+    }
+
+    private void sellArrivedCheck() {
+        if (!running || sellStage != 1) return;
+        busyUntil = farmHoldUntil = Math.max(busyUntil, SystemClock.uptimeMillis() + 5000);
+        readMapName(map -> {
+            if (!running || sellStage != 1) return;
+            boolean moved = map != null && (sellFromMap == null || !sameMap(map, sellFromMap));
+            if (!moved) {
+                if (sellCardTries < SELL_CARD_TRIES) {
+                    Log.w(TAG, "sell trip: still in " + map + " after the card, trying it again");
+                    useSellCard();
+                    return;
+                }
+                sellStage = 0;
+                busyUntil = farmHoldUntil = SystemClock.uptimeMillis();
+                Log.w(TAG, "sell trip: still in " + map + " after " + sellCardTries + " Campus Return taps, farming on");
+                Telegram.send(this, "⚠ Ran Online: the inventory is full but the Campus Return card (D) didn't take me"
+                        + " to town (still in " + map + "). Farming on - please check the card.");
+                return;
+            }
+            sellStage = 0;
+            Log.i(TAG, "sell trip: in " + map + " - stopping here for now (walking to the sword section is next)");
+            Telegram.send(this, "🎒 Ran Online: inventory full - used the Campus Return card, now in " + map
+                    + ". Stopped there (selling isn't built yet).");
+            setManual(true, "sell trip: in town");
+        });
     }
 
     /** Reads the chat box for pickups and gold; each line counted once as the chat scrolls. */
