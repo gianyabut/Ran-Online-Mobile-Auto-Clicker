@@ -3112,10 +3112,45 @@ public class ClickService extends AccessibilityService {
         mapWalkTo(now, homeX, homeY);
     }
 
+    // A map walk that can't get there leaves the game's auto-walk on - a "Stop" button under the
+    // minimap - and later map taps did nothing: 88 s to get home, most taps not moving it (11:28).
+    private static final float AUTO_STOP_L = 2300 / 2560f, AUTO_STOP_T = 560 / 1600f,
+            AUTO_STOP_W = 260 / 2560f, AUTO_STOP_H = 140 / 1600f;
+
+    /** Taps the game's auto-walk "Stop" if it shows, then runs then. */
+    private void stopAutoWalk(Runnable then) {
+        captureRegionForOcr(AUTO_STOP_L, AUTO_STOP_T, AUTO_STOP_W, AUTO_STOP_H, crop -> {
+            if (crop == null) {
+                then.run();
+                return;
+            }
+            Ocr.read(crop, (lines, words) -> {
+                for (MathQuestion.Line l : lines) {
+                    if (!l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "").equals("stop")) continue;
+                    float x = screenW * AUTO_STOP_L + l.box.exactCenterX(), y = screenH * AUTO_STOP_T + l.box.exactCenterY();
+                    Log.i(TAG, "farmer: the game's auto-walk is still on (Stop showing) - stopping it first");
+                    tapAt(x, y, "auto-walk stop");
+                    handler.postDelayed(then, 500);
+                    return;
+                }
+                then.run();
+            });
+        });
+    }
+
     /** Opens the big map and taps the spot [hx,hy] on it, so the game walks the character there. */
     private void mapWalkTo(long now, int hx, int hy) {
         lastMapHomeAt = now;
-        leashWalkEnd = now + 3000;                                  // next step after a fresh position
+        leashWalkEnd = now + 4500;                                  // next step after a fresh position
+        busyUntil = farmHoldUntil = Math.max(busyUntil, now + MAP_OPEN_MS + 2500);
+        stopAutoWalk(() -> mapWalkToNow(hx, hy));
+    }
+
+    private void mapWalkToNow(int hx, int hy) {
+        if (!running || !farmer) return;
+        long now = SystemClock.uptimeMillis();
+        lastMapHomeAt = now;
+        leashWalkEnd = now + 3000;
         busyUntil = farmHoldUntil = Math.max(busyUntil, now + MAP_OPEN_MS + 1500);
         final int px0 = posX, py0 = posY;
         final String map = posMap;
