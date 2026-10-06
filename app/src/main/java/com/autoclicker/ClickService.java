@@ -556,6 +556,9 @@ public class ClickService extends AccessibilityService {
         int interval;
         boolean priority;
         boolean waitForCooldown;
+        // Added with + and not started since: moves without the hold (the user, 2026-10-07, phone:
+        // "i cannot drag the new circles").
+        boolean free;
         int[] readyLook; // brightness per sample point when the skill is ready, or null
         int lookX, lookY; // where the ring was when readyLook was saved
         int centerX = -1; // the ring's centre on screen: the window is placed around it (-1 = not known yet)
@@ -754,7 +757,7 @@ public class ClickService extends AccessibilityService {
                     readyLook = null;
                     refreshLabel();
                 }
-            }, true);
+            }, () -> !free);
         }
 
         /** Nudge from the settings window: a few pixels, keeping the saved centre in step. */
@@ -1052,6 +1055,7 @@ public class ClickService extends AccessibilityService {
             prefs.edit().putBoolean(KEY_RUNNING, run).putString(KEY_GAME, gamePackage).apply();
         }
         pausedForOtherApp = false;
+        if (run) for (Target t : targets) t.free = false;           // placed: the hold protects them now
         Log.i(TAG, (run ? "start" : "stop") + " (" + why + "), " + targets.size() + " targets"
                 + (run ? ", pause after tap " + tapGapMs + "ms" : ""));
         running = run;
@@ -1330,7 +1334,8 @@ public class ClickService extends AccessibilityService {
         if (running) return;
         DisplayMetrics m = getResources().getDisplayMetrics();
         int offset = (targets.size() % 5) * dp(30);
-        addTarget(m.widthPixels / 2 - dp(30) + offset, m.heightPixels / 2 - dp(30) + offset, DEFAULT_INTERVAL);
+        Target t = addTarget(m.widthPixels / 2 - dp(30) + offset, m.heightPixels / 2 - dp(30) + offset, DEFAULT_INTERVAL);
+        if (t != null) t.free = true;
         saveTargets();
     }
 
@@ -7519,7 +7524,7 @@ public class ClickService extends AccessibilityService {
 
     private void makeDraggable(View handle, View window, WindowManager.LayoutParams params,
                                Runnable onClick, Runnable onMoved) {
-        makeDraggable(handle, window, params, onClick, onMoved, false);
+        makeDraggable(handle, window, params, onClick, onMoved, () -> false);
     }
 
     // Skill circles move only after a hold (the user, 23:20: "make sure those circles won't change,
@@ -7527,12 +7532,15 @@ public class ClickService extends AccessibilityService {
     private static final int HOLD_TO_MOVE_MS = 500;
 
     private void makeDraggable(View handle, View window, WindowManager.LayoutParams params,
-                               Runnable onClick, Runnable onMoved, boolean holdToMove) {
+                               Runnable onClick, Runnable onMoved, java.util.function.BooleanSupplier needHold) {
         int slop = dp(8);
+        // A finger held still still wobbles: only a real slide before the hold is a brush (on the
+        // phone dp(8) is ~12 px, and holds never armed).
+        int brushSlop = Math.max(slop * 3, Math.round(24 * getResources().getDisplayMetrics().density));
         handle.setOnTouchListener(new View.OnTouchListener() {
             float downX, downY;
             int startX, startY;
-            boolean dragging, armed, brushed;
+            boolean dragging, armed, brushed, holdToMove;
             final Runnable arm = () -> {
                 if (brushed) return;
                 armed = true;
@@ -7549,6 +7557,7 @@ public class ClickService extends AccessibilityService {
                         startX = params.x;
                         startY = params.y;
                         dragging = false;
+                        holdToMove = needHold.getAsBoolean();
                         armed = !holdToMove;
                         brushed = false;
                         if (holdToMove) handler.postDelayed(arm, HOLD_TO_MOVE_MS);
@@ -7557,7 +7566,7 @@ public class ClickService extends AccessibilityService {
                         float dx = e.getRawX() - downX;
                         float dy = e.getRawY() - downY;
                         boolean past = Math.abs(dx) > slop || Math.abs(dy) > slop;
-                        if (past && !armed) {
+                        if (!armed && (Math.abs(dx) > brushSlop || Math.abs(dy) > brushSlop)) {
                             brushed = true;                          // moved before the hold: not a move
                             handler.removeCallbacks(arm);
                         }
