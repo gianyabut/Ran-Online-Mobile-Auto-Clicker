@@ -3123,6 +3123,7 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(() -> captureHalfScreen(shot -> {
             if (shot == null) {
                 Log.w(TAG, "farmer: couldn't take the map screenshot (walking home)");
+                closeMap();                                     // it may be open: the next "open" tap would walk
                 return;
             }
             boolean open = mapIsOpen(shot, 1f);
@@ -3178,7 +3179,11 @@ public class ClickService extends AccessibilityService {
                         // Off by a few units ([128,130] and [129,133] for [129,130], 10:57, the user):
                         // the map is still open, so tap again where the readout says the spot is.
                         float off = (float) Math.hypot(rx - hx, ry - hy);
-                        if (onMap && hx == homeX && hy == homeY && off > leashBackR() && off <= 15) {
+                        // Near is enough - unless the last walk got nowhere: [123,128] for [123,130]
+                        // was inside the fenced garden and the character never moved (11:23). Home
+                        // itself is walkable (it stood there), so then hit it exactly.
+                        float allowed = mapHomeStuck > 0 ? 0.5f : leashBackR();
+                        if (onMap && hx == homeX && hy == homeY && off > allowed && off <= 15) {
                             float cx = tx + (hx - rx) * k, cy = ty - (hy - ry) * k;
                             Log.i(TAG, "farmer: map tap read [" + rx + "," + ry + "], not [" + hx + "," + hy + "] - tapping "
                                     + Math.round(cx) + "," + Math.round(cy) + " instead");
