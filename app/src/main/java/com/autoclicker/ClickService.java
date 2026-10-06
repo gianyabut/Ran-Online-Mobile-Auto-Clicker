@@ -705,7 +705,7 @@ public class ClickService extends AccessibilityService {
 
             badge = new TextView(ClickService.this);
             badge.setTextColor(Color.WHITE);
-            badge.setTextSize(11);
+            textSize(badge, 11);
             badge.setTypeface(Typeface.DEFAULT_BOLD);
             badge.setPadding(dp(6), dp(1), dp(6), dp(1));
             GradientDrawable pill = new GradientDrawable();
@@ -845,14 +845,14 @@ public class ClickService extends AccessibilityService {
         bar.addView(toggle, new LinearLayout.LayoutParams(dp(48), dp(48)));
         bar.addView(add, gap);
         fullBuffButton = roundButton("FB");
-        fullBuffButton.setTextSize(15);
+        textSize(fullBuffButton, 15);
         fullBuffButton.setTypeface(Typeface.DEFAULT_BOLD);
         fullBuffButton.setBackground(circle(Color.rgb(210, 120, 20)));
         LinearLayout.LayoutParams fbGap = new LinearLayout.LayoutParams(dp(48), dp(48));
         fbGap.topMargin = dp(8);
         bar.addView(fullBuffButton, fbGap);
         modeButton = roundButton("");
-        modeButton.setTextSize(15);
+        textSize(modeButton, 15);
         modeButton.setTypeface(Typeface.DEFAULT_BOLD);
         LinearLayout.LayoutParams modeGap = new LinearLayout.LayoutParams(dp(48), dp(48));
         modeGap.topMargin = dp(8);
@@ -862,7 +862,7 @@ public class ClickService extends AccessibilityService {
         manualGap.topMargin = dp(8);
         bar.addView(manualButton, manualGap);
         leashButton = roundButton("\u2693");
-        leashButton.setTextSize(18);
+        textSize(leashButton, 18);
         leashButton.setBackground(circle(Color.rgb(30, 130, 140)));
         LinearLayout.LayoutParams leashGap = new LinearLayout.LayoutParams(dp(48), dp(48));
         leashGap.topMargin = dp(8);
@@ -1139,7 +1139,7 @@ public class ClickService extends AccessibilityService {
         lp.topMargin = on ? 0 : dp(8);
         manualButton.setLayoutParams(lp);
         manualButton.setText(on ? "AUTO" : "✋");
-        manualButton.setTextSize(on ? 12 : 20);
+        textSize(manualButton, on ? 12 : 20);
         manualButton.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         manualButton.setBackground(circle(on ? Color.rgb(40, 150, 60) : Color.rgb(120, 70, 170)));
         if (changed && why.equals("button")) {
@@ -1863,15 +1863,15 @@ public class ClickService extends AccessibilityService {
             // Farmer: KILL fights whatever comes; LURE gathers LURE_COUNT first (the user, 14:44).
             boolean sell = sellStage != 0 || sellRunning;
             modeButton.setText(sell ? "SELL" : lureMode ? "LURE" : "KILL");
-            modeButton.setTextSize(11);
+            textSize(modeButton, 11);
             modeButton.setBackground(circle(sell ? Color.rgb(200, 150, 30) : lureMode ? Color.rgb(60, 120, 40) : Color.rgb(170, 40, 40)));
         } else if (booster) {
             modeButton.setText("BOOST");
-            modeButton.setTextSize(11);
+            textSize(modeButton, 11);
             modeButton.setBackground(circle(Color.rgb(150, 90, 30)));
         } else {
             modeButton.setText(endGame ? "EG" : "LL");
-            modeButton.setTextSize(15);
+            textSize(modeButton, 15);
             modeButton.setBackground(circle(endGame ? Color.rgb(170, 40, 40) : Color.rgb(40, 130, 130)));
         }
     }
@@ -1931,16 +1931,16 @@ public class ClickService extends AccessibilityService {
      */
     private void showModeChooser(View anchor) {
         TextView fs = roundButton("FS");
-        fs.setTextSize(14);
+        textSize(fs, 14);
         fs.setBackground(circle(Color.rgb(170, 40, 40)));
         TextView boost = roundButton("BOOST");
-        boost.setTextSize(9);
+        textSize(boost, 9);
         boost.setBackground(circle(Color.rgb(150, 90, 30)));
         TextView farm = roundButton("FARM");
-        farm.setTextSize(10);
+        textSize(farm, 10);
         farm.setBackground(circle(Color.rgb(60, 120, 40)));
         TextView fol = roundButton("FOLLOW");
-        fol.setTextSize(8);
+        textSize(fol, 8);
         fol.setBackground(circle(Color.rgb(40, 90, 160)));
         TextView[] choices = {fs, boost, farm, fol};
         fs.setOnClickListener(v -> startInMode(false, false, false));
@@ -2850,12 +2850,12 @@ public class ClickService extends AccessibilityService {
             if (homeReading) {                                  // yellow "\u2026" while the spot is read
                 leashButton.setBackground(circle(Color.rgb(200, 160, 30)));
                 leashButton.setText("\u2026");
-                leashButton.setTextSize(18);
+                textSize(leashButton, 18);
                 return;
             }
             leashButton.setBackground(circle(homeMap != null ? Color.rgb(30, 130, 140) : Color.rgb(110, 110, 110)));
             leashButton.setText(homeMap != null ? "\u2693\n" + leashR : "\u2693");
-            leashButton.setTextSize(homeMap != null ? 12 : 18);
+            textSize(leashButton, homeMap != null ? 12 : 18);
         }
     }
 
@@ -2893,7 +2893,7 @@ public class ClickService extends AccessibilityService {
         List<TextView> choices = new ArrayList<>();
         for (int r : LEASH_RADII) {
             TextView b = roundButton(String.valueOf(r));
-            b.setTextSize(14);
+            textSize(b, 14);
             boolean current = homeMap != null && r == leashR;
             b.setBackground(circle(current ? Color.rgb(30, 130, 140) : Color.rgb(70, 90, 100)));
             b.setOnClickListener(v -> {
@@ -2904,7 +2904,7 @@ public class ClickService extends AccessibilityService {
         }
         if (homeMap != null) {
             TextView off = roundButton("OFF");
-            off.setTextSize(11);
+            textSize(off, 11);
             off.setBackground(circle(Color.rgb(110, 110, 110)));
             off.setOnClickListener(v -> {
                 closeModeChooser();
@@ -6736,14 +6736,14 @@ public class ClickService extends AccessibilityService {
 
         TextView title = new TextView(this);
         title.setTextColor(Color.LTGRAY);
-        title.setTextSize(15);
+        textSize(title, 15);
         title.setText("Target " + (targets.indexOf(t) + 1) + " taps every");
         title.setGravity(Gravity.CENTER);
         panel.addView(title, fullWidth());
 
         TextView value = new TextView(this);
         value.setTextColor(Color.WHITE);
-        value.setTextSize(30);
+        textSize(value, 30);
         value.setTypeface(Typeface.DEFAULT_BOLD);
         value.setGravity(Gravity.CENTER);
         value.setText(formatInterval(t.interval));
@@ -6764,7 +6764,7 @@ public class ClickService extends AccessibilityService {
                     t.refreshLabel();
                     saveTargets();
                 });
-                b.setTextSize(14);
+                textSize(b, 14);
                 b.setPadding(dp(4), dp(10), dp(4), dp(10));
                 steps.addView(b, shared());
             }
@@ -6804,7 +6804,7 @@ public class ClickService extends AccessibilityService {
         if (canReadScreen()) {
             TextView smartNote = new TextView(this);
             smartNote.setTextColor(Color.LTGRAY);
-            smartNote.setTextSize(13);
+            textSize(smartNote, 13);
             smartNote.setGravity(Gravity.CENTER);
             smartNote.setPadding(0, dp(14), 0, 0);
             panel.addView(smartNote, fullWidth());
@@ -6842,7 +6842,7 @@ public class ClickService extends AccessibilityService {
             recastRow.setGravity(Gravity.CENTER_VERTICAL);
             TextView recastLabel = new TextView(this);
             recastLabel.setTextColor(Color.WHITE);
-            recastLabel.setTextSize(15);
+            textSize(recastLabel, 15);
             recastLabel.setGravity(Gravity.CENTER);
             Runnable showRecast = () -> recastLabel.setText("Recast at " + Math.round(t.recastAt * 100) + "%");
             showRecast.run();
@@ -6866,7 +6866,7 @@ public class ClickService extends AccessibilityService {
 
         TextView cdNote = new TextView(this);
         cdNote.setTextColor(Color.LTGRAY);
-        cdNote.setTextSize(13);
+        textSize(cdNote, 13);
         cdNote.setGravity(Gravity.CENTER);
         cdNote.setPadding(0, dp(14), 0, 0);
         panel.addView(cdNote, fullWidth());
@@ -7093,7 +7093,7 @@ public class ClickService extends AccessibilityService {
     private TextView roundButton(String text) {
         TextView b = new TextView(this);
         b.setGravity(Gravity.CENTER);
-        b.setTextSize(22);
+        textSize(b, 22);
         b.setTextColor(Color.WHITE);
         b.setText(text);
         b.setBackground(circle(Color.rgb(40, 90, 180)));
@@ -7104,7 +7104,7 @@ public class ClickService extends AccessibilityService {
         TextView b = new TextView(this);
         b.setGravity(Gravity.CENTER);
         b.setTextColor(Color.WHITE);
-        b.setTextSize(15);
+        textSize(b, 15);
         b.setText(text);
         b.setPadding(dp(14), dp(10), dp(14), dp(10));
         GradientDrawable bg = new GradientDrawable();
@@ -7124,7 +7124,25 @@ public class ClickService extends AccessibilityService {
     }
 
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return Math.round(value * getResources().getDisplayMetrics().density * uiScale());
+    }
+
+    /*
+     * Everything on the overlay is sized for the tablet (short side ~711 dp). On a phone (the
+     * REDMI's short side is ~394 dp) the same sizes covered the game (the user, 2026-10-06), so
+     * sizes scale with the screen's short side, never above the tablet's.
+     */
+    private static final float UI_REF_SHORT_DP = 711f;
+
+    private float uiScale() {
+        android.util.DisplayMetrics m = getResources().getDisplayMetrics();
+        float shortDp = Math.min(m.widthPixels, m.heightPixels) / m.density;
+        return Math.max(0.5f, Math.min(1f, shortDp / UI_REF_SHORT_DP));
+    }
+
+    /** setTextSize in sp, scaled like dp(). */
+    private void textSize(TextView v, float sp) {
+        v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, sp * uiScale());
     }
 
     @Override
