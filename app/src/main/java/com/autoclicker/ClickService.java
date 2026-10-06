@@ -3238,25 +3238,11 @@ public class ClickService extends AccessibilityService {
     private static float AUTO_STOP_L = 2300 / 2560f, AUTO_STOP_T = 560 / 1600f,
             AUTO_STOP_W = 260 / 2560f, AUTO_STOP_H = 140 / 1600f;
 
-    /** Taps the game's auto-walk "Stop" if it shows, then runs then. */
+    /** Runs then. (It used to tap a "Stop" first - see inside.) */
     private void stopAutoWalk(Runnable then) {
-        captureRegionForOcr(AUTO_STOP_L, AUTO_STOP_T, AUTO_STOP_W, AUTO_STOP_H, crop -> {
-            if (crop == null) {
-                then.run();
-                return;
-            }
-            Ocr.read(crop, (lines, words) -> {
-                for (MathQuestion.Line l : lines) {
-                    if (!l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "").equals("stop")) continue;
-                    float x = screenW * AUTO_STOP_L + l.box.exactCenterX(), y = screenH * AUTO_STOP_T + l.box.exactCenterY();
-                    Log.i(TAG, "farmer: the game's auto-walk is still on (Stop showing) - stopping it first");
-                    tapAt(x, y, "auto-walk stop");
-                    handler.postDelayed(then, 500);
-                    return;
-                }
-                then.run();
-            });
-        });
+        // Never taps that "Stop" any more: it is the auto pots' control below the minimap, and every
+        // walk home and sell trip switched auto pots off (the user, 2026-10-07 01:18).
+        then.run();
     }
 
     /** Opens the big map and taps the spot [hx,hy] on it, so the game walks the character there. */
@@ -3264,7 +3250,9 @@ public class ClickService extends AccessibilityService {
         lastMapHomeAt = now;
         leashWalkEnd = now + 4500;                                  // next step after a fresh position
         busyUntil = farmHoldUntil = Math.max(busyUntil, now + MAP_OPEN_MS + 2500);
-        stopAutoWalk(() -> mapWalkToNow(hx, hy));
+        // No "Stop" tap first: the Stop below the minimap is the auto pots' (the user, 2026-10-07
+        // 01:18 - every walk home switched auto pots off), not an auto-walk one.
+        mapWalkToNow(hx, hy);
     }
 
     private void mapWalkToNow(int hx, int hy) {
