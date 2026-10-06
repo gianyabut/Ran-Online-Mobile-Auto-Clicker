@@ -751,7 +751,16 @@ public class ClickService extends AccessibilityService {
                     readyLook = null;
                     refreshLabel();
                 }
-            });
+            }, true);
+        }
+
+        /** Nudge from the settings window: a few pixels, keeping the saved centre in step. */
+        void nudge(int dx, int dy) {
+            params.x += dx;
+            params.y += dy;
+            if (centerX >= 0) centerX += dx;
+            safeUpdate(root, params);
+            saveTargets();
         }
 
         void refreshLabel() {
@@ -6825,6 +6834,20 @@ public class ClickService extends AccessibilityService {
         value.setText(formatInterval(t.interval));
         panel.addView(value, fullWidth());
 
+        // Fine position (the user, 23:20: dragging onto a skill exactly is hard on the phone).
+        LinearLayout nudges = new LinearLayout(this);
+        int nudgePx = Math.max(2, Math.round(3 * uiScale() * getResources().getDisplayMetrics().density / 2));
+        String[] arrows = {"◀", "▲", "▼", "▶"};
+        int[][] moves = {{-nudgePx, 0}, {0, -nudgePx}, {0, nudgePx}, {nudgePx, 0}};
+        for (int i = 0; i < arrows.length; i++) {
+            int[] mv = moves[i];
+            TextView b = pillButton(arrows[i], Color.rgb(50, 90, 120), () -> t.nudge(mv[0], mv[1]));
+            textSize(b, 16);
+            b.setPadding(dp(4), dp(8), dp(4), dp(8));
+            nudges.addView(b, shared());
+        }
+        panel.addView(nudges, fullWidth());
+
         // Small steps for fast taps, big steps for buffs every minute or two.
         int[][] stepRows = {
                 {-100, -10, 10, 100},
@@ -7336,11 +7359,26 @@ public class ClickService extends AccessibilityService {
 
     private void makeDraggable(View handle, View window, WindowManager.LayoutParams params,
                                Runnable onClick, Runnable onMoved) {
+        makeDraggable(handle, window, params, onClick, onMoved, false);
+    }
+
+    // Skill circles move only after a hold (the user, 23:20: "make sure those circles won't change,
+    // it's really hard to adjust"): a brush or a tap can't shift one any more. A buzz says it's free.
+    private static final int HOLD_TO_MOVE_MS = 500;
+
+    private void makeDraggable(View handle, View window, WindowManager.LayoutParams params,
+                               Runnable onClick, Runnable onMoved, boolean holdToMove) {
         int slop = dp(8);
         handle.setOnTouchListener(new View.OnTouchListener() {
             float downX, downY;
             int startX, startY;
-            boolean dragging;
+            boolean dragging, armed, brushed;
+            final Runnable arm = () -> {
+                if (brushed) return;
+                armed = true;
+                handle.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+                window.setAlpha(0.6f);                           // lifted: it moves now
+            };
 
             @Override
             public boolean onTouch(View v, MotionEvent e) {
@@ -7351,11 +7389,19 @@ public class ClickService extends AccessibilityService {
                         startX = params.x;
                         startY = params.y;
                         dragging = false;
+                        armed = !holdToMove;
+                        brushed = false;
+                        if (holdToMove) handler.postDelayed(arm, HOLD_TO_MOVE_MS);
                         return true;
                     case MotionEvent.ACTION_MOVE:
                         float dx = e.getRawX() - downX;
                         float dy = e.getRawY() - downY;
-                        if (Math.abs(dx) > slop || Math.abs(dy) > slop) dragging = true;
+                        boolean past = Math.abs(dx) > slop || Math.abs(dy) > slop;
+                        if (past && !armed) {
+                            brushed = true;                          // moved before the hold: not a move
+                            handler.removeCallbacks(arm);
+                        }
+                        if (past && armed) dragging = true;
                         if (dragging) {
                             draggingWindow = window;
                             params.x = startX + (int) dx;
@@ -7364,13 +7410,19 @@ public class ClickService extends AccessibilityService {
                         }
                         return true;
                     case MotionEvent.ACTION_CANCEL:
+                        handler.removeCallbacks(arm);
+                        if (holdToMove) window.setAlpha(1f);
                         if (draggingWindow == window) draggingWindow = null;
                         return true;
                     case MotionEvent.ACTION_UP:
+                        handler.removeCallbacks(arm);
+                        if (holdToMove) window.setAlpha(1f);
                         if (draggingWindow == window) draggingWindow = null;
                         if (dragging) {
                             if (onMoved != null) onMoved.run();
                             saveTargets();
+                        } else if (brushed || (holdToMove && armed)) {
+                            // A brush, or a hold let go without moving: nothing.
                         } else {
                             v.performClick();
                             // That touch was on our own button, not the game: don't hold taps for it
