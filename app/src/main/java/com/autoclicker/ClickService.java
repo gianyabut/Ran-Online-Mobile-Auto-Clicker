@@ -757,7 +757,7 @@ public class ClickService extends AccessibilityService {
                     readyLook = null;
                     refreshLabel();
                 }
-            }, () -> !free);
+            }, () -> running && !free);   // stopped = setting up: plain drag (the user, phone, 01:52)
         }
 
         /** Nudge from the settings window: a few pixels, keeping the saved centre in step. */
