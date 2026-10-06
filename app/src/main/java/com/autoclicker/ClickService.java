@@ -231,7 +231,7 @@ public class ClickService extends AccessibilityService {
     private static final boolean LOOT_WALKS = false;
     private long lootStartedAt, lootIgnoreUntil;
     // Taps allowed per screenshot that shows the hand (0.7 s apart, inside the 2 s scan).
-    private static final int LOOT_TAPS_PER_LOOK = 2;
+    private static final int LOOT_TAPS_PER_LOOK = 1;               // 1 = the look-then-tap chain is on
     private int lootTapsLeft;
     private static final int LOOT_FAILS_TO_PAUSE = 3, LOOT_FULL_PAUSE_MS = 5 * 60_000;
     private int lootFailStreak;
@@ -4966,9 +4966,24 @@ public class ClickService extends AccessibilityService {
             handler.postDelayed(lootTapTick, LOOT_LABEL_WALK_MS - sinceLabel);
             return;
         }
-        lootTapsLeft--;
-        tapAt(screenW * LOOT_HAND_X, screenH * LOOT_HAND_Y, "loot hand");
-        handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
+        // Look before every tap: tap while the hand shows, stop the moment it's gone. Two blind taps
+        // per look kept hitting the spot after the pickup (the user, 2026-10-07 01:25).
+        float l = MobCounter.HAND_L, t = MobCounter.HAND_T;
+        captureRegionForOcr(l, t, MobCounter.HAND_R - l, MobCounter.HAND_B - t, crop -> {
+            if (!running || !farmer || lootStartedAt == 0 || lootTapsLeft <= 0) return;
+            if (crop == null) {
+                handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
+                return;
+            }
+            boolean up = MobCounter.lootHandIn(crop, Math.round(screenW * l), Math.round(screenH * t), screenW, screenH);
+            if (!up) {
+                lootTapsLeft = 0;
+                farmLootCheck(false, SystemClock.uptimeMillis());   // picked up: attack again now
+                return;
+            }
+            tapAt(screenW * LOOT_HAND_X, screenH * LOOT_HAND_Y, "loot hand");
+            handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
+        });
     }
 
     /** Push the joystick from the centre by (dx, dy) and hold it there for holdMs, then release. */

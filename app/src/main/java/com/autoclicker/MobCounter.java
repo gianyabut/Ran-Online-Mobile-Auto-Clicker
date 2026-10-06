@@ -210,11 +210,18 @@ final class MobCounter {
      */
     static boolean lootHandShowing(Bitmap shot, int screenW, int screenH) {
         if (shot.getWidth() < screenW || shot.getHeight() < screenH) return false;
+        return lootHandIn(shot, 0, 0, screenW, screenH);
+    }
+
+    /** As lootHandShowing, on a crop whose top-left is at ox,oy on the screen. */
+    static boolean lootHandIn(Bitmap crop, int ox, int oy, int screenW, int screenH) {
         int tan = 0;
         int total = 0;
         for (int y = (int) (screenH * HAND_T); y < screenH * HAND_B; y += 3) {
             for (int x = (int) (screenW * HAND_L); x < screenW * HAND_R; x += 3) {
-                int c = shot.getPixel(x, y);
+                int cx = x - ox, cy = y - oy;
+                if (cx < 0 || cy < 0 || cx >= crop.getWidth() || cy >= crop.getHeight()) continue;
+                int c = crop.getPixel(cx, cy);
                 total++;
                 if (Color.red(c) > 150 && Color.red(c) - Color.blue(c) > 60 && Color.green(c) > 90) tan++;
             }
