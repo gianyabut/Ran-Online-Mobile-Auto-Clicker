@@ -2740,6 +2740,39 @@ public class ClickService extends AccessibilityService {
         dropSeenAt = now;
     }
 
+    private static final int LOOT_LABEL_AFTER_MS = 2500, LOOT_LABEL_GAP_MS = 3000, LOOT_LABEL_WALK_MS = 2000;
+    private long lootLabelAskAt, lootLabelTapAt;
+    private boolean lootLabelWanted;
+
+    /** A pickup that the hand can't finish: tap the nearest drop label so the character walks to it. */
+    private void tapDropLabel(List<MathQuestion.Line> lines) {
+        if (!running || !farmer || lootStartedAt == 0) return;
+        Rect best = null;
+        String text = null;
+        float bestD = Float.MAX_VALUE;
+        for (MathQuestion.Line l : lines) {
+            Rect b = l.box;
+            if (b.bottom <= screenH * HUD_TOP_H || (b.right > screenW * 0.76f && b.top < screenH * 0.32f)) continue;
+            if (b.left < screenW * HUD_LEFT_W && b.top < screenH * HUD_LEFT_H) continue;
+            if (onGameControls(b) || isStaticLabel(b) || !isDropLabel(l.text, b)) continue;
+            if (!safeToTap(b.exactCenterX(), b.exactCenterY())) continue;
+            float d = fromCharacter(b);
+            if (d < bestD) {
+                bestD = d;
+                best = b;
+                text = l.text.trim();
+            }
+        }
+        if (best == null) {
+            Log.i(TAG, "farmer: hand not picking it up and no drop label in sight");
+            return;
+        }
+        lootLabelTapAt = SystemClock.uptimeMillis();
+        Log.i(TAG, "farmer: hand not picking it up - tapping the drop \"" + text + "\" at " + best.centerX() + ","
+                + best.centerY() + " (" + Math.round(bestD) + " px away)");
+        tapAt(best.exactCenterX(), best.exactCenterY(), "drop label");
+    }
+
     /** The game's own controls: skills and quick slots (right), chat box, joystick, coordinates line. */
     private boolean onGameControls(Rect b) {
         float x = b.exactCenterX() / screenW, y = b.exactCenterY() / screenH;
@@ -3882,6 +3915,10 @@ public class ClickService extends AccessibilityService {
                 checkTargetName(lines);
                 noteKillSpot(lines);
                 noteDrops(lines);
+                if (lootLabelWanted) {
+                    lootLabelWanted = false;
+                    tapDropLabel(lines);
+                }
                 long seen = SystemClock.uptimeMillis();
                 List<Rect> tags = monsterTags(lines, crop, x, y);
                 noteMonstersSeen(tags, seen);
@@ -3902,7 +3939,16 @@ public class ClickService extends AccessibilityService {
     private void farmLootCheck(boolean handShowing, long now) {
         if (lootStartedAt > 0) {                            // a pickup is under way
             boolean gaveUp = now - lootStartedAt >= LOOT_MAX_PAUSE_MS
-                    || now - Math.max(lootStartedAt, lastPickupAt) >= LOOT_STALL_MS;
+                    || now - Math.max(Math.max(lootStartedAt, lastPickupAt), lootLabelTapAt) >= LOOT_STALL_MS;
+            if (handShowing && !gaveUp && now - Math.max(lootStartedAt, lastPickupAt) >= LOOT_LABEL_AFTER_MS
+                    && now - lootLabelAskAt >= LOOT_LABEL_GAP_MS) {
+                // The hand taps aren't picking it up (16 taps standing still, the user then walked
+                // over and got it, 11:14): read the ground and tap the item's label instead - the
+                // character walks to it and picks it up.
+                lootLabelAskAt = now;
+                lootLabelWanted = true;
+                lastFarmOcrAt = 0;                          // read on this scan
+            }
             if (handShowing && !gaveUp) {
                 // Still there: two more taps, then wait for the next screenshot to say it's still
                 // showing. Tapping on blind hit the ground once it was gone ("empty-ground tap ->
@@ -3969,6 +4015,11 @@ public class ClickService extends AccessibilityService {
     /** Taps the hand, and again every LOOT_RETAP_MS while the pickup is under way. */
     private void lootTapTick() {
         if (!running || !farmer || lootStartedAt == 0 || lootTapsLeft <= 0) return;
+        long sinceLabel = SystemClock.uptimeMillis() - lootLabelTapAt;
+        if (sinceLabel < LOOT_LABEL_WALK_MS) {                 // let it walk to the tapped drop
+            handler.postDelayed(lootTapTick, LOOT_LABEL_WALK_MS - sinceLabel);
+            return;
+        }
         lootTapsLeft--;
         tapAt(screenW * LOOT_HAND_X, screenH * LOOT_HAND_Y, "loot hand");
         handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
