@@ -2728,7 +2728,13 @@ public class ClickService extends AccessibilityService {
         String k = t.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
         if (k.length() < 4 || isKnownMonster(t)) return false;
         for (String w : LOOT_WORDS) if (k.contains(w)) return true;
-        for (String n : knownLoot) if (k.equals(n) || (k.length() >= 6 && (n.contains(k) || k.contains(n)))) return true;
+        for (String n : knownLoot) {
+            if (k.equals(n) || (n.length() >= 6 && k.contains(n))) return true;
+            // A label cut short: most of a known name. Any part was too loose - chat reads that ran
+            // two lines together learned "...potionwhitetiger" / "...potionkyjhele", and the bot
+            // walked after the pet's and its own name tags as drops (10:27, the user).
+            if (k.length() >= 6 && n.contains(k) && k.length() * 10 >= n.length() * 7) return true;
+        }
         return false;
     }
 
