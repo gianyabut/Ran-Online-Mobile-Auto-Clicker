@@ -195,10 +195,11 @@ public class ClickService extends AccessibilityService {
     private static final int WALL_SCENE_DIFF = 8;
     private long farmMobsSeenAt;
     // Target HP not dropping this long = stuck on a monster it can't reach.
-    private static final int FARM_STUCK_MS = 15_000;   // tougher monsters take a few hits (13:37)
-    // A full bar that stays full may be a new monster each check (fast kills: 3 in 15 s read 99%
-    // every time), so a full bar has to stay full for longer.
-    private static final int FARM_STUCK_FULL_MS = 45_000;   // 20 s still dropped fast kills (11:54)
+    // 10 s without damage: drop it and find another (the user, 11:11: a Skating Master sat at 99%
+    // for 46 s). A full bar that stays full may be a new monster each check (fast kills: 3 in 15 s
+    // read 99% every time) - those kills show as pickups/gold in the chat, which count as progress.
+    private static final int FARM_STUCK_MS = 10_000;
+    private static final int FARM_STUCK_FULL_MS = 10_000;
     private long farmProgressAt;
     private float farmTargetHp = -1;
     // Until when a walk, a target drop or a trip to loot is still going (attacks hold off too).
@@ -2365,7 +2366,13 @@ public class ClickService extends AccessibilityService {
         // Stuck: the game keeps going for a monster it can't reach (behind a wall: "no clear line
         // ... walking in", 2026-10-04 11:29), so its HP never drops. Any HP change, a new target or
         // no target at all counts as progress.
-        if (!target || Math.abs(targetHp - farmTargetHp) > 0.01f) farmProgressAt = now;
+        // Only damage counts: HP creeping back up (73% -> 74%, it regenerates when not hit) isn't.
+        if (!target || farmTargetHp < 0 || targetHp < farmTargetHp - 0.01f || targetHp > farmTargetHp + 0.3f) farmProgressAt = now;
+        farmProgressAt = Math.max(farmProgressAt, Math.max(lastPickupAt, killAt));   // fast kills
+        if (target && targetHp > farmTargetHp + 0.01f && targetHp <= farmTargetHp + 0.3f) {
+            // Healing back up: keep the reading it healed from, so the creep can't hide the stall.
+            targetHp = Math.min(targetHp, farmTargetHp);
+        }
         farmTargetHp = targetHp;
         Log.v(TAG, "farm scan: monsters ~" + mobs + ", target " + (target ? Math.round(targetHp * 100) + "%" : "none"));
         long stuckAfter = targetHp >= 0.97f ? FARM_STUCK_FULL_MS : FARM_STUCK_MS;
