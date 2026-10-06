@@ -3275,11 +3275,13 @@ public class ClickService extends AccessibilityService {
         busyUntil = farmHoldUntil = Math.max(busyUntil, now + MAP_OPEN_MS + 1500);
         final int px0 = posX, py0 = posY;
         final String map = posMap;
-        tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
+        openMapTap();
         handler.postDelayed(() -> captureHalfScreen(shot -> {
             if (shot == null) {
                 Log.w(TAG, "farmer: couldn't take the map screenshot (walking home)");
-                closeMap();                                     // it may be open: the next "open" tap would walk
+                // It may be open (the next "open" tap would walk), or not: a blind X on the bare
+                // game brings up the Server List (01:09). Look first.
+                handler.postDelayed(this::closeMapIfOpen, 600);
                 return;
             }
             boolean open = mapIsOpen(shot, 1f);
@@ -4023,7 +4025,7 @@ public class ClickService extends AccessibilityService {
     private void sellMapTap() {
         stopAutoWalk(() -> {
             if (!running || sellStage != 2) return;
-            tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
+            openMapTap();
             handler.postDelayed(() -> captureHalfScreen(shot -> {
                 if (!running || sellStage != 2) return;
                 boolean open = shot != null && mapIsOpen(shot, 1f);
@@ -5439,7 +5441,7 @@ public class ClickService extends AccessibilityService {
         lastMapFollowAt = now;
         followHoldUntil = now + MAP_OPEN_MS + 3500;             // room for a refused screenshot's retry
         followMapUntil = followHoldUntil;                       // FS+follow: skills wait off the map
-        tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
+        openMapTap();
         handler.postDelayed(() -> captureHalfScreen(shot -> {
             if (shot == null) {
                 Log.w(TAG, "follow: couldn't take the map screenshot");
@@ -5668,6 +5670,26 @@ public class ClickService extends AccessibilityService {
 
     private void closeMap() {
         tapAt(screenW * PANEL_X_X, screenH * PANEL_X_Y, "close map");
+    }
+
+    /** X only if the big map is really up; unknown (no screenshot) = leave it to Farmer's panel check. */
+    private void closeMapIfOpen() {
+        captureHalfScreen(shot -> {
+            if (shot == null) return;
+            boolean open = mapIsOpen(shot, 1f);
+            shot.recycle();
+            if (open) closeMap();
+        });
+    }
+
+    /**
+     * Taps the minimap so the big map opens. It's ours, not a stray panel: Farmer's panel check
+     * took it for one, X-ed it mid-walk, and the walk's own "close map" then hit the bare X - the
+     * Server List (2026-10-07 01:09, the user: "overclicking the x").
+     */
+    private void openMapTap() {
+        panelQuietUntil = Math.max(panelQuietUntil, SystemClock.uptimeMillis() + MAP_OPEN_MS + 4000);
+        tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
     }
 
     /**
