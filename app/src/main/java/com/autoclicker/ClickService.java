@@ -849,6 +849,12 @@ public class ClickService extends AccessibilityService {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
                     if ("com.autoclicker.FEED".equals(i.getAction())) handler.post(() -> feedPet(-0.01f));   // test the feeding
+                    else if ("com.autoclicker.JIGGLE".equals(i.getAction())) {
+                        // Test pushes: start dy px from the joystick spot, ms long, dx share of the width.
+                        int dy = i.getIntExtra("dy", 0), ms = i.getIntExtra("ms", MOVE_MS);
+                        float dx = i.getFloatExtra("dx", JOYSTICK_PUSH);
+                        handler.post(() -> testPush(dy, ms, dx));
+                    }
                     else if ("com.autoclicker.SELLTRIP".equals(i.getAction())) handler.post(() -> startSellTripFromAdb());
                     else if ("com.autoclicker.LAYOUT".equals(i.getAction())) handler.post(() -> remeasureLayout("adb"));
                     else handler.post(() -> sellAll("adb"));
@@ -857,6 +863,7 @@ public class ClickService extends AccessibilityService {
             android.content.IntentFilter f = new android.content.IntentFilter("com.autoclicker.SELL");
             f.addAction("com.autoclicker.SELLTRIP");
             f.addAction("com.autoclicker.FEED");
+            f.addAction("com.autoclicker.JIGGLE");
             f.addAction("com.autoclicker.LAYOUT");
             if (android.os.Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(sellReceiver, f, "android.permission.DUMP", null, android.content.Context.RECEIVER_EXPORTED);
@@ -5144,6 +5151,22 @@ public class ClickService extends AccessibilityService {
     }
 
     /** One brief joystick push from the centre by dx pixels, then released. */
+    /** adb test: one push left, then right, from the joystick spot moved dy px down, ms long. */
+    private void testPush(int dy, int ms, float dxShare) {
+        float cx = screenW * JOYSTICK_X, cy = screenH * JOYSTICK_Y + dy, dx = screenW * dxShare;
+        Log.i(TAG, "test push from " + Math.round(cx) + "," + Math.round(cy) + ", " + ms + " ms, " + Math.round(dx) + " px");
+        for (int k = 0; k < 2; k++) {
+            float sign = k == 0 ? -1 : 1;
+            handler.postDelayed(() -> {
+                Path path = new Path();
+                path.moveTo(cx, cy);
+                path.lineTo(cx + sign * dx, cy);
+                dispatchGesture(new GestureDescription.Builder()
+                        .addStroke(new GestureDescription.StrokeDescription(path, 0, ms)).build(), null, null);
+            }, k * (ms + 400L));
+        }
+    }
+
     private void joystickPush(float dx) {
         if (!running) return;
         if (!gestureClear(MOVE_MS, () -> joystickPush(dx))) return;
