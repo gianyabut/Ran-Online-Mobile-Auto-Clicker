@@ -3057,7 +3057,7 @@ public class ClickService extends AccessibilityService {
             }
             Ocr.read(crop, (lines, words) -> {
                 for (MathQuestion.Line l : lines) {
-                    java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
+                    java.util.regex.Matcher m = coordMatcher(l.text);
                     if (!m.find()) continue;
                     String rm = m.group(1);
                     int rx = coordNumber(m.group(2)), ry = coordNumber(m.group(3));
@@ -3128,7 +3128,7 @@ public class ClickService extends AccessibilityService {
         Ocr.read(crop, (lines, words) -> {
             if (homeReading) lastCoordReadAt = 0;                   // ⚓ waiting: read every scan
             for (MathQuestion.Line l : lines) {
-                java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
+                java.util.regex.Matcher m = coordMatcher(l.text);
                 if (!m.find()) continue;
                 String map = m.group(1);
                 int rx = coordNumber(m.group(2)), ry = coordNumber(m.group(3));
@@ -4272,7 +4272,7 @@ public class ClickService extends AccessibilityService {
             }
             Ocr.read(crop, (lines, words) -> {
                 for (MathQuestion.Line l : lines) {
-                    java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
+                    java.util.regex.Matcher m = coordMatcher(l.text);
                     if (m.find()) {
                         lastSeenMap = m.group(1);
                         lastSeenMapAt = SystemClock.uptimeMillis();
@@ -4370,15 +4370,46 @@ public class ClickService extends AccessibilityService {
                     int r = Math.round((cy - screenH * BAG_Y0) / (screenH * BAG_DY) - 0.3f);   // counts sit low in the slot
                     if (r >= 0 && r < BAG_ROWS && c >= 0 && c < BAG_COLS) stack[r][c] = true;
                 }
-                if (!shopOpen) {
+                if (!shopOpen && allRows) {
                     // It opens a moment after Item Trading (gave up at 1.8 s, 15:10): look a few times.
-                    if (allRows && ++sellShopLooks < 4) {
-                        handler.postDelayed(() -> sellScanPage(true), 1200);
-                        return;
-                    }
-                    sellDone("the shop isn't open");
+                    // The bag's own text isn't always read, though: ask the window titles too (the
+                    // shop was up but "isn't open" sold nothing, 2026-10-07 00:28).
+                    shopTitlesUp(up -> {
+                        if (!sellRunning) return;
+                        if (up) {
+                            sellQueuePage(true, filled, stack, sig);
+                        } else if (++sellShopLooks < 6) {
+                            handler.postDelayed(() -> sellScanPage(true), 1200);
+                        } else {
+                            sellDone("the shop isn't open");
+                        }
+                    });
                     return;
                 }
+                sellQueuePage(allRows, filled, stack, sig);
+            }, true);
+        });
+    }
+
+    /** The Store / Equipment windows' titles on screen? (The strip the shop-closing step reads.) */
+    private void shopTitlesUp(Consumer<Boolean> then) {
+        captureRegionForOcr(0f, 180 / 1600f, 1f, 160 / 1600f, crop -> {
+            if (crop == null) {
+                then.accept(false);
+                return;
+            }
+            Ocr.read(crop, (lines, words) -> {
+                boolean up = false;
+                for (MathQuestion.Line l : lines) {
+                    String t = l.text.toLowerCase(java.util.Locale.ROOT);
+                    if (t.contains("equipment") || t.contains("store") || t.contains("clothes")) up = true;
+                }
+                then.accept(up);
+            }, true);
+        });
+    }
+
+    private void sellQueuePage(boolean allRows, boolean[][] filled, boolean[][] stack, String sig) {
                 for (int r = allRows ? 0 : BAG_ROWS - 1; r < BAG_ROWS; r++) {
                     for (int c = 0; c < BAG_COLS; c++) if (filled[r][c] && !stack[r][c]) sellQueue.add(new int[]{r, c});
                 }
@@ -4386,8 +4417,6 @@ public class ClickService extends AccessibilityService {
                 sellBottomSig = sig;
                 Log.i(TAG, "sell: " + sellQueue.size() + " slot(s) to check on this " + (allRows ? "page" : "row"));
                 sellNext();
-            }, true);
-        });
     }
 
     private void sellNext() {
@@ -5430,7 +5459,7 @@ public class ClickService extends AccessibilityService {
             Ocr.read(coord, (lines, words) -> {
                 String map = null;
                 for (MathQuestion.Line l : lines) {
-                    java.util.regex.Matcher mm = COORD_TEXT.matcher(l.text);
+                    java.util.regex.Matcher mm = coordMatcher(l.text);
                     if (mm.find()) map = mm.group(1);
                 }
                 mapDecide(open, arrow, m, map);
@@ -5912,6 +5941,12 @@ public class ClickService extends AccessibilityService {
             // A stray space inside a number too ("[1 31,118]", 19:04).
             // Digits inside the name too, after a letter: "SG_Campus1F[15,20]" never matched (14:44).
             java.util.regex.Pattern.compile("([\\p{L}_][\\p{L}\\d_]{2,}?)\\s*[\\[(|lI]\\s*(\\d(?: ?\\d){0,3})\\s*[,.]\\s*(\\d(?: ?\\d){0,3})");
+
+    /** COORD_TEXT on a chat/readout line; a space inside the map name ("SG_Campus1 F[19,15]", 00:27) dropped first. */
+    private static java.util.regex.Matcher coordMatcher(String text) {
+        return COORD_TEXT.matcher(text.replaceAll("(?<=\\d) (?=\\p{Lu}\\s*[\\[(|])", ""));
+    }
+
     private String homeMap, posMap;
     // ⚓ on the bar (Farmer): set home to where the character stands now; kept across restarts.
     private static final String KEY_HOME = "farm_home";
@@ -6045,7 +6080,7 @@ public class ClickService extends AccessibilityService {
             }
             Ocr.read(crop, (lines, words) -> {
                 for (MathQuestion.Line l : lines) {
-                    java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
+                    java.util.regex.Matcher m = coordMatcher(l.text);
                     if (m.find()) {
                         onMap.accept(m.group(1));
                         return;
