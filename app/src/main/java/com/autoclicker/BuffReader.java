@@ -27,7 +27,7 @@ final class BuffReader {
     private static final int MAX_ICON = 100;
     // Average colour difference per channel (0-255) below which two icons count as the same buff.
     // The same icon scores 0-8; Fortify vs Inspire (both light-on-dark art) score about 37-40.
-    private static final int MATCH_LIMIT = 20;
+    static final int MATCH_LIMIT = 20;
     // After the game redraws the HUD at another size (62 px -> 57 px), the same icon scores up to
     // about 20; the closest stranger in the row (someone else's red buff vs Fortify) scored 35.
     private static final int LOOSE_LIMIT = 28;

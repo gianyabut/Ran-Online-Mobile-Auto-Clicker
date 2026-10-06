@@ -886,32 +886,35 @@ public class ClickService extends AccessibilityService {
         bar.setOrientation(LinearLayout.VERTICAL);
         toggle = roundButton("");
         add = roundButton("+");
-        LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(dp(48), dp(48));
-        gap.topMargin = dp(8);
-        bar.addView(toggle, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        barText(toggle, 22);
+        barText(add, 22);
+        LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
+        gap.topMargin = barDp(8);
+        bar.addView(toggle, new LinearLayout.LayoutParams(barDp(48), barDp(48)));
         bar.addView(add, gap);
         fullBuffButton = roundButton("FB");
-        textSize(fullBuffButton, 15);
+        barText(fullBuffButton, 15);
         fullBuffButton.setTypeface(Typeface.DEFAULT_BOLD);
         fullBuffButton.setBackground(circle(Color.rgb(210, 120, 20)));
-        LinearLayout.LayoutParams fbGap = new LinearLayout.LayoutParams(dp(48), dp(48));
-        fbGap.topMargin = dp(8);
+        LinearLayout.LayoutParams fbGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
+        fbGap.topMargin = barDp(8);
         bar.addView(fullBuffButton, fbGap);
         modeButton = roundButton("");
-        textSize(modeButton, 15);
+        barText(modeButton, 15);
         modeButton.setTypeface(Typeface.DEFAULT_BOLD);
-        LinearLayout.LayoutParams modeGap = new LinearLayout.LayoutParams(dp(48), dp(48));
-        modeGap.topMargin = dp(8);
+        LinearLayout.LayoutParams modeGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
+        modeGap.topMargin = barDp(8);
         bar.addView(modeButton, modeGap);
         manualButton = roundButton("");
-        LinearLayout.LayoutParams manualGap = new LinearLayout.LayoutParams(dp(48), dp(48));
-        manualGap.topMargin = dp(8);
+        barText(manualButton, 20);
+        LinearLayout.LayoutParams manualGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
+        manualGap.topMargin = barDp(8);
         bar.addView(manualButton, manualGap);
         leashButton = roundButton("\u2693");
-        textSize(leashButton, 18);
+        barText(leashButton, 18);
         leashButton.setBackground(circle(Color.rgb(30, 130, 140)));
-        LinearLayout.LayoutParams leashGap = new LinearLayout.LayoutParams(dp(48), dp(48));
-        leashGap.topMargin = dp(8);
+        LinearLayout.LayoutParams leashGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
+        leashGap.topMargin = barDp(8);
         bar.addView(leashButton, leashGap);
         barParams = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
         barParams.x = dp(8);
@@ -1186,7 +1189,7 @@ public class ClickService extends AccessibilityService {
         lp.topMargin = on ? 0 : dp(8);
         manualButton.setLayoutParams(lp);
         manualButton.setText(on ? "AUTO" : "✋");
-        textSize(manualButton, on ? 12 : 20);
+        barText(manualButton, on ? 12 : 20);
         manualButton.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         manualButton.setBackground(circle(on ? Color.rgb(40, 150, 60) : Color.rgb(120, 70, 170)));
         if (changed && why.equals("button")) {
@@ -1916,17 +1919,17 @@ public class ClickService extends AccessibilityService {
             // Farmer: KILL fights whatever comes; LURE gathers LURE_COUNT first (the user, 14:44).
             boolean sell = sellStage != 0 || sellRunning;
             modeButton.setText(sell ? "SELL" : lureMode ? "LURE" : "KILL");
-            textSize(modeButton, 11);
+            barText(modeButton, 11);
             modeButton.setBackground(circle(sell ? Color.rgb(200, 150, 30) : lureMode ? Color.rgb(60, 120, 40) : Color.rgb(170, 40, 40)));
         } else if (booster) {
             modeButton.setText("BOOST");
-            textSize(modeButton, 11);
+            barText(modeButton, 11);
             modeButton.setBackground(circle(Color.rgb(150, 90, 30)));
         } else {
             // FS + follow shows "LL·F" / "EG·F" on purple, like FS·F on the start menu (the user,
             // 21:47: it looked just like FS).
             modeButton.setText((endGame ? "EG" : "LL") + (follow ? "·F" : ""));
-            textSize(modeButton, follow ? 12 : 15);
+            barText(modeButton, follow ? 12 : 15);
             modeButton.setBackground(circle(follow ? Color.rgb(120, 40, 120)
                     : endGame ? Color.rgb(170, 40, 40) : Color.rgb(40, 130, 130)));
         }
@@ -2018,7 +2021,7 @@ public class ClickService extends AccessibilityService {
         closeEditor();
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.HORIZONTAL);
-        int size = dp(40), gap = dp(6);
+        int size = barDp(40), gap = barDp(6);
         for (int i = 0; i < choices.length; i++) {
             choices[i].setTypeface(Typeface.DEFAULT_BOLD);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
@@ -2922,12 +2925,12 @@ public class ClickService extends AccessibilityService {
             if (homeReading) {                                  // yellow "\u2026" while the spot is read
                 leashButton.setBackground(circle(Color.rgb(200, 160, 30)));
                 leashButton.setText("\u2026");
-                textSize(leashButton, 18);
+                barText(leashButton, 18);
                 return;
             }
             leashButton.setBackground(circle(homeMap != null ? Color.rgb(30, 130, 140) : Color.rgb(110, 110, 110)));
             leashButton.setText(homeMap != null ? "\u2693\n" + leashR : "\u2693");
-            textSize(leashButton, homeMap != null ? 12 : 18);
+            barText(leashButton, homeMap != null ? 12 : 18);
         }
     }
 
@@ -6863,6 +6866,15 @@ public class ClickService extends AccessibilityService {
                 Log.i(TAG, "buff target " + n + ": couldn't tell which icon is mine, will try again next cast; " + seen);
                 return;
             }
+            for (Target o : targets) {
+                // Another ring's icon is never this one's: buff 4 "learned" buff 2's icon from a
+                // 96 -> 100% top-up and then read buff 2's timer - it was never cast (phone, 02:00).
+                if (o != t && o.buffIcon != null && BuffReader.diff(o.buffIcon, mine.sig) < BuffReader.MATCH_LIMIT) {
+                    Log.i(TAG, "buff target " + n + ": the icon that changed is buff " + (targets.indexOf(o) + 1)
+                            + "'s, will try again next cast; " + seen);
+                    return;
+                }
+            }
             Log.i(TAG, "buff target " + n + ": " + seen);
             t.buffIcon = mine.sig;
             t.buffY = mine.y;
@@ -6872,6 +6884,21 @@ public class ClickService extends AccessibilityService {
             saveTargets();
         }
 
+        for (Target o : targets) {
+            // Two rings on one icon (learned before the check above): neither can trust it.
+            if (o != t && o.buffIcon != null && BuffReader.diff(o.buffIcon, t.buffIcon) < BuffReader.MATCH_LIMIT) {
+                Log.w(TAG, "buff targets " + n + " and " + (targets.indexOf(o) + 1)
+                        + " learned the same icon - both learn theirs again at their next cast");
+                for (Target x : new Target[]{t, o}) {
+                    x.buffIcon = null;
+                    x.buffKnown = false;
+                    x.learnBefore = null;
+                    x.refreshLabel();
+                }
+                saveTargets();
+                return;
+            }
+        }
         BuffReader.Icon icon = findBuff(t, icons);
         if (icon != null && icon.fill >= 0.9f) {
             int d = BuffReader.diff(icon.sig, t.buffIcon);
@@ -7855,6 +7882,22 @@ public class ClickService extends AccessibilityService {
         android.util.DisplayMetrics m = getResources().getDisplayMetrics();
         float shortDp = Math.min(m.widthPixels, m.heightPixels) / m.density;
         return Math.max(0.5f, Math.min(1f, shortDp / UI_REF_SHORT_DP));
+    }
+
+    // The bar's buttons stay big enough for a finger on small screens (the user, phone: "too hard
+    // to select since my fingers are a bit too big"); everything else shrinks with uiScale().
+    private static final float BAR_MIN_SCALE = 0.8f;
+
+    private float barScale() {
+        return Math.max(uiScale(), BAR_MIN_SCALE);
+    }
+
+    private int barDp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density * barScale());
+    }
+
+    private void barText(TextView v, float sp) {
+        v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, sp * barScale());
     }
 
     /** setTextSize in sp, scaled like dp(). */
