@@ -223,7 +223,7 @@ public class ClickService extends AccessibilityService {
     private long lastPickupAt;
     // Not faster while looting: 1 s screenshots under memory pressure preceded Android's own
     // system process hanging and restarting (12:35-12:37, watchdog kill), as at 11:43.
-    private static final int LOOT_SCAN_MS = 1000;
+    private static final int LOOT_SCAN_MS = 700;
     // A skill still animating ignores other input; give it this long after the last attack tap.
     private static final int LOOT_AFTER_SKILL_MS = 700;
     // No walking for loot: the loot button walks the character to the item by itself (the user,
@@ -4883,6 +4883,8 @@ public class ClickService extends AccessibilityService {
      * and attack again once it's gone - or after LOOT_MAX_PAUSE_MS, then leave that item a while.
      */
     private void farmLootCheck(boolean handShowing, long now) {
+        handReadAt = now;
+        handUpAtRead = handShowing;
         if (lootStartedAt > 0) {                            // a pickup is under way
             boolean gaveUp = now - lootStartedAt >= LOOT_MAX_PAUSE_MS
                     || now - Math.max(Math.max(lootStartedAt, lastPickupAt), lootLabelTapAt) >= LOOT_STALL_MS;
@@ -4966,25 +4968,26 @@ public class ClickService extends AccessibilityService {
             handler.postDelayed(lootTapTick, LOOT_LABEL_WALK_MS - sinceLabel);
             return;
         }
-        // Look before every tap: tap while the hand shows, stop the moment it's gone. Two blind taps
-        // per look kept hitting the spot after the pickup (the user, 2026-10-07 01:25).
-        float l = MobCounter.HAND_L, t = MobCounter.HAND_T;
-        captureRegionForOcr(l, t, MobCounter.HAND_R - l, MobCounter.HAND_B - t, crop -> {
-            if (!running || !farmer || lootStartedAt == 0 || lootTapsLeft <= 0) return;
-            if (crop == null) {
-                handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
-                return;
-            }
-            boolean up = MobCounter.lootHandIn(crop, Math.round(screenW * l), Math.round(screenH * t), screenW, screenH);
-            if (!up) {
-                lootTapsLeft = 0;
-                farmLootCheck(false, SystemClock.uptimeMillis());   // picked up: attack again now
-                return;
-            }
-            tapAt(screenW * LOOT_HAND_X, screenH * LOOT_HAND_Y, "loot hand");
-            handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
-        });
+        // A tap only on a farm scan taken after the previous tap that still shows the hand: tap
+        // while it shows, stop the moment it's gone. Two blind taps per look kept hitting the spot
+        // after the pickup (the user, 01:25); an extra screenshot per tap was refused (Android's
+        // screenshot rate limit) and the hand never got tapped at all (01:29).
+        long now = SystemClock.uptimeMillis();
+        if (handReadAt <= lastLootTapAt || now - handReadAt > 1500) {
+            handler.postDelayed(lootTapTick, 150);                     // wait for that scan
+            return;
+        }
+        if (!handUpAtRead) {                                           // gone: farmLootCheck takes it from here
+            lootTapsLeft = 0;                                          // (and restarts this if it comes back)
+            return;
+        }
+        lastLootTapAt = now;
+        tapAt(screenW * LOOT_HAND_X, screenH * LOOT_HAND_Y, "loot hand");
+        handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
     }
+
+    private long handReadAt, lastLootTapAt;
+    private boolean handUpAtRead;
 
     /** Push the joystick from the centre by (dx, dy) and hold it there for holdMs, then release. */
     private void joystickHold(float dx, float dy, int holdMs) {
