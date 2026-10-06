@@ -576,6 +576,7 @@ public class ClickService extends AccessibilityService {
         long lastSeenAt;
         float lastSeenFill;
         long lastTapAt;
+        long lastCastAt;                // our last tap on this ring, never reset (icon ownership)
         // While learning: the buff row just before this ring's last cast, and when to look again.
         List<BuffReader.Icon> learnBefore;
         long learnCheckAt;
@@ -1515,6 +1516,7 @@ public class ClickService extends AccessibilityService {
         // and count this ring's interval from the moment it really tapped.
         next.ready = false;
         next.lastTapAt = now;
+        next.lastCastAt = now;
         if (next.smartBuff && next.buffIcon == null && lastScan != null && now - lastScanAt < 2500) {
             // Learning: compare the buff row from just before this cast with one a moment after.
             next.learnBefore = lastScan;
@@ -7070,6 +7072,18 @@ public class ClickService extends AccessibilityService {
                 // Another ring's icon is never this one's: buff 4 "learned" buff 2's icon from a
                 // 96 -> 100% top-up and then read buff 2's timer - it was never cast (phone, 02:00).
                 if (o != t && o.buffIcon != null && BuffReader.diff(o.buffIcon, mine.sig) < BuffReader.MATCH_LIMIT) {
+                    if (now - o.lastCastAt > 20_000) {
+                        // The other ring wasn't cast, yet "its" icon refilled on this ring's cast: it
+                        // learned this one's icon by mistake (buff 8 held buff 9's, so 8 always read
+                        // full and never fired, tablet 02:39). This ring takes it, the other relearns.
+                        Log.w(TAG, "buff target " + (targets.indexOf(o) + 1) + "'s icon refills when buff " + n
+                                + " is cast - it's " + n + "'s; " + (targets.indexOf(o) + 1) + " learns its own at its next cast");
+                        o.buffIcon = null;
+                        o.buffKnown = false;
+                        o.learnBefore = null;
+                        o.refreshLabel();
+                        break;
+                    }
                     Log.i(TAG, "buff target " + n + ": the icon that changed is buff " + (targets.indexOf(o) + 1)
                             + "'s, will try again next cast; " + seen);
                     return;
