@@ -1328,6 +1328,11 @@ public class ClickService extends AccessibilityService {
             schedulePump(1000);
             return;
         }
+        // Selling / on the campus: no skills at all - a buff recast closed the NPC's popup (15:13).
+        if (sellStage != 0 || sellRunning || inCampus()) {
+            schedulePump(1000);
+            return;
+        }
         // While the game isn't in front (or the keyboard is up) hold everything as it is,
         // so no tap is sent, counted, or mistaken for one the game ignored.
         if (!gameInFront()) {
