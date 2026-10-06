@@ -3787,17 +3787,37 @@ public class ClickService extends AccessibilityService {
                 && lastSeenMap.toLowerCase(java.util.Locale.ROOT).contains("campus");
     }
 
-    private static final int SELL_LOAD_MS = 8000, SELL_CARD_TRIES = 2, SELL_ARRIVE_MAX_MS = 30_000;
+    private static final int SELL_LOAD_MS = 8000, SELL_CARD_TRIES = 2, SELL_ARRIVE_MAX_MS = 60_000;
     private long sellCardAt;
     private int sellStage, sellCardTries;                     // sellStage 1: on the way to town
     private String sellFromMap;
 
     private void startSellTrip() {
         if (!running || !farmer || manual || sellStage != 0 || pkHold || SystemClock.uptimeMillis() < deadUntil) return;
+        // Where are we, right now? The CRC only off the campus (the user, 15:25).
+        sellStage = 1;                                          // claimed while the map is read
+        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, SystemClock.uptimeMillis() + 5000);
+        readPosition((map, x, y) -> {
+            if (!running || sellStage != 1) return;
+            sellStage = 0;
+            if (map == null) {
+                Log.w(TAG, "sell trip: couldn't read the map, not using the card on a guess - trying again in 3 s");
+                handler.postDelayed(this::startSellTrip, 3000);
+                return;
+            }
+            posMap = map;
+            posX = x;
+            posY = y;
+            posAt = SystemClock.uptimeMillis();
+            startSellTripAt(map);
+        });
+    }
+
+    private void startSellTripAt(String map) {
         returning = false;
-        if (inCampus()) {
+        if (map.toLowerCase(java.util.Locale.ROOT).contains("campus")) {
             // On the campus already (the card used by hand): straight to the walk.
-            Log.w(TAG, "sell trip: already in " + lastSeenMap + " - walking to the Sword Section");
+            Log.w(TAG, "sell trip: already in " + map + " - no card, walking to the Sword Section");
             sellStage = 2;
             sellStageAt = SystemClock.uptimeMillis();
             sellWalkTapAt = 0;
@@ -3809,7 +3829,7 @@ public class ClickService extends AccessibilityService {
         sellStage = 1;
         refreshModeButton();
         sellCardTries = 0;
-        sellFromMap = posMap != null ? posMap : homeMap;
+        sellFromMap = map;
         Log.w(TAG, "sell trip: bag full - Campus Return card (D) to town");
         useSellCard();
     }
@@ -3857,7 +3877,18 @@ public class ClickService extends AccessibilityService {
                 handler.postDelayed(this::sellArrivedCheck, 2000);
                 return;
             }
-            boolean moved = map != null && (sellFromMap == null || !sameMap(map, sellFromMap));
+            if (map == null) {
+                // Still unreadable after a minute. Never the card again on a guess: a second Campus
+                // Return from the campus moved the Back Point there (15:25, the user).
+                sellStage = 0;
+                refreshModeButton();
+                Telegram.send(this, "\u26A0 Ran Online: used the Campus Return card but couldn't read where I am after "
+                        + SELL_ARRIVE_MAX_MS / 1000 + " s. Stopped - please check.");
+                setManual(true, "sell trip: map unreadable");
+                return;
+            }
+            boolean moved = map.toLowerCase(java.util.Locale.ROOT).contains("campus")
+                    || (sellFromMap != null && !sameMap(map, sellFromMap));
             if (!moved) {
                 if (sellCardTries < SELL_CARD_TRIES) {
                     Log.w(TAG, "sell trip: still in " + map + " after the card, trying it again");
@@ -5882,7 +5913,19 @@ public class ClickService extends AccessibilityService {
     }
 
     /** Paw (top right) -> "Summon your pet?" -> Yes. The Yes button is read by OCR, else its measured spot. */
+    private int petPawTries;
+
+    private void summonPetAgain() {
+        if (!running || manual || inCampus() || sellStage != 0) return;
+        summonPetTap();
+    }
+
     private void summonPet() {
+        petPawTries = 0;
+        summonPetTap();
+    }
+
+    private void summonPetTap() {
         long now = SystemClock.uptimeMillis();
         panelQuietUntil = now + 8000;                          // that dialog is ours, not a panel to X
         busyUntil = farmHoldUntil = Math.max(busyUntil, now + 4000);
@@ -5909,7 +5952,13 @@ public class ClickService extends AccessibilityService {
                     return;
                 }
                 if (!asked) {
-                    Log.i(TAG, "pet: no \"Summon your pet?\" after the paw (already out?)");
+                    // The paw tap didn't bring the question up (15:28, the pet stayed away): again.
+                    if (++petPawTries < 3) {
+                        Log.i(TAG, "pet: no \"Summon your pet?\" after the paw - tapping it again");
+                        handler.postDelayed(this::summonPetAgain, 1500);
+                    } else {
+                        Log.i(TAG, "pet: no \"Summon your pet?\" after 3 paw taps (already out?)");
+                    }
                     return;
                 }
                 float x = yes != null ? yes.exactCenterX() : screenW * PET_YES_X;
@@ -6209,7 +6258,9 @@ public class ClickService extends AccessibilityService {
                         walkStartThumb = null;
                     }
                     lastSceneThumb = thumb;
-                    if (farmPanelCheck(MobCounter.hudHidden(shot, screenW, screenH), now)) {
+                    // A sell trip owns the screen: its panel-X closed the item window mid-sale (15:26).
+                    boolean sellTrip = sellStage != 0 || sellRunning;
+                    if (!sellTrip && farmPanelCheck(MobCounter.hudHidden(shot, screenW, screenH), now)) {
                         // Keep reading text: the panel might be the anti-bot question, never X it.
                         if (now - lastFarmOcrAt >= FARM_SCAN_MS - 100) {
                             lastFarmOcrAt = now;
@@ -6217,7 +6268,7 @@ public class ClickService extends AccessibilityService {
                         }
                         return;
                     }
-                    if (inCampus()) {
+                    if (sellTrip || inCampus()) {
                         // Town: no skills, no walking, no looting - just keep reading.
                         busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + 3000);
                     } else {
