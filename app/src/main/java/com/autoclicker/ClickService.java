@@ -2157,12 +2157,15 @@ public class ClickService extends AccessibilityService {
         if (gamePackage != null && !gamePackage.equals(foregroundPackage())) return;
         // Copy only the chat corner (~1.4 MB), not the whole 16 MB screen, so scanning often is cheap.
         captureRegionForOcr(CHAT_L, CHAT_T, CHAT_W, CHAT_H, chat -> {
-            if (chat != null) Ocr.read(chat, (lines, words) -> checkChatForBuffRequest(lines));
+            if (chat == null) return;
+            openChatIfHidden(chat, Math.round(screenW * CHAT_L), Math.round(screenH * CHAT_T));
+            Ocr.read(chat, (lines, words) -> checkChatForBuffRequest(lines));
         });
     }
 
     private void checkChatForBuffRequest(List<MathQuestion.Line> lines) {
         if (!running) return;
+        for (MathQuestion.Line line : lines) checkPkLine(line.text);
         String hit = null;
         for (MathQuestion.Line line : lines) {
             String norm = line.text.toLowerCase(java.util.Locale.ROOT).trim();
@@ -3261,8 +3264,142 @@ public class ClickService extends AccessibilityService {
         killSpotAt = SystemClock.uptimeMillis();
     }
 
+    /*
+     * The chat box hides itself (a game setting, the user 2026-10-06). Hidden, it's a white "..."
+     * speech bubble (body ~84x58 px, three dark dots) next to the loot button, and moves around;
+     * a tap on it opens the chat again. Looked for in the chat reads of Farmer and FS.
+     */
+    private static final float CHATB_L = 0.28f, CHATB_T = 0.74f, CHATB_R = 0.76f, CHATB_B = 0.99f;
+    private static final int CHAT_OPEN_GAP_MS = 15_000, CHAT_OPEN_TRIES = 4, CHAT_OPEN_BACKOFF_MS = 5 * 60_000;
+    private long chatOpenTapAt;
+    private int chatOpenTries;
+
+    /** Taps the "..." bubble if bmp (whose top-left is at ox,oy on screen) shows it. */
+    private void openChatIfHidden(Bitmap bmp, int ox, int oy) {
+        long now = SystemClock.uptimeMillis();
+        if (now - chatOpenTapAt < (chatOpenTries >= CHAT_OPEN_TRIES ? CHAT_OPEN_BACKOFF_MS : CHAT_OPEN_GAP_MS)) return;
+        float[] c;
+        try {
+            c = chatBubble(bmp, ox, oy);
+        } catch (RuntimeException | OutOfMemoryError e) {
+            return;
+        }
+        if (c == null) {
+            chatOpenTries = 0;
+            return;
+        }
+        if (chatOpenTries >= CHAT_OPEN_TRIES) chatOpenTries = 0;   // after the back-off, try again
+        chatOpenTapAt = now;
+        chatOpenTries++;
+        Log.i(TAG, "chat hidden: tapping the \"...\" bubble at " + Math.round(c[0]) + "," + Math.round(c[1])
+                + " (try " + chatOpenTries + ")");
+        tapAt(c[0], c[1], "chat open");
+    }
+
+    /** Centre of the "..." bubble in screen pixels, or null. */
+    private float[] chatBubble(Bitmap bmp, int ox, int oy) {
+        float s = screenW / 2560f;
+        int x0 = Math.max(0, Math.round(screenW * CHATB_L) - ox), y0 = Math.max(0, Math.round(screenH * CHATB_T) - oy);
+        int x1 = Math.min(bmp.getWidth(), Math.round(screenW * CHATB_R) - ox);
+        int y1 = Math.min(bmp.getHeight(), Math.round(screenH * CHATB_B) - oy);
+        int w = x1 - x0, h = y1 - y0, bw = Math.round(60 * s), bh = Math.round(40 * s);
+        if (w <= bw || h <= bh) return null;
+        int[] px = new int[w * h];
+        bmp.getPixels(px, 0, w, x0, y0, w, h);
+        boolean[] white = new boolean[w * h];
+        int[] sum = new int[(w + 1) * (h + 1)];                 // integral image of the white pixels
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int p = px[y * w + x];
+                white[y * w + x] = Math.min((p >> 16) & 0xff, Math.min((p >> 8) & 0xff, p & 0xff)) > 235;
+                sum[(y + 1) * (w + 1) + x + 1] = (white[y * w + x] ? 1 : 0) + sum[y * (w + 1) + x + 1]
+                        + sum[(y + 1) * (w + 1) + x] - sum[y * (w + 1) + x];
+            }
+        }
+        int need = Math.round(bw * bh * 0.9f), checks = 0;
+        for (int y = 0; y + bh <= h; y += 2) {
+            for (int x = 0; x + bw <= w; x += 2) {
+                int n = sum[(y + bh) * (w + 1) + x + bw] - sum[y * (w + 1) + x + bw] - sum[(y + bh) * (w + 1) + x] + sum[y * (w + 1) + x];
+                if (n < need) continue;
+                float[] c = bubbleAt(px, white, w, h, x + bw / 2, y + bh / 2, s);
+                if (c != null) return new float[]{c[0] + x0 + ox, c[1] + y0 + oy};
+                if (++checks > 20) return null;                 // a big white area, not the bubble
+                x += bw;
+            }
+        }
+        return null;
+    }
+
+    /** The white blob around (cx,cy): bubble-sized with a row of dark dots inside? Its centre, else null. */
+    private static float[] bubbleAt(int[] px, boolean[] white, int w, int h, int cx, int cy, float s) {
+        // Edges: walk out while the column/row is mostly white, stepping over the dots (a short gap).
+        int gap = Math.max(4, Math.round(12 * s));
+        int l = bubbleEdge(white, w, h, cx, cy, -1, true, gap), r = bubbleEdge(white, w, h, cx, cy, 1, true, gap);
+        int t = bubbleEdge(white, w, h, cx, cy, -1, false, gap), b = bubbleEdge(white, w, h, cx, cy, 1, false, gap);
+        int bw = r - l + 1, bh = b - t + 1;
+        if (bw < 66 * s || bw > 110 * s || bh < 44 * s || bh > 80 * s) return null;
+        // The dots: dark pixels inside, all in one thin band.
+        int dark = 0, top = Integer.MAX_VALUE, bottom = -1;
+        for (int y = t + 2; y <= b - 2; y++) {
+            for (int x = l + 2; x <= r - 2; x++) {
+                int p = px[y * w + x];
+                if (Math.max((p >> 16) & 0xff, Math.max((p >> 8) & 0xff, p & 0xff)) < 110) {
+                    dark++;
+                    top = Math.min(top, y);
+                    bottom = Math.max(bottom, y);
+                }
+            }
+        }
+        if (dark < 20 * s * s || dark > 700 * s * s || bottom - top > 18 * s) return null;   // 52-59 measured
+        return new float[]{(l + r) / 2f, (t + b) / 2f};
+    }
+
+    /** How far the white blob reaches from (cx,cy) going dir along x (horizontal) or y. */
+    private static int bubbleEdge(boolean[] white, int w, int h, int cx, int cy, int dir, boolean horizontal, int gap) {
+        int pos = horizontal ? cx : cy, lim = horizontal ? w - 1 : h - 1;
+        while (true) {
+            int next = -1;
+            for (int k = 1; k <= gap; k++) {
+                int q = pos + dir * k;
+                if (q < 0 || q > lim) break;
+                boolean ok = horizontal ? whiteRun(white, w, q, cy - 6, q, cy + 6) >= 9
+                        : whiteRun(white, w, cx - 15, q, cx + 15, q) >= 24;
+                if (ok) {
+                    next = q;
+                    break;
+                }
+            }
+            if (next < 0) return pos;
+            pos = next;
+        }
+    }
+
+    private static int whiteRun(boolean[] white, int w, int xa, int ya, int xb, int yb) {
+        int n = 0, h = white.length / w;
+        for (int y = Math.max(0, ya); y <= Math.min(h - 1, yb); y++) {
+            for (int x = Math.max(0, xa); x <= Math.min(w - 1, xb); x++) if (white[y * w + x]) n++;
+        }
+        return n;
+    }
+
+    // PK time (the user asked, 2026-10-06): the chat says "The PK Period among schools has began.
+    // You can only attack students outside the campus." -> a Telegram (once per PK_ALERT_GAP_MS).
+    private static final int PK_ALERT_GAP_MS = 30 * 60_000;
+    private long pkAlertAt;
+
+    private void checkPkLine(String text) {
+        String k = text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+        if (!k.contains("pkperiod") || !(k.contains("began") || k.contains("begun") || k.contains("start"))) return;
+        long now = SystemClock.uptimeMillis();
+        if (pkAlertAt != 0 && now - pkAlertAt < PK_ALERT_GAP_MS) return;
+        pkAlertAt = now;
+        Log.w(TAG, "PK period started: \"" + text + "\"");
+        Telegram.send(this, "⚔ Ran Online: PK time has started (\"" + text.trim() + "\").");
+    }
+
     /** Reads the chat box for pickups and gold; each line counted once as the chat scrolls. */
     private void farmChatRead(Bitmap shot) {
+        openChatIfHidden(shot, 0, 0);
         int x = Math.round(screenW * LOOT_CHAT_L), y = Math.round(screenH * LOOT_CHAT_T);
         int w = Math.min(Math.round(screenW * LOOT_CHAT_W), shot.getWidth() - x);
         int h = Math.min(Math.round(screenH * LOOT_CHAT_H), shot.getHeight() - y);
@@ -3281,6 +3418,7 @@ public class ClickService extends AccessibilityService {
             // whole chat reads never lined up and one gold drop was counted 3 times (07:12:54-07:13:02).
             List<String> cur = new ArrayList<>(), curKeys = new ArrayList<>();
             for (MathQuestion.Line l : sorted) {
+                checkPkLine(l.text);
                 String entry = lootEntry(l.text);
                 if (entry == null) continue;
                 cur.add(entry);
