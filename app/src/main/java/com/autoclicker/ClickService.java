@@ -3919,11 +3919,13 @@ public class ClickService extends AccessibilityService {
             }
             Ocr.read(crop, (lines, words) -> {
                 if (!running || sellStage != 3) return;
-                Rect trading = null, npc = null;
+                Rect trading = null, npc = null, talk = null;
                 for (MathQuestion.Line l : lines) {
                     String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
                     if (k.contains("itemtrading")) trading = new Rect(l.box);
-                    if (k.contains("swordinstruct")) npc = new Rect(l.box);
+                    // Close by, the game shows its own "... Talk to Sword Instructor" button (15:11).
+                    if (k.contains("talkto") && k.contains("instruct")) talk = new Rect(l.box);
+                    else if (k.contains("swordinstruct")) npc = new Rect(l.box);
                 }
                 if (trading != null) {
                     Log.i(TAG, "sell trip: Item Trading");
@@ -3932,6 +3934,12 @@ public class ClickService extends AccessibilityService {
                     handler.postDelayed(() -> {
                         if (running && sellStage == 4) sellAll("trip");
                     }, 1800);
+                    return;
+                }
+                if (talk != null) {
+                    Log.i(TAG, "sell trip: tapping \"Talk to Sword Instructor\"");
+                    tapAt(talk.exactCenterX(), talk.exactCenterY(), "talk to sword instructor");
+                    handler.postDelayed(this::sellTalk, 1800);
                     return;
                 }
                 if (npc == null) {
@@ -4006,7 +4014,7 @@ public class ClickService extends AccessibilityService {
             "food", "pill", "elixir", "costume", "pet"};
     private static final int SELL_MAX_ROWS = 30;
     private boolean sellRunning;
-    private int sellSold, sellRowsSeen;
+    private int sellSold, sellRowsSeen, sellShopLooks;
     private final java.util.ArrayDeque<int[]> sellQueue = new java.util.ArrayDeque<>();
     private String sellGoldBefore, sellGoldNow, sellBottomSig, sellItemName;
     private android.content.BroadcastReceiver sellReceiver;
@@ -4020,6 +4028,7 @@ public class ClickService extends AccessibilityService {
         sellQueue.clear();
         sellGoldBefore = sellGoldNow = null;
         sellBottomSig = null;
+        sellShopLooks = 0;
         Log.i(TAG, "sell: selling equipment and rings (" + why + ")");
         sellScanPage(true);
     }
@@ -4067,6 +4076,11 @@ public class ClickService extends AccessibilityService {
                     if (r >= 0 && r < BAG_ROWS && c >= 0 && c < BAG_COLS) stack[r][c] = true;
                 }
                 if (!shopOpen) {
+                    // It opens a moment after Item Trading (gave up at 1.8 s, 15:10): look a few times.
+                    if (allRows && ++sellShopLooks < 4) {
+                        handler.postDelayed(() -> sellScanPage(true), 1200);
+                        return;
+                    }
                     sellDone("the shop isn't open");
                     return;
                 }
