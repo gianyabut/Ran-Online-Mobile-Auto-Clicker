@@ -3840,9 +3840,13 @@ public class ClickService extends AccessibilityService {
     private static final float BAG_DOWN_X = 2474 / 2560f, BAG_DOWN_Y = 1050 / 1600f;
     private static final float INFO_W = 1440 / 2560f, INFO_H = 1420 / 1600f;
     private static final float INFO_X_X = 1371 / 2560f, INFO_X_Y = 81 / 1600f;
-    private static final float CONFIRM_L = 560 / 2560f, CONFIRM_T = 560 / 1600f, CONFIRM_W = 1420 / 2560f, CONFIRM_H = 460 / 1600f;
+    private static final float CONFIRM_L = 400 / 2560f, CONFIRM_T = 400 / 1600f, CONFIRM_W = 1760 / 2560f, CONFIRM_H = 760 / 1600f;
+    private int sellConfirmTries;
     private static final String[] SELL_TYPES = {"ring", "body", "hand", "foot", "glove", "shoe", "boot", "head", "hat",
-            "helm", "neck", "ear", "belt", "wrist", "arm", "pant", "skirt", "coat", "robe", "suit", "weapon"};
+            "helm", "neck", "ear", "belt", "wrist", "pant", "skirt", "coat", "robe", "suit"};
+    // Never weapons: "Heavy Attack Gauntlets [Ice]" (type HandHeld Weapon) was the user's own weapon
+    // and got sold because "hand" matched (15:00).
+    private static final String[] NEVER_SELL_TYPES = {"weapon", "handheld"};
     private static final String[] NEVER_SELL = {"potion", "ticket", "card", "point", "scroll", "box", "stone", "bread",
             "food", "pill", "elixir", "costume", "pet"};
     private static final int SELL_MAX_ROWS = 30;
@@ -3893,7 +3897,7 @@ public class ClickService extends AccessibilityService {
                     if (l.text.toLowerCase(java.util.Locale.ROOT).contains("equipment")) shopOpen = true;
                     String t = l.text.trim();
                     float cx = l.box.exactCenterX() + ox, cy = l.box.exactCenterY() + oy;
-                    if (t.matches("[\\d,]{5,}")) {                   // the gold line under the grid
+                    if (t.matches("\\d{1,3}(?:[,.]\\d{3})+")) {     // the gold line under the grid
                         if (sellGoldBefore == null) sellGoldBefore = t;
                         sellGoldNow = t;
                         continue;
@@ -3920,9 +3924,15 @@ public class ClickService extends AccessibilityService {
 
     private void sellNext() {
         if (!sellRunning) return;
+        if (gamePackage != null && !gamePackage.equals(foregroundPackage())) {
+            sellQueue.clear();
+            sellDone("the game isn't in front");
+            return;
+        }
         int[] slot = sellQueue.poll();
         if (slot == null) {
-            sellScroll();
+            // Only the 4 rows the shop opens on (the user, 15:01) - no scrolling further down.
+            sellDone("first 4 rows done");
             return;
         }
         float x = screenW * (BAG_X0 + slot[1] * BAG_DX), y = screenH * (BAG_Y0 + slot[0] * BAG_DY);
@@ -3956,7 +3966,8 @@ public class ClickService extends AccessibilityService {
                     if (k.equals("x") && l.box.top < screenH * 0.1f) close = new Rect(l.box);
                 }
                 String nk = name == null ? "" : name.toLowerCase(java.util.Locale.ROOT);
-                boolean equipment = type != null && java.util.Arrays.stream(SELL_TYPES).anyMatch(type::contains);
+                boolean equipment = type != null && java.util.Arrays.stream(SELL_TYPES).anyMatch(type::contains)
+                        && java.util.Arrays.stream(NEVER_SELL_TYPES).noneMatch(type::contains);
                 boolean keep = java.util.Arrays.stream(NEVER_SELL).anyMatch(nk::contains);
                 if (name == null && sell == null) {
                     Log.i(TAG, "sell: no details window, next slot");
@@ -3967,7 +3978,8 @@ public class ClickService extends AccessibilityService {
                     sellItemName = name;
                     Log.i(TAG, "sell: \"" + name + "\" (type " + type + ") - selling");
                     tapAt(sell.exactCenterX(), sell.exactCenterY(), "sell");
-                    handler.postDelayed(this::sellConfirm, 800);
+                    sellConfirmTries = 0;
+                    handler.postDelayed(this::sellConfirm, 1200);
                     return;
                 }
                 Log.i(TAG, "sell: keeping \"" + name + "\" (type " + type + (shop ? "" : ", shop won't take it")
@@ -4010,10 +4022,15 @@ public class ClickService extends AccessibilityService {
                     handler.postDelayed(this::sellNext, 900);
                     return;
                 }
+                if (!asked && ++sellConfirmTries < 3) {
+                    handler.postDelayed(this::sellConfirm, 700);   // not up yet (shoes, 15:00): look again
+                    return;
+                }
                 Log.w(TAG, "sell: the confirm box isn't asking about \"" + sellItemName + "\" (asked " + asked + ", same "
-                        + same + ") - No");
-                if (no != null) tapAt(no.exactCenterX() + ox, no.exactCenterY() + oy, "sell no");
-                handler.postDelayed(this::sellNext, 700);
+                        + same + ") - not selling it");
+                if (asked && no != null) tapAt(no.exactCenterX() + ox, no.exactCenterY() + oy, "sell no");
+                else tapAt(screenW * INFO_X_X, screenH * INFO_X_Y, "close details");
+                handler.postDelayed(this::sellNext, 800);
             }, true);
         });
     }
