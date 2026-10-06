@@ -790,7 +790,6 @@ public class ClickService extends AccessibilityService {
 
     @Override
     protected void onServiceConnected() {
-        connectedAt = SystemClock.uptimeMillis();
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
 
         // Android can disconnect and reconnect this same service without destroying it.
@@ -1042,16 +1041,9 @@ public class ClickService extends AccessibilityService {
         lootIgnoreUntil = 0;                                    // a start always loots again
         lootFailStreak = 0;
         if (run) {
-            if (why.equals("button") && SystemClock.uptimeMillis() - connectedAt > RESTART_KEEP_HOME_MS) {
-                // A start of yours begins with the leash off (the user, 2026-10-06): tap the anchor
-                // at the spot to set it. A resume after Android restarted the app keeps it, and so
-                // does the start right after an install (it cleared the user's anchor every time).
-                homeMap = null;
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_HOME).apply();
-                refreshLeashButton();
-            } else {
-                loadHome();                                     // the ⚓ spot; none set = roam (the user, 08:03)
-            }
+            // The ⚓ spot stays until you clear it on the button (the user, 10:47: a stop and start
+            // cleared it, which they didn't want after all); none set = roam (08:03).
+            loadHome();
             calStage = 0;
             calValid = false;
             leashMisses = 0;
@@ -4753,8 +4745,6 @@ public class ClickService extends AccessibilityService {
     private static final float BACK_POINT_X = 2317 / 2560f, BACK_POINT_Y = 755 / 1600f;
     private static final int BACK_POINT_AFTER_MS = 7000, BACK_POINT_LOAD_MS = 12_000;
     private long deadUntil;
-    private long connectedAt;
-    private static final int RESTART_KEEP_HOME_MS = 60_000;
     private final Runnable useBackPoint = this::useBackPoint;
     private final Runnable backAtSpot = this::backAtSpot;
     // The pet stays behind after a death: the paw (top right) asks "Summon your pet?" Yes/No.
