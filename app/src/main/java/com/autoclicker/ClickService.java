@@ -5473,6 +5473,12 @@ public class ClickService extends AccessibilityService {
     /** Follow: every FOLLOW_TICK_MS read the Team list and the play area, then step toward the leader. */
     private void followTick() {
         handler.postDelayed(followTick, FOLLOW_TICK_MS);
+        followRead();
+    }
+
+    private final Runnable followNow = this::followRead;
+
+    private void followRead() {
         long now = SystemClock.uptimeMillis();
         if (!running || !follow || manual || questionSeen || now < followHoldUntil || !boosterCanAct()) return;
         if (now - userTouchAt < USER_TOUCH_PAUSE_MS) return;
@@ -5480,8 +5486,9 @@ public class ClickService extends AccessibilityService {
         // tap (the game's skill lock, busyUntil), nor with a heal or buff waiting to go out.
         // Reading never moves anyone, so it goes on during casts; only the move waits (followMayMove).
         // Gating the read too starved follow on the phone: a heal every 3 s never left a gap (02:54).
-        followCastBusy = !booster && (now < busyUntil || now - lastAnyTapAt < FOLLOW_AFTER_CAST_MS
-                || (!pending.isEmpty() && now >= followClaimUntil));
+        // Only the cast's own lock counts - the 3 s "pause after tap" between heals never ran out
+        // before the held heal went, and follow never moved (02:56).
+        followCastBusy = !booster && now - lastAnyTapAt < FOLLOW_AFTER_CAST_MS;
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         // One region from the top-left corner (OCR boxes are screen pixels): Team list + play area.
         captureRegionForOcr(0f, 0f, 0.92f, 0.74f, shot -> {
@@ -5516,11 +5523,15 @@ public class ClickService extends AccessibilityService {
      * hold off until the current cast's lock is over, and the next follow tick moves.
      */
     private boolean followMayMove(long now) {
-        if (!followCastBusy) return true;
-        if (now >= followClaimUntil) {
-            followClaimUntil = now + FOLLOW_AFTER_CAST_MS + 800;
-            Log.d(TAG, "follow: needs to move - holding the next skill until this cast is done");
+        if (!followCastBusy) {
+            followClaimUntil = 0;                                   // moving now: skills go on after it
+            return true;
         }
+        long free = lastAnyTapAt + FOLLOW_AFTER_CAST_MS + 50;
+        if (now >= followClaimUntil) Log.d(TAG, "follow: needs to move - holding the next skill until this cast is done");
+        followClaimUntil = free + 3000;                             // room to read again and start the move
+        handler.removeCallbacks(followNow);
+        handler.postDelayed(followNow, Math.max(0, free - now));   // read again the moment the lock is over
         return false;
     }
 
