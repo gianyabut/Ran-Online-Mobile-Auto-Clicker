@@ -1053,6 +1053,14 @@ public class ClickService extends AccessibilityService {
             chatPrimed = false;
             lootReportFrom = System.currentTimeMillis();
             handler.postDelayed(lootReportTick, LOOT_REPORT_MS);
+            // A start of yours brings the pet out if it isn't (the user, 2026-10-06): the paw asks
+            // "Summon your pet?" (Yes) or "Recall your pet?" (No, it's out already).
+            if (why.equals("button")) {
+                busyUntil = farmHoldUntil = SystemClock.uptimeMillis() + 3000;
+                handler.postDelayed(() -> {
+                    if (running && farmer && !manual) summonPet();
+                }, 1000);
+            }
         }
         if (run && follow) {
             leaderKey = null;
