@@ -550,6 +550,7 @@ public class ClickService extends AccessibilityService {
         boolean waitForCooldown;
         int[] readyLook; // brightness per sample point when the skill is ready, or null
         int lookX, lookY; // where the ring was when readyLook was saved
+        int centerX = -1; // the ring's centre on screen: the window is placed around it (-1 = not known yet)
         boolean ready = true;
 
         // Smart buff: the buff's icon in the game's buff row, and what the last screenshot saw.
@@ -715,20 +716,26 @@ public class ClickService extends AccessibilityService {
             params.x = x;
             params.y = y;
             // The ring is centred in a window as wide as its label, so a label that grows or
-            // shrinks would slide the ring sideways. Shift the window to keep the ring still.
+            // shrinks would slide the ring sideways. The ring's centre is what's kept (and saved);
+            // the window is placed around it on every layout. Shifting by the width change instead
+            // missed label changes made while hidden (width 0) and the rings crept 14-42 px left
+            // over the restarts (the user, 2026-10-06).
             root.addOnLayoutChangeListener((v, l, t, r, b, oldL, oldT, oldR, oldB) -> {
-                int oldWidth = oldR - oldL;
-                int newWidth = r - l;
-                // Hidden rings (manual, game off screen, installs) lay out at width 0: that's not a
-                // label change, and treating it as one pushed every ring half its width sideways
-                // each time it was hidden (rings "kept moving after a restart", 2026-10-04).
-                if (oldWidth > 0 && newWidth > 0 && newWidth != oldWidth) {
-                    params.x += (oldWidth - newWidth) / 2;
-                    safeUpdate(root, params);
+                int width = r - l;
+                if (width <= 0) return;                         // hidden
+                if (centerX < 0) {
+                    centerX = params.x + width / 2;
                     saveTargets();
+                    return;
+                }
+                int want = centerX - width / 2;
+                if (params.x != want) {
+                    params.x = want;
+                    safeUpdate(root, params);
                 }
             });
             makeDraggable(root, root, params, () -> openEditor(this), () -> {
+                if (root.getWidth() > 0) centerX = params.x + root.getWidth() / 2;
                 // The saved ready look belongs to the old spot, but a nudge while tapping the
                 // ring to open its settings still sees the same button: only a real move clears it.
                 if (Math.hypot(params.x - lookX, params.y - lookY) > ring.getWidth() / 3f) {
@@ -1028,6 +1035,7 @@ public class ClickService extends AccessibilityService {
         if (run && fsMode()) handler.postDelayed(chatScanTick, CHAT_SCAN_MS);   // chat-FB is FS only
         if (run && booster) handler.postDelayed(keyboardWatchTick, KEYBOARD_WATCH_MS);  // math only
         deadUntil = 0;
+        pkHold = false;                                         // its re-check was cleared above
         returning = false;
         returnGiveUpUntil = 0;
         lootIgnoreUntil = 0;                                    // a start always loots again
@@ -2727,6 +2735,12 @@ public class ClickService extends AccessibilityService {
     /** Teal when a home is set (leashed), grey when roaming. */
     private void refreshLeashButton() {
         if (leashButton != null) {
+            if (homeReading) {                                  // yellow "\u2026" while the spot is read
+                leashButton.setBackground(circle(Color.rgb(200, 160, 30)));
+                leashButton.setText("\u2026");
+                leashButton.setTextSize(18);
+                return;
+            }
             leashButton.setBackground(circle(homeMap != null ? Color.rgb(30, 130, 140) : Color.rgb(110, 110, 110)));
             leashButton.setText(homeMap != null ? "\u2693\n" + leashR : "\u2693");
             leashButton.setTextSize(homeMap != null ? 12 : 18);
@@ -2754,6 +2768,9 @@ public class ClickService extends AccessibilityService {
     /** ⚓: no home set -> make where the character stands home; home set -> clear it and roam. */
     private void onSetLeash() {
         shake(leashButton);
+        // Still reading the spot: a second tap (nothing seemed to happen) bumped the radius to 10
+        // before the home was even set (10:11, the user asked why it's slow).
+        if (homeReading) return;
         if (homeMap != null && leashR < LEASH_RADII[LEASH_RADII.length - 1]) {
             // Home set: next radius, same home.
             for (int r : LEASH_RADII) {
@@ -2780,7 +2797,32 @@ public class ClickService extends AccessibilityService {
         homeCandMap = null;
         leashR = LEASH_RADII[0];                                    // a new home starts on the tightest leash
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LEASH_R, leashR).apply();
+        if (posMap != null && SystemClock.uptimeMillis() - posAt < HOME_FRESH_MS) {
+            // The farming loop confirmed the position a moment ago: home straight away.
+            setHome(posMap, posX, posY, "button, last reading");
+            return;
+        }
+        homeReading = true;
+        refreshLeashButton();
         readHomeSpot(4);
+    }
+
+    private static final int HOME_FRESH_MS = 2500;
+    private boolean homeReading;
+
+    private void setHome(String map, int x, int y, String why) {
+        homeReading = false;
+        homeCandMap = null;
+        homeMap = map;
+        homeX = x;
+        homeY = y;
+        calValid = false;
+        calStage = 0;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_HOME, homeMap + "," + homeX + "," + homeY).apply();
+        refreshLeashButton();
+        String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + leashR;
+        Log.i(TAG, "farmer: " + msg + " (" + why + ")");
+        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
     }
 
     /** Reads the coordinates for ⚓; the read misses about half the time (08:05), so try a few times. */
@@ -2796,8 +2838,12 @@ public class ClickService extends AccessibilityService {
                     if (!m.find()) continue;
                     String rm = m.group(1);
                     int rx = coordNumber(m.group(2)), ry = coordNumber(m.group(3));
-                    // Two reads that agree: one read saved [124,1166] for [124,116] (19:13).
-                    if (homeCandMap == null || !sameMap(rm, homeCandMap) || Math.abs(rx - homeCandX) > 2 || Math.abs(ry - homeCandY) > 2) {
+                    // Two reads that agree: one read saved [124,1166] for [124,116] (19:13). One read
+                    // is enough when it fits where the farming loop last confirmed us.
+                    boolean confirmed = posMap != null && sameMap(rm, posMap) && SystemClock.uptimeMillis() - posAt < 20_000
+                            && Math.hypot(rx - posX, ry - posY) <= 3;
+                    if (!confirmed && (homeCandMap == null || !sameMap(rm, homeCandMap)
+                            || Math.abs(rx - homeCandX) > 2 || Math.abs(ry - homeCandY) > 2)) {
                         homeCandMap = rm;
                         homeCandX = rx;
                         homeCandY = ry;
@@ -2805,18 +2851,7 @@ public class ClickService extends AccessibilityService {
                         else homeReadFailed(1);
                         return;
                     }
-                    homeCandMap = null;
-                    homeMap = rm;
-                    homeX = rx;
-                    homeY = ry;
-                    calValid = false;
-                    calStage = 0;
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                            .putString(KEY_HOME, homeMap + "," + homeX + "," + homeY).apply();
-                    refreshLeashButton();
-                    String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + leashR;
-                    Log.i(TAG, "farmer: " + msg + " (button)");
-                    android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
+                    setHome(rm, rx, ry, "button");
                     return;
                 }
                 homeReadFailed(tries);
@@ -2844,18 +2879,11 @@ public class ClickService extends AccessibilityService {
         }
         if (posMap != null && SystemClock.uptimeMillis() - posAt < 15_000) {
             // The farming loop read the coordinates moments ago: use those.
-            homeMap = posMap;
-            homeX = posX;
-            homeY = posY;
-            calValid = false;
-            calStage = 0;
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_HOME, homeMap + "," + homeX + "," + homeY).apply();
-            refreshLeashButton();
-            String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + leashR;
-            Log.i(TAG, "farmer: " + msg + " (button, last reading)");
-            android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
+            setHome(posMap, posX, posY, "button, last reading");
             return;
         }
+        homeReading = false;
+        refreshLeashButton();
         Log.i(TAG, "farmer: couldn't read the coordinates for the home spot");
         android.widget.Toast.makeText(this, "Couldn't read the coordinates, tap again", android.widget.Toast.LENGTH_SHORT).show();
     }
@@ -3384,17 +3412,48 @@ public class ClickService extends AccessibilityService {
 
     // PK time (the user asked, 2026-10-06): the chat says "The PK Period among schools has began.
     // You can only attack students outside the campus." -> a Telegram (once per PK_ALERT_GAP_MS).
+    // Killed during PK (the user, 10:25): stay in town until the PK period is over, then the Back
+    // Point; those deaths don't count for the 3-deaths rest, which is for the rest of the day.
+    // The end message isn't known yet: anything saying the PK period ended/is over counts, and
+    // after PK_MAX_MS without one it's taken as over.
     private static final int PK_ALERT_GAP_MS = 30 * 60_000;
-    private long pkAlertAt;
+    private static final long PK_MAX_MS = 2 * 60 * 60_000L, PK_HOLD_CHECK_MS = 60_000;
+    private static final java.util.regex.Pattern PK_ENDED =
+            java.util.regex.Pattern.compile("ended|isover|hasover|finished|closed|hasend");
+    private long pkAlertAt, pkEndAlertAt, pkSince;
+    private boolean pkHold;
+
+    private boolean pkNow() {
+        return pkSince != 0 && SystemClock.uptimeMillis() - pkSince < PK_MAX_MS;
+    }
 
     private void checkPkLine(String text) {
         String k = text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
-        if (!k.contains("pkperiod") || !(k.contains("began") || k.contains("begun") || k.contains("start"))) return;
+        if (!k.contains("pkperiod")) return;
         long now = SystemClock.uptimeMillis();
+        if (PK_ENDED.matcher(k).find()) {
+            if (pkSince == 0) return;
+            pkSince = 0;
+            Log.w(TAG, "PK period over: \"" + text + "\"");
+            if (pkEndAlertAt == 0 || now - pkEndAlertAt >= PK_ALERT_GAP_MS) {
+                pkEndAlertAt = now;
+                Telegram.send(this, "✅ Ran Online: PK time is over (\"" + text.trim() + "\")"
+                        + (pkHold ? " - using the Back Point and farming again." : "."));
+            }
+            if (pkHold) {
+                handler.removeCallbacks(useBackPoint);
+                handler.post(useBackPoint);
+            }
+            return;
+        }
+        if (!(k.contains("began") || k.contains("begun") || k.contains("start"))) return;
+        if (pkNow()) return;                                    // the same line, read again
+        pkSince = now;
+        Log.w(TAG, "PK period started: \"" + text + "\"");
         if (pkAlertAt != 0 && now - pkAlertAt < PK_ALERT_GAP_MS) return;
         pkAlertAt = now;
-        Log.w(TAG, "PK period started: \"" + text + "\"");
-        Telegram.send(this, "⚔ Ran Online: PK time has started (\"" + text.trim() + "\").");
+        Telegram.send(this, "⚔ Ran Online: PK time has started (\"" + text.trim() + "\")."
+                + (farmer ? " If I get killed, I'll stay in town until it's over." : ""));
     }
 
     /** Reads the chat box for pickups and gold; each line counted once as the chat scrolls. */
@@ -4698,6 +4757,18 @@ public class ClickService extends AccessibilityService {
         deathMap = posMap;
         revivedAt = now;
         backPointTries = 0;
+        handler.removeCallbacks(useBackPoint);
+        handler.removeCallbacks(backAtSpot);
+        if (pkNow()) {
+            // PK: wait it out in town (useBackPoint holds until it's over); not a 3-deaths death.
+            deadUntil = now + PK_HOLD_CHECK_MS + BACK_POINT_LOAD_MS;
+            busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+            if (farmer) handler.postDelayed(useBackPoint, BACK_POINT_AFTER_MS);
+            Log.w(TAG, "died during the PK period - staying in town until it's over");
+            Telegram.send(this, "💀 Ran Online: killed during PK time - tapped Revive"
+                    + (farmer ? ", staying in town until PK is over, then the Back Point." : "."));
+            return;
+        }
         deathTimes.addLast(now);
         while (!deathTimes.isEmpty() && now - deathTimes.peekFirst() > DEATH_WINDOW_MS) deathTimes.removeFirst();
         boolean rest = farmer && deathTimes.size() >= DEATHS_TO_REST;
@@ -4748,6 +4819,17 @@ public class ClickService extends AccessibilityService {
     private void useBackPoint() {
         if (!running || !farmer || manual) return;
         long now = SystemClock.uptimeMillis();
+        if (pkNow()) {
+            // PK time (a PK death, or a 3-deaths rest ending in it): stay in town till it's over.
+            if (!pkHold) Log.w(TAG, "died: PK time - holding the Back Point until it's over");
+            pkHold = true;
+            deadUntil = Math.max(deadUntil, now + PK_HOLD_CHECK_MS + BACK_POINT_LOAD_MS);
+            busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+            handler.postDelayed(useBackPoint, PK_HOLD_CHECK_MS);
+            return;
+        }
+        if (pkHold) Log.i(TAG, "died: PK time over - using the Back Point");
+        pkHold = false;
         deadUntil = Math.max(deadUntil, now + BACK_POINT_LOAD_MS);
         busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
         readMapName(map -> {
@@ -5757,6 +5839,7 @@ public class ClickService extends AccessibilityService {
             sb.append(',').append(Math.round(t.recastAt * 100));
             sb.append(',').append(t.extraGapMs);
             sb.append(',').append(t.castLast ? 1 : 0);
+            sb.append(',').append(t.centerX);
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(targetsKey(), sb.toString()).apply();
     }
@@ -5784,6 +5867,7 @@ public class ClickService extends AccessibilityService {
                 }
                 if (parts.length >= 6) t.priority = parts[5].equals("1");
                 if (parts.length >= 13) t.castLast = parts[12].equals("1");
+                if (parts.length >= 14 && !parts[13].isEmpty()) t.centerX = Integer.parseInt(parts[13]);
                 if (parts.length >= 12 && !parts[11].isEmpty()) {
                     t.extraGapMs = Math.max(0, Math.min(MAX_EXTRA_GAP_MS, Integer.parseInt(parts[11])));
                 }
