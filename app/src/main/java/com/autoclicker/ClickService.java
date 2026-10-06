@@ -4078,8 +4078,35 @@ public class ClickService extends AccessibilityService {
         Telegram.send(this, "\uD83D\uDCB0 Ran Online: sell trip - " + how + ". Back Point to the farm next.");
         sellStage = 5;
         sellBackTries = 0;
-        closeMap();                                             // the X closes the shop too
-        handler.postDelayed(this::sellBackPoint, 1200);
+        sellCloseTries = 0;
+        sellCloseShop();
+    }
+
+    private int sellCloseTries;
+
+    /** X until "Equipment's Tool" is gone - one tap left the shop up over the quick bar (15:51). */
+    private void sellCloseShop() {
+        if (!running || sellStage != 5) return;
+        closeMap();
+        handler.postDelayed(() -> captureRegionForOcr(BAG_L, BAG_T, BAG_W, 120 / 1600f, crop -> {
+            if (!running || sellStage != 5) return;
+            if (crop == null) {
+                handler.postDelayed(this::sellBackPoint, 500);
+                return;
+            }
+            Ocr.read(crop, (lines, words) -> {
+                boolean shopUp = false;
+                for (MathQuestion.Line l : lines) {
+                    if (l.text.toLowerCase(java.util.Locale.ROOT).contains("equipment")) shopUp = true;
+                }
+                if (shopUp && ++sellCloseTries < 4) {
+                    Log.i(TAG, "sell trip: the shop is still open, closing it again");
+                    sellCloseShop();
+                    return;
+                }
+                handler.postDelayed(this::sellBackPoint, 600);
+            }, true);
+        }), 900);
     }
 
     private static final int SELL_BACK_TRIES = 2;
