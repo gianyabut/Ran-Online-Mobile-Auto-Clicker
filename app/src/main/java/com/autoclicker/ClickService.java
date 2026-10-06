@@ -3028,6 +3028,8 @@ public class ClickService extends AccessibilityService {
                 if (!m.find()) continue;
                 String map = m.group(1);
                 int rx = coordNumber(m.group(2)), ry = coordNumber(m.group(3));
+                lastSeenMap = map;
+                lastSeenMapAt = SystemClock.uptimeMillis();
                 if (homeReading) homeFromFarmRead(map, rx, ry);
                 long t = SystemClock.uptimeMillis();
                 // A dropped digit ("[126,11" for [126,115], 19:05) looks like a 100-unit jump: the
@@ -3734,7 +3736,18 @@ public class ClickService extends AccessibilityService {
      * walk to the sword section by the map -> sell all equipment and rings. Built a step at a time
      * with the user: for now it goes to town and stops there.
      */
-    private static final int SELL_LOAD_MS = 8000, SELL_CARD_TRIES = 2;
+    // The campus (SG_Campus1F after the Campus Return card): no fighting there, and pets aren't
+    // allowed ("Pets are not allowed in this Area") - the user, 14:45.
+    private String lastSeenMap;
+    private long lastSeenMapAt;
+
+    private boolean inCampus() {
+        return lastSeenMap != null && SystemClock.uptimeMillis() - lastSeenMapAt < 20_000
+                && lastSeenMap.toLowerCase(java.util.Locale.ROOT).contains("campus");
+    }
+
+    private static final int SELL_LOAD_MS = 8000, SELL_CARD_TRIES = 2, SELL_ARRIVE_MAX_MS = 30_000;
+    private long sellCardAt;
     private int sellStage, sellCardTries;                     // sellStage 1: on the way to town
     private String sellFromMap;
 
@@ -3755,6 +3768,7 @@ public class ClickService extends AccessibilityService {
         lootStartedAt = 0;
         handler.removeCallbacks(lootTapTick);
         sellCardTries++;
+        sellCardAt = now;
         onCardPage(() -> tapAt(screenW * CAMPUS_CARD_X, screenH * CAMPUS_CARD_Y, "campus return (sell trip)"), "Campus Return");
         handler.postDelayed(this::sellArrivedCheck, SELL_LOAD_MS);
     }
@@ -3764,6 +3778,12 @@ public class ClickService extends AccessibilityService {
         busyUntil = farmHoldUntil = Math.max(busyUntil, SystemClock.uptimeMillis() + 5000);
         readMapName(map -> {
             if (!running || sellStage != 1) return;
+            // Nothing readable: still loading (14:44 - taken for "didn't go", so the card was used
+            // twice). Look again every 2 s for up to SELL_ARRIVE_MAX_MS before deciding.
+            if (map == null && SystemClock.uptimeMillis() - sellCardAt < SELL_ARRIVE_MAX_MS) {
+                handler.postDelayed(this::sellArrivedCheck, 2000);
+                return;
+            }
             boolean moved = map != null && (sellFromMap == null || !sameMap(map, sellFromMap));
             if (!moved) {
                 if (sellCardTries < SELL_CARD_TRIES) {
@@ -5051,7 +5071,7 @@ public class ClickService extends AccessibilityService {
     }
 
     private void petBarCheck(float level, long now) {
-        if (!running || manual || now < deadUntil) return;
+        if (!running || manual || now < deadUntil || inCampus()) return;   // no pets on the campus
         if (level >= 0) {
             petGoneReads = 0;
             if (petStartCheck) {
@@ -5104,7 +5124,8 @@ public class ClickService extends AccessibilityService {
             // "[" is sometimes read as l, I, | or ( ("TradingHolel123,119]", 19:02): the name stops
             // as early as it can so the slipped bracket isn't taken as part of it.
             // A stray space inside a number too ("[1 31,118]", 19:04).
-            java.util.regex.Pattern.compile("([\\p{L}_]{3,}?)\\s*[\\[(|lI]\\s*(\\d(?: ?\\d){0,3})\\s*[,.]\\s*(\\d(?: ?\\d){0,3})");
+            // Digits inside the name too, after a letter: "SG_Campus1F[15,20]" never matched (14:44).
+            java.util.regex.Pattern.compile("([\\p{L}_][\\p{L}\\d_]{2,}?)\\s*[\\[(|lI]\\s*(\\d(?: ?\\d){0,3})\\s*[,.]\\s*(\\d(?: ?\\d){0,3})");
     private String homeMap, posMap;
     // ⚓ on the bar (Farmer): set home to where the character stands now; kept across restarts.
     private static final String KEY_HOME = "farm_home";
@@ -5636,9 +5657,14 @@ public class ClickService extends AccessibilityService {
                         }
                         return;
                     }
-                    farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
-                    farmCheck(MobCounter.count(shot, screenW, screenH),
-                            MobCounter.targetHp(shot, screenW, screenH), now);
+                    if (inCampus()) {
+                        // Town: no skills, no walking, no looting - just keep reading.
+                        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + 3000);
+                    } else {
+                        farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
+                        farmCheck(MobCounter.count(shot, screenW, screenH),
+                                MobCounter.targetHp(shot, screenW, screenH), now);
+                    }
                     // Each text read costs memory and CPU on the Pad 5 (system froze again 07:49 with
                     // reads every scan): chat every CHAT_READ_MS, coordinates every COORD_EVERY_MS.
                     if (now - lastChatReadAt >= (lootStartedAt > 0 ? LOOT_CHAT_MS : CHAT_READ_MS) - 100) {
