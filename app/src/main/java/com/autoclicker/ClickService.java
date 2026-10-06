@@ -1485,11 +1485,7 @@ public class ClickService extends AccessibilityService {
         int oldEnd = waveEndMobs();
         int before = partySize;
         partySize = members;
-        if (!first) {
-            Log.i(TAG, "party " + before + " -> " + members);
-            // TEMPORARY (testing the Campus Return, the user 23:25 - remove 2026-10-06).
-            Telegram.send(this, "👥 Ran Online: party " + before + " -> " + members);
-        }
+        if (!first) Log.i(TAG, "party " + before + " -> " + members);
         if (before > CAMPUS_PARTY && members <= CAMPUS_PARTY) partyLeft(before, members);
         // Only say so when the numbers it goes by change.
         if (first || waveStartMobs() != oldStart || waveEndMobs() != oldEnd) {
