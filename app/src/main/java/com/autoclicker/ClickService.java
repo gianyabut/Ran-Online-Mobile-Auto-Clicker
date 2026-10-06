@@ -5851,7 +5851,7 @@ public class ClickService extends AccessibilityService {
      * 07:37). Tap Revive whenever it shows, in any mode (the user's rule), and say so on Telegram.
      */
     private void checkRevive(List<MathQuestion.Line> lines) {
-        if (!running || manual) return;
+        // Any mode, even manual or stopped (the user, 21:40: "whenever the char died use revive").
         long now = SystemClock.uptimeMillis();
         if (now - lastReviveAt < 5000) return;
         MathQuestion.Line ask = null;
@@ -5876,6 +5876,11 @@ public class ClickService extends AccessibilityService {
         lastReviveAt = now;
         Log.w(TAG, "died: \"" + ask.text.trim() + "\", tapping Revive at " + Math.round(x) + "," + Math.round(y));
         tapAt(x, y, "revive");
+        if (!running || manual) {
+            // Not farming: just the revive, no Back Point or death rules.
+            Telegram.send(this, "💀 Ran Online: your character died - tapped Revive.");
+            return;
+        }
         deathMap = posMap;
         revivedAt = now;
         backPointTries = 0;
