@@ -1125,6 +1125,10 @@ public class ClickService extends AccessibilityService {
         if (run && farmer) {
             lootGold = 0;
             lootItems.clear();
+            repReset();
+            sessKills = sessGold = 0;
+            sessExp = 0;
+            sessStart = System.currentTimeMillis();
             lastChatLines = new ArrayList<>();
             chatPrimed = false;
             lootReportFrom = System.currentTimeMillis();
@@ -2384,6 +2388,7 @@ public class ClickService extends AccessibilityService {
         // with HP left, and holding for their "drop" walked away from a live monster (the user, 08:05).
         // One punch takes ~40% (kills from 37-40% dropped loot, 08:07), so "low" is up to KILL_MAX_HP.
         if (!target && farmTargetHp > KILL_MAX_HP && lootStartedAt == 0) {
+            repLost++;
             Log.i(TAG, "farmer: target lost at " + Math.round(farmTargetHp * 100) + "%, not a kill - attacking on");
             schedulePump(0);
         }
@@ -2391,6 +2396,7 @@ public class ClickService extends AccessibilityService {
             postKillUntil = now + POST_KILL_HOLD_MS;
             busyUntil = Math.max(busyUntil, postKillUntil);
             killAt = now;
+            repKills++;
             killStepDone = false;
             dropSeenAt = 0;
             dropSteps = 0;
@@ -2486,6 +2492,8 @@ public class ClickService extends AccessibilityService {
         }
         farmTargetHp = targetHp;
         Log.v(TAG, "farm scan: monsters ~" + mobs + ", target " + (target ? Math.round(targetHp * 100) + "%" : "none"));
+        repMobSum += mobs;
+        repMobScans++;
         long stuckAfter = targetHp >= 0.97f ? FARM_STUCK_FULL_MS : FARM_STUCK_MS;
         if (target && !luring && now - farmProgressAt >= stuckAfter && canFarmMove(now)) {
             Log.i(TAG, "farmer: target HP stuck at " + Math.round(targetHp * 100) + "% for "
@@ -2502,6 +2510,7 @@ public class ClickService extends AccessibilityService {
         }
         if (lastTargetBarAt == 0 || lootStartedAt > 0 || luring) lastTargetBarAt = Math.max(lastTargetBarAt, now - FARM_NO_BAR_MS / 2);
         if (now - lastTargetBarAt >= FARM_NO_BAR_MS && now - lastAnyTapAt < 3000 && canFarmMove(now)) {
+            repSearchWalks++;
             Log.i(TAG, "farmer: attacking for " + (now - lastTargetBarAt) / 1000 + " s with no target bar,"
                     + " the game can't reach its pick; walking " + "ENWS".charAt(farmWalkStep));
             lastTargetBarAt = now;
@@ -2511,6 +2520,7 @@ public class ClickService extends AccessibilityService {
         if (now - Math.max(farmMobsSeenAt, lastBuffTapAt + 5000) < FARM_IDLE_MS || !canFarmMove(now)) return;
         // Searching while already halfway out: search back toward home.
         if (!luring && searchTowardHome(now)) return;
+        repSearchWalks++;
         Log.i(TAG, "farmer: no target for " + (now - farmMobsSeenAt) / 1000 + " s (monsters ~" + mobs
                 + "), walking " + "ENWS".charAt(farmWalkStep));
         farmWalk(now);
@@ -3439,12 +3449,14 @@ public class ClickService extends AccessibilityService {
             calStage = 0;
             Log.i(TAG, "farmer: " + Math.round(dist) + " from home " + homeMap + "[" + homeX + "," + homeY + "] at ["
                     + posX + "," + posY + "], no attacks until back");
+            repHomeTrips++;
             if (targetHp >= 0) tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "deselect (going home)");
             return true;
         }
         if (dist <= leashBackR()) {
             returning = false;
             Log.i(TAG, "farmer: back home (" + Math.round(dist) + " away, " + (now - returnStartedAt) / 1000 + " s), attacking again");
+            repHomeMs += now - returnStartedAt;
             farmMobsSeenAt = lastTargetBarAt = now;
             schedulePump(0);
             return false;
@@ -4677,25 +4689,108 @@ public class ClickService extends AccessibilityService {
         Log.i(TAG, "loot: " + item);
     }
 
-    /** Every LOOT_REPORT_MS while farming: what was picked up, to Telegram. */
+    // The 5-minute farm report (the user, 2026-10-07: kills too, to make farming more efficient).
+    private int repKills, repLost, repPickups, repLootLeft, repHomeTrips, repSearchWalks, repDeaths;
+    private long repDeathAt, sessKills, sessGold, sessStart;
+    private float repPetLevel = -1;
+
+    private long repMobSum, repMobScans, repLootMs, repHomeMs;
+    private float expNow = -1, expAtStart = -1, sessExp;
+    private int repLevelUps;
+    private static final java.util.regex.Pattern EXP_TEXT = java.util.regex.Pattern.compile("(\\d{1,3})[.,](\\d{2,4})\\s*%");
+
+    private void repReset() {
+        repKills = repLost = repPickups = repLootLeft = repHomeTrips = repSearchWalks = repDeaths = repLevelUps = 0;
+        repMobSum = repMobScans = repLootMs = repHomeMs = 0;
+        expAtStart = expNow;
+    }
+
+    /** The EXP % beside the EXP bar (top left, "5.6623%"), from the full-screen text reads. */
+    private void noteExp(List<MathQuestion.Line> lines) {
+        for (MathQuestion.Line l : lines) {
+            if (l.box.centerX() > screenW * 0.3f || l.box.centerY() > screenH * 0.11f) continue;
+            java.util.regex.Matcher m = EXP_TEXT.matcher(l.text);
+            if (!m.find()) continue;
+            float v;
+            try {
+                v = Float.parseFloat(m.group(1) + "." + m.group(2));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (v < 0 || v >= 100) continue;
+            if (expNow >= 0) {
+                float d = v - expNow;
+                if (d < -50) {                                  // a level up: 99.x% -> 0.x%
+                    repLevelUps++;
+                    sessExp += 100 - expNow + v;
+                    if (expAtStart >= 0) expAtStart -= 100;
+                } else if (d < 0 || d > 5) {
+                    continue;                                   // a misread (EXP never drops, nor jumps 5%)
+                } else {
+                    sessExp += d;
+                }
+            }
+            expNow = v;
+            if (expAtStart < 0) expAtStart = v;
+            return;
+        }
+    }
+
+    /** Every LOOT_REPORT_MS while farming: kills, gold, loot and where the time went, to Telegram. */
     private void lootReportTick() {
         handler.postDelayed(lootReportTick, LOOT_REPORT_MS);
         if (!running || !farmer) return;
         long now = System.currentTimeMillis();
-        if (lootGold == 0 && lootItems.isEmpty()) {
+        if (manual) {                                         // played by hand: nothing to report
+            lootGold = 0;
+            lootItems.clear();
+            repReset();
             lootReportFrom = now;
             return;
         }
-        java.text.SimpleDateFormat hm = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.ROOT);
-        StringBuilder sb = new StringBuilder("\uD83C\uDF92 Loot " + hm.format(new java.util.Date(lootReportFrom))
-                + "-" + hm.format(new java.util.Date(now)) + "\nGold: " + String.format(java.util.Locale.ROOT, "%,d", lootGold));
+        float mins = Math.max(1f, (now - lootReportFrom) / 60_000f);
+        sessKills += repKills;
+        sessGold += lootGold;
+        java.util.Locale L = java.util.Locale.ROOT;
+        java.text.SimpleDateFormat hm = new java.text.SimpleDateFormat("HH:mm", L);
+        StringBuilder sb = new StringBuilder();
+        sb.append("\uD83C\uDF3E Farm ").append(hm.format(new java.util.Date(lootReportFrom))).append("-")
+                .append(hm.format(new java.util.Date(now)));
+        if (homeMap != null) sb.append(" \u00B7 ").append(homeMap);
+        else if (lastSeenMap != null) sb.append(" \u00B7 ").append(lastSeenMap);
+        sb.append("\n\u2694\uFE0F Kills: ").append(repKills).append(String.format(L, " (%.1f/min)", repKills / mins));
+        if (repLost > 0) sb.append(" \u00B7 got away: ").append(repLost);
+        sb.append("\n\uD83D\uDCB0 Gold: ").append(String.format(L, "%,d", lootGold));
+        if (repKills > 0) sb.append(String.format(L, " (%,d/kill", lootGold / repKills)).append(String.format(L, ", ~%,d/h)", Math.round(lootGold * 60 / mins)));
+        sb.append("\n\uD83C\uDF92 Picked up: ").append(repPickups);
+        if (repLootLeft > 0) sb.append(" \u00B7 left behind: ").append(repLootLeft);
         for (java.util.Map.Entry<String, Integer> e : lootItems.entrySet()) {
-            sb.append("\n").append(e.getValue()).append(" x ").append(e.getKey());
+            sb.append("\n   ").append(e.getValue()).append(" x ").append(e.getKey());
+        }
+        if (expNow >= 0 && expAtStart > -100) {
+            float g = expNow - expAtStart;
+            sb.append(String.format(L, "\n\u2728 EXP: +%.4f%% (~%.2f%%/h)", g, g * 60 / mins));
+            if (repLevelUps > 0) sb.append(" \uD83C\uDF89 level up!");
+        }
+        if (repMobScans > 0) sb.append(String.format(L, "\n\uD83D\uDC7E Monsters around: %.1f on average", repMobSum / (float) repMobScans));
+        long spanMs = Math.max(1, now - lootReportFrom);
+        sb.append(String.format(L, "\n\u23F1 Looting %d%% \u00B7 walking home %d%% of the time",
+                Math.round(repLootMs * 100f / spanMs), Math.round(repHomeMs * 100f / spanMs)));
+        if (repHomeTrips > 0 || repSearchWalks > 0) {
+            sb.append("\n\uD83D\uDEB6 Back to the anchor: ").append(repHomeTrips).append(" \u00B7 searching walks: ").append(repSearchWalks);
+        }
+        if (repDeaths > 0) sb.append("\n\uD83D\uDC80 Deaths: ").append(repDeaths);
+        if (repPetLevel >= 0) sb.append("\n\uD83D\uDC3E Pet food: ").append(Math.round(repPetLevel * 100)).append("%");
+        if (sessStart > 0 && now - sessStart > LOOT_REPORT_MS + 60_000) {
+            long m = (now - sessStart) / 60_000;
+            sb.append(String.format(L, "\n\uD83D\uDCC8 Since %s (%dh%02d): %,d kills \u00B7 %,d gold \u00B7 +%.2f%% EXP",
+                    hm.format(new java.util.Date(sessStart)), m / 60, m % 60, sessKills, sessGold, sessExp));
         }
         Telegram.send(this, sb.toString());
-        Log.i(TAG, "loot report sent: " + sb.toString().replace('\n', '|'));
+        Log.i(TAG, "farm report sent: " + sb.toString().replace('\n', '|'));
         lootGold = 0;
         lootItems.clear();
+        repReset();
         lootReportFrom = now;
     }
 
@@ -4918,6 +5013,9 @@ public class ClickService extends AccessibilityService {
                 }
                 return;
             }
+            if (handShowing) repLootLeft++;
+            else repPickups++;
+            repLootMs += now - lootStartedAt;
             Log.i(TAG, "farmer: " + (handShowing ? "couldn't pick it up in " + (now - lootStartedAt) / 1000
                     + " s, leaving it" : "picked up") + ", attacking again");
             if (handShowing) {
@@ -6140,6 +6238,7 @@ public class ClickService extends AccessibilityService {
         // Only where the map is known: started on the campus with the map unread, it summoned (15:45).
         if (lastSeenMap == null || now - lastSeenMapAt > 20_000) return;
         if (level >= 0) {
+            repPetLevel = level;
             petGoneReads = 0;
             if (petStartCheck) {
                 petStartCheck = false;
@@ -6267,6 +6366,10 @@ public class ClickService extends AccessibilityService {
         if (inPlace) reviveUseTries++;
         String what = inPlace ? "Use" : "Revive";
         Log.w(TAG, "died: \"" + ask.text.trim() + "\", tapping " + what + " at " + Math.round(x) + "," + Math.round(y));
+        if (running && farmer && now - repDeathAt > 30_000) {
+            repDeaths++;
+            repDeathAt = now;
+        }
         tapAt(x, y, inPlace ? "revive use" : "revive");
         if (!running || manual) {
             // Not farming: just the revive, no Back Point or death rules.
@@ -6484,6 +6587,7 @@ public class ClickService extends AccessibilityService {
 
     private void checkForQuestion(String game, List<MathQuestion.Line> lines) {
         checkRevive(lines);
+        noteExp(lines);
         List<MathQuestion.Line> hits = new ArrayList<>();
         for (MathQuestion.Line line : lines) {
             String norm = line.text.toLowerCase(java.util.Locale.ROOT);
