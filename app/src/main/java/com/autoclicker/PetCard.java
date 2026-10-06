@@ -50,8 +50,13 @@ final class PetCard {
      * (1 on the tablet): {score, left, top, width, height}, or null.
      */
     static float[] find(Context c, Bitmap shot, int x0, int y0, int x1, int y1, float s) {
+        return find(c, TEMPLATES, shot, x0, y0, x1, y1, s);
+    }
+
+    /** As find(), with other pictures from the assets (the feed can and the card in the bag). */
+    static float[] find(Context c, String[] names, Bitmap shot, int x0, int y0, int x1, int y1, float s) {
         float[] best = null;
-        for (String name : TEMPLATES) {
+        for (String name : names) {
             Tpl t = template(c, name, s);
             if (t == null) continue;
             int ax = Math.max(0, x0), ay = Math.max(0, y0);

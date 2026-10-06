@@ -843,13 +843,15 @@ public class ClickService extends AccessibilityService {
             sellReceiver = new android.content.BroadcastReceiver() {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
-                    if ("com.autoclicker.SELLTRIP".equals(i.getAction())) handler.post(() -> startSellTripFromAdb());
+                    if ("com.autoclicker.FEED".equals(i.getAction())) handler.post(() -> feedPet(-0.01f));   // test the feeding
+                    else if ("com.autoclicker.SELLTRIP".equals(i.getAction())) handler.post(() -> startSellTripFromAdb());
                     else if ("com.autoclicker.LAYOUT".equals(i.getAction())) handler.post(() -> remeasureLayout("adb"));
                     else handler.post(() -> sellAll("adb"));
                 }
             };
             android.content.IntentFilter f = new android.content.IntentFilter("com.autoclicker.SELL");
             f.addAction("com.autoclicker.SELLTRIP");
+            f.addAction("com.autoclicker.FEED");
             f.addAction("com.autoclicker.LAYOUT");
             if (android.os.Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(sellReceiver, f, "android.permission.DUMP", null, android.content.Context.RECEIVER_EXPORTED);
@@ -1380,7 +1382,7 @@ public class ClickService extends AccessibilityService {
             return;
         }
         // Selling / on the campus: no skills at all - a buff recast closed the NPC's popup (15:13).
-        if (sellStage != 0 || sellRunning || inCampus()) {
+        if (sellStage != 0 || sellRunning || feedRunning || inCampus()) {
             schedulePump(1000);
             return;
         }
@@ -5879,6 +5881,177 @@ public class ClickService extends AccessibilityService {
     private static float PET_BAR_X = 698 / 2560f, PET_BAR_T = 1389 / 1600f, PET_BAR_B = 1480 / 1600f;
     private static final int PET_BAR_EVERY_MS = 5000, PET_GONE_READS = 3, PET_RESUMMON_GAP_MS = 5 * 60_000;
     private static final float PET_LOW = 0.25f;
+    /*
+     * Feeding (walked through by the user, 2026-10-07 01:45): bag icon -> tap the Advanced Feed can
+     * -> "Use on..." -> tap the pet card in the bag -> the chat says it ate -> close the bag. Done
+     * when the food bar is down to 2% (the user's threshold); then carry on as before.
+     */
+    private static final float PET_FEED = 0.03f;                 // 2%: one bar sample in ~46
+    private static final int FEED_GAP_MS = 10 * 60_000, FEED_STEP_MS = 1400;
+    private static final long FEED_NO_FOOD_BACKOFF_MS = 30 * 60_000L;
+    private static final float FEED_MIN = 0.75f;                   // can / card: 0.9+ there, at most 0.55 not
+    private static float BAG_ICON_X = 2058 / 2560f, BAG_ICON_Y = 56 / 1600f;
+    private static float INV_L = 1240 / 2560f, INV_T = 300 / 1600f, INV_R = 2470 / 2560f, INV_B = 1120 / 1600f;
+    private static float INV_CLOSE_X = 2513 / 2560f, INV_CLOSE_Y = 230 / 1600f;
+    private boolean feedRunning;
+    private long feedAt, feedBackoffUntil;
+
+    private void feedPet(float level) {
+        long now = SystemClock.uptimeMillis();
+        if (feedRunning || !running || manual || sellStage != 0 || sellRunning || now < deadUntil || inCampus()
+                || lootStartedAt > 0) return;
+        feedRunning = true;
+        feedAt = now;
+        feedHold();
+        Log.i(TAG, "pet: food at " + Math.round(level * 100) + "%, feeding it - opening the bag");
+        tapAt(screenW * BAG_ICON_X, screenH * BAG_ICON_Y, "bag");
+        handler.postDelayed(() -> feedFindCan(0), FEED_STEP_MS);
+    }
+
+    /** Everything else waits: no skills, no walking, and the bag isn't a stray panel to X. */
+    private void feedHold() {
+        long until = SystemClock.uptimeMillis() + 8000;
+        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, until);
+        panelQuietUntil = Math.max(panelQuietUntil, until);
+    }
+
+    private float[] feedFind(Bitmap shot, String name) {
+        try {
+            float s = screenH / 1600f;
+            return PetCard.find(this, new String[]{name}, shot, Math.round(screenW * INV_L), Math.round(screenH * INV_T),
+                    Math.round(screenW * INV_R), Math.round(screenH * INV_B), s);
+        } catch (RuntimeException | OutOfMemoryError e) {
+            return null;
+        }
+    }
+
+    private boolean bagOpenIn(List<MathQuestion.Line> lines) {
+        for (MathQuestion.Line l : lines) if (l.text.toLowerCase(java.util.Locale.ROOT).contains("ventory")) return true;
+        return false;
+    }
+
+    private void feedFindCan(int attempt) {
+        if (!feedRunning) return;
+        feedHold();
+        captureForOcr(shot -> {
+            if (!feedRunning) {
+                if (shot != null) shot.recycle();
+                return;
+            }
+            if (shot == null) {
+                if (attempt < 2) handler.postDelayed(() -> feedFindCan(attempt + 1), 800);
+                else feedEnd("no screenshot", false);
+                return;
+            }
+            float[] can = feedFind(shot, "pet/feed_can.png");
+            Ocr.read(shot, (lines, words) -> {
+                if (!feedRunning) return;
+                if (!bagOpenIn(lines)) {
+                    if (attempt < 2) handler.postDelayed(() -> feedFindCan(attempt + 1), 800);
+                    else feedEnd("the bag didn't open", false);
+                    return;
+                }
+                if (can == null || can[0] < FEED_MIN) {
+                    feedBackoffUntil = SystemClock.uptimeMillis() + FEED_NO_FOOD_BACKOFF_MS;
+                    Log.w(TAG, "pet: no Advanced Feed in the bag (best " + (can == null ? "-" : String.format(java.util.Locale.ROOT, "%.2f", can[0])) + ")");
+                    Telegram.send(this, "🐾 Ran Online: your pet is hungry but there's no Advanced Feed in the bag. Please add some - I'll look again in 30 min.");
+                    feedEnd("no food", true);
+                    return;
+                }
+                float x = can[1] + can[3] / 2f, y = can[2] + can[4] / 2f;
+                Log.i(TAG, "pet: Advanced Feed at " + Math.round(x) + "," + Math.round(y) + " (" + String.format(java.util.Locale.ROOT, "%.2f", can[0]) + ")");
+                tapAt(x, y, "feed can");
+                handler.postDelayed(() -> feedUseOn(0), FEED_STEP_MS);
+            }, true);
+        });
+    }
+
+    private void feedUseOn(int attempt) {
+        if (!feedRunning) return;
+        feedHold();
+        captureForOcr(shot -> {
+            if (!feedRunning) {
+                if (shot != null) shot.recycle();
+                return;
+            }
+            if (shot == null) {
+                if (attempt < 2) handler.postDelayed(() -> feedUseOn(attempt + 1), 800);
+                else feedEnd("no screenshot", true);
+                return;
+            }
+            Ocr.read(shot, (lines, words) -> {
+                if (!feedRunning) return;
+                for (MathQuestion.Line l : lines) {
+                    String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+                    if (!k.startsWith("useon")) continue;
+                    Log.i(TAG, "pet: tapping Use on...");
+                    tapAt(l.box.exactCenterX(), l.box.exactCenterY(), "feed use on");
+                    handler.postDelayed(() -> feedTarget(0), FEED_STEP_MS);
+                    return;
+                }
+                if (attempt < 2) handler.postDelayed(() -> feedUseOn(attempt + 1), 800);
+                else feedEnd("no Use on... button", true);
+            }, true);
+        });
+    }
+
+    private void feedTarget(int attempt) {
+        if (!feedRunning) return;
+        feedHold();
+        captureScreen(shot -> {
+            if (!feedRunning) return;
+            float[] card = feedFind(shot, "pet/bag_card.png");
+            if (card == null || card[0] < FEED_MIN) {
+                if (attempt < 2) handler.postDelayed(() -> feedTarget(attempt + 1), 800);
+                else feedEnd("no pet card in the bag to feed", true);
+                return;
+            }
+            float x = card[1] + card[3] / 2f, y = card[2] + card[4] / 2f;
+            Log.i(TAG, "pet: feeding the card at " + Math.round(x) + "," + Math.round(y));
+            tapAt(x, y, "feed pet card");
+            handler.postDelayed(this::feedCheck, FEED_STEP_MS + 600);
+        });
+    }
+
+    /** The chat says it ate (PET ... eat Advanced Feed ... has 100%): close the bag, carry on. */
+    private void feedCheck() {
+        if (!feedRunning) return;
+        feedHold();
+        captureForOcr(shot -> {
+            if (!feedRunning) {
+                if (shot != null) shot.recycle();
+                return;
+            }
+            if (shot == null) {
+                feedEnd("fed (not confirmed)", true);
+                return;
+            }
+            Ocr.read(shot, (lines, words) -> {
+                if (!feedRunning) return;
+                boolean ate = false;
+                for (MathQuestion.Line l : lines) {
+                    String t = l.text.toLowerCase(java.util.Locale.ROOT);
+                    if (t.contains("eat") && (t.contains("feed") || t.contains("pet"))) ate = true;
+                }
+                if (ate) Telegram.send(this, "🐾 Ran Online: fed the pet (Advanced Feed).");
+                feedEnd(ate ? "fed" : "fed (not confirmed in the chat)", true);
+            }, true);
+        });
+    }
+
+    private void feedEnd(String how, boolean closeBag) {
+        if (!feedRunning) return;
+        Log.i(TAG, "pet: feeding done - " + how);
+        if (closeBag) tapAt(screenW * INV_CLOSE_X, screenH * INV_CLOSE_Y, "close bag");
+        handler.postDelayed(() -> {
+            // Carry on with whatever it was doing (the user, 01:52).
+            feedRunning = false;
+            long now = SystemClock.uptimeMillis();
+            busyUntil = farmHoldUntil = now;
+            panelQuietUntil = now;
+            schedulePump(0);
+        }, closeBag ? 900 : 0);
+    }
     private static final long PET_LOW_ALERT_GAP_MS = 60 * 60_000L;
     private long lastPetBarAt, lastPetSummonAt, petLowAlertAt;
     private int petGoneReads;
@@ -5903,8 +6076,26 @@ public class ClickService extends AccessibilityService {
             if (c2 != null && (card == null || c2[0] > card[0])) card = c2;
         }
         if (card == null || card[0] < PetCard.MIN_SCORE) return -1;
-        float v = petBarAt(shot, (card[1] + 114 * s) / screenW, (card[2] + 4 * s) / screenH, (card[2] + card[4] - 3 * s) / screenH);
-        return v >= 0 ? v : 1f;
+        return petFood(shot, Math.round(card[1] + 114 * s), Math.round(card[2] + 4 * s), Math.round(card[2] + card[4] - 3 * s));
+    }
+
+    /**
+     * The food bar right of the card: coloured from the bottom, dark above. Its share coloured -
+     * 0 when it's all dark (empty: feed it). Not bar-like at all = out, food unknown (1).
+     */
+    private float petFood(Bitmap shot, int x, int t, int b) {
+        if (x < 0 || x >= shot.getWidth() || t < 0 || b >= shot.getHeight() || b <= t) return 1f;
+        int fill = 0, dark = 0, n = 0;
+        for (int y = t; y <= b; y += 2) {
+            int c = shot.getPixel(x, y);
+            int mx = Math.max(Color.red(c), Math.max(Color.green(c), Color.blue(c)));
+            int mn = Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c)));
+            n++;
+            if (mx > 150 && mx - mn > 80) fill++;
+            else if (mx < 100) dark++;
+        }
+        if (n == 0 || fill + dark < n * 0.85f) return 1f;
+        return fill / (float) n;
     }
 
     private float[] petCardNear(Bitmap shot, float fx, float ft, float fb, float s) {
@@ -5951,6 +6142,7 @@ public class ClickService extends AccessibilityService {
                 petStartCheck = false;
                 Log.i(TAG, "pet: out (bar " + Math.round(level * 100) + "%)");
             }
+            if (level <= PET_FEED && now - feedAt >= FEED_GAP_MS && now >= feedBackoffUntil) feedPet(level);
             if (level <= PET_LOW && (petLowAlertAt == 0 || now - petLowAlertAt >= PET_LOW_ALERT_GAP_MS)) {
                 petLowAlertAt = now;
                 Log.w(TAG, "pet: bar at " + Math.round(level * 100) + "%, needs food");
@@ -7375,6 +7567,15 @@ public class ClickService extends AccessibilityService {
         BAG_DOWN_X = Layout.fx("center", 2474, 1050);
         BAG_DOWN_Y = Layout.fy("center", 2474, 1050);
         SELL_MAP_X = Layout.fx("center", 1089, 1027);
+        // Feeding the pet: the bag icon sits in the top-right row, the inventory window in the middle.
+        BAG_ICON_X = Layout.fx("menu", 2058, 56);
+        BAG_ICON_Y = Layout.fy("menu", 2058, 56);
+        INV_L = Layout.fx("center", 1240, 300);
+        INV_T = Layout.fy("center", 1240, 300);
+        INV_R = Layout.fx("center", 2470, 1120);
+        INV_B = Layout.fy("center", 2470, 1120);
+        INV_CLOSE_X = Layout.fx("center", 2513, 230);
+        INV_CLOSE_Y = Layout.fy("center", 2513, 230);
         SELL_MAP_Y = Layout.fy("center", 1089, 1027);
         MAP_RO_L = Layout.fx("center", 2201.6f, 1256);
         MAP_RO_T = Layout.fy("center", 2201.6f, 1256);
