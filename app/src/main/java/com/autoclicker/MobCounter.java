@@ -113,43 +113,84 @@ final class MobCounter {
     static float CLOSE_X = 0.7055f;
     static float CLOSE_Y = 0.0825f;
 
+    // How far right of its usual spot the target bar sits, in px. A status icon on its left pushes
+    // the whole bar ~30 px right; the fixed check missed the moved X and the bot saw "target none"
+    // for minutes, walking off mid-fight every 20 s (2026-10-07 00:44, the tablet).
+    static int barShift;
+    static final float BAR_SHIFT_MAX = 0.035f;
+
+    /** Where the target bar's X is now (screen px across). */
+    static float closeX(int screenW) {
+        return screenW * CLOSE_X + barShift;
+    }
+
     /**
      * Whether a target (a player or a monster) is selected. Buffs go to a selected player instead
      * of us, so our own timers never refresh and a full buff keeps "retrying".
      */
     static boolean targetSelected(Bitmap shot, int screenW, int screenH) {
         if (shot.getWidth() < screenW || shot.getHeight() < screenH) return false;
-        // The white ✕: measured 10% bright pixels in this box with a target, 0% without.
-        int bright = 0;
-        int total = 0;
+        // The white X: ~10% bright pixels in its box with a target, 0% without. Looked for from its
+        // usual box to BAR_SHIFT_MAX further right; the box-wide window with the most wins.
+        int x0 = (int) (screenW * XB_L), bw = Math.max(4, (int) (screenW * (XB_R - XB_L)));
+        int x1 = Math.min(screenW, x0 + bw + (int) (screenW * BAR_SHIFT_MAX));
+        int nc = (x1 - x0) / 2;
+        if (nc <= 0) return false;
+        int[] col = new int[nc];
+        int rows = 0;
         for (int y = (int) (screenH * XB_T); y < screenH * XB_B; y += 2) {
-            for (int x = (int) (screenW * XB_L); x < screenW * XB_R; x += 2) {
-                int c = shot.getPixel(x, y);
-                total++;
-                if (Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c))) > 200) bright++;
+            rows++;
+            for (int i = 0; i < nc; i++) {
+                int c = shot.getPixel(x0 + 2 * i, y);
+                if (Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c))) > 200) col[i]++;
             }
         }
-        if (total == 0 || bright * 100 < total * 4) return false;
-        // And the red HP bar's left end (always red unless the target is nearly dead).
-        int red = 0;
-        total = 0;
+        int k = Math.max(1, bw / 2), best = -1, bestAt = 0, run = 0;
+        for (int i = 0; i < nc; i++) {
+            run += col[i];
+            if (i >= k) run -= col[i - k];
+            if (i >= k - 1 && run > best) {
+                best = run;
+                bestAt = i - k + 1;
+            }
+        }
+        if (rows == 0 || best * 100 < k * rows * 4) return false;
+        long sx = 0;
+        for (int i = bestAt; i < bestAt + k && i < nc; i++) sx += (long) col[i] * (x0 + 2 * i);
+        int shift = Math.max(0, Math.round(sx / (float) best - screenW * CLOSE_X));
+        // And the red HP bar's left end (always red unless the target is nearly dead), moved alike.
+        if (barRedAt(shot, screenW, screenH, shift)) {
+            barShift = shift;
+            return true;
+        }
+        // Party members' icons at the bar's right end can outshine the X (petyes.png): the usual
+        // spot then, as before.
+        int home = 0;
+        for (int i = 0; i < k && i < nc; i++) home += col[i];
+        if (shift == 0 || home * 100 < k * rows * 4 || !barRedAt(shot, screenW, screenH, 0)) return false;
+        barShift = 0;
+        return true;
+    }
+
+    private static boolean barRedAt(Bitmap shot, int screenW, int screenH, int shift) {
+        int red = 0, total = 0;
         for (int y = (int) (screenH * RED_T); y < screenH * RED_B; y += 2) {
-            for (int x = (int) (screenW * RED_L); x < screenW * RED_R; x += 3) {
-                int c = shot.getPixel(x, y);
+            for (int x = (int) (screenW * RED_L) + shift; x < screenW * RED_R + shift; x += 3) {
+                int c = shot.getPixel(Math.min(screenW - 1, x), y);
                 total++;
                 if (Color.red(c) > 150 && Color.green(c) < 70 && Color.blue(c) < 70) red++;
             }
         }
-        return red * 100 >= total * 25;
+        return total > 0 && red * 100 >= total * 25;
     }
 
     /**
      * How full the selected target's HP bar is (0..1), or -1 if none is selected. The bar runs
-     * from ~0.31W to ~0.69W at 0.0825H: red for the HP left, grey for what's gone.
+     * from ~0.31W to ~0.69W at 0.0825H (plus barShift): red for the HP left, grey for what's gone.
      */
     static float targetHp(Bitmap shot, int screenW, int screenH) {
         if (!targetSelected(shot, screenW, screenH)) return -1;
-        int left = (int) (screenW * BAR_L), right = (int) (screenW * BAR_R);
+        int left = (int) (screenW * BAR_L) + barShift, right = Math.min(screenW, (int) (screenW * BAR_R) + barShift);
         int lastRed = -1;
         for (int x = left; x < right; x += 2) {
             int red = 0;

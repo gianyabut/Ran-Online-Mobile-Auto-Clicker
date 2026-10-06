@@ -1445,7 +1445,7 @@ public class ClickService extends AccessibilityService {
             targetSelected = false;
             Log.i(TAG, "a target is selected, so buffs would go to it: deselecting first");
             busyUntil = now + TAP_MS + DESELECT_SETTLE_MS;
-            tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "deselect");
+            tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "deselect");
             schedulePump(TAP_MS + DESELECT_SETTLE_MS);
             return;
         }
@@ -2358,7 +2358,7 @@ public class ClickService extends AccessibilityService {
             lastLureDropAt = now;
             boolean onUs = targetHp < LURE_HIT_HP;
             if (onUs) lureHits++;
-            tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
+            tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "lure drop");
             Log.i(TAG, "farmer: luring, dropped a selected monster at " + Math.round(targetHp * 100) + "%"
                     + (onUs ? " (on us, " + lureHits + " gathered)" : ""));
         }
@@ -2686,7 +2686,7 @@ public class ClickService extends AccessibilityService {
             pullingSince = 0;
             lureHits++;
             lastLureDropAt = SystemClock.uptimeMillis();
-            tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
+            tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "lure drop");
             Log.i(TAG, "farmer: pull punched once (" + lureHits + " pulled), dropped the target");
         }, dropAfter);
     }
@@ -2698,7 +2698,7 @@ public class ClickService extends AccessibilityService {
         if (!hit && now - pullingSince < LURE_PULL_MAX_MS) return;
         pullingSince = 0;
         lastLureDropAt = now;
-        if (targetHp >= 0) tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "lure drop");
+        if (targetHp >= 0) tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "lure drop");
         if (hit) lureHits++;
         Log.i(TAG, "farmer: pull " + (hit ? "hit it (" + lureHits + " pulled)" : "timed out") + ", dropped the target");
     }
@@ -2706,7 +2706,7 @@ public class ClickService extends AccessibilityService {
     /** Drop the selected target (its bar's ✕) and walk a step, so the game picks another monster. */
     private void dropTargetAndStep(long now) {
         farmProgressAt = now;
-        tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "drop target");
+        tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "drop target");
         busyUntil = farmHoldUntil = now + TAP_MS + DESELECT_SETTLE_MS + FARM_PUSH_MS + FARM_WALK_MS
                 + FARM_WALK_SETTLE_MS;
         handler.postDelayed(() -> farmWalk(SystemClock.uptimeMillis()), TAP_MS + DESELECT_SETTLE_MS);
@@ -3436,7 +3436,7 @@ public class ClickService extends AccessibilityService {
             calStage = 0;
             Log.i(TAG, "farmer: " + Math.round(dist) + " from home " + homeMap + "[" + homeX + "," + homeY + "] at ["
                     + posX + "," + posY + "], no attacks until back");
-            if (targetHp >= 0) tapAt(screenW * MobCounter.CLOSE_X, screenH * MobCounter.CLOSE_Y, "deselect (going home)");
+            if (targetHp >= 0) tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "deselect (going home)");
             return true;
         }
         if (dist <= leashBackR()) {
