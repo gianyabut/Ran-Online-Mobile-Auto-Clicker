@@ -280,6 +280,56 @@ final class Layout {
                 found.size(), sy, sxRight, sxChat, sxLeft);
     }
 
+    private static final Map<String, int[]> nearTpl = new HashMap<>();   // scaled gray templates: w, h, pixels...
+
+    /**
+     * How well landmark lm matches within radius px of where it belongs (best NCC, -1 if it can't be
+     * checked there). bmp's top-left is at ox,oy on screen; works on the tablet too (scale 1).
+     */
+    static float near(Context c, String lm, Bitmap bmp, int ox, int oy, int radius) {
+        Lm m = byName.get(lm);
+        if (m == null) return -1;
+        Found f = found.get(lm);
+        float sc = active && f != null ? f.scale : sy();
+        String key = lm + "@" + Math.round(sc * 1000);
+        int[] t = nearTpl.get(key);
+        if (t == null) {
+            Bitmap tpl = template(c, lm);
+            if (tpl == null) return -1;
+            int tw = Math.max(8, Math.round(tpl.getWidth() * sc)), th = Math.max(8, Math.round(tpl.getHeight() * sc));
+            Bitmap s = Bitmap.createScaledBitmap(tpl, tw, th, true);
+            t = new int[2 + tw * th];
+            t[0] = tw;
+            t[1] = th;
+            s.getPixels(t, 2, tw, 0, 0, tw, th);
+            if (s != tpl) s.recycle();
+            tpl.recycle();
+            for (int i = 2; i < t.length; i++) t[i] = Color.red(t[i]);
+            nearTpl.put(key, t);
+        }
+        int tw = t[0], th = t[1];
+        float[] p = pt(lm, m.tx, m.ty);
+        int ax = Math.round(p[0] - tw / 2f) - ox - radius, ay = Math.round(p[1] - th / 2f) - oy - radius;
+        int bx = ax + 2 * radius + tw, by = ay + 2 * radius + th;
+        int bw = bmp.getWidth(), bh = bmp.getHeight();
+        ax = Math.max(0, ax);
+        ay = Math.max(0, ay);
+        bx = Math.min(bw, bx);
+        by = Math.min(bh, by);
+        if (bx - ax <= tw || by - ay <= th) return -1;
+        int w = bx - ax, h = by - ay;
+        int[] g = new int[w * h];
+        bmp.getPixels(g, 0, w, ax, ay, w, h);
+        for (int i = 0; i < g.length; i++) {
+            int col = g[i];
+            g[i] = (Color.red(col) * 299 + Color.green(col) * 587 + Color.blue(col) * 114) / 1000;
+        }
+        int[] tp = new int[tw * th];
+        System.arraycopy(t, 2, tp, 0, tp.length);
+        float[] r = scan(g, w, tp, tw, th, 0, 0, w - tw, h - th, 2, 2);
+        return r == null ? -1 : r[0];
+    }
+
     // ---------- finding a landmark ----------
 
     private static int[] grayOf(Bitmap shot) {

@@ -2265,9 +2265,17 @@ public class ClickService extends AccessibilityService {
         if (manual || !canReadScreen() || keyboardShowing()) return;   // typing/math owns the screen
         if (gamePackage != null && !gamePackage.equals(foregroundPackage())) return;
         // Copy only the chat corner (~1.4 MB), not the whole 16 MB screen, so scanning often is cheap.
-        captureRegionForOcr(CHAT_L, CHAT_T, CHAT_W, CHAT_H, chat -> {
-            if (chat == null) return;
-            openChatIfHidden(chat, Math.round(screenW * CHAT_L), Math.round(screenH * CHAT_T));
+        float up = Math.min(CHAT_T, 0.05f);                              // the All > / Expand row above
+        captureRegionForOcr(CHAT_L, CHAT_T - up, CHAT_W, CHAT_H + up, box -> {
+            if (box == null) return;
+            openChatIfHidden(box, Math.round(screenW * CHAT_L), Math.round(screenH * (CHAT_T - up)));
+            int dy = Math.min(box.getHeight() - 1, Math.round(screenH * up));
+            Bitmap chat;
+            try {
+                chat = Bitmap.createBitmap(box, 0, dy, box.getWidth(), box.getHeight() - dy);
+            } catch (RuntimeException | OutOfMemoryError e) {
+                return;
+            }
             Ocr.read(chat, (lines, words) -> checkChatForBuffRequest(lines));
         });
     }
@@ -3080,6 +3088,9 @@ public class ClickService extends AccessibilityService {
      */
     private static int coordNumber(String digits) {
         String d = digits.replace(" ", "");
+        // No coordinate starts with 0: "[1" read as one "l" left "03" ([3,82] for [103,82] sent the
+        // phone walking 100 tiles the wrong way, 23:27).
+        if (d.length() >= 2 && d.charAt(0) == '0') d = "1" + d;
         if (d.length() > 3) d = d.substring(0, 3);
         return Integer.parseInt(d);
     }
@@ -3567,7 +3578,11 @@ public class ClickService extends AccessibilityService {
     /** Same map despite OCR slips ("TradingHole" / "TradingHolde"): first 6 letters, any case. */
     private static boolean sameMap(String a, String b) {
         String x = a.toLowerCase(java.util.Locale.ROOT), y = b.toLowerCase(java.util.Locale.ROOT);
-        return x.regionMatches(0, y, 0, Math.min(6, Math.min(x.length(), y.length())));
+        if (x.regionMatches(0, y, 0, Math.min(6, Math.min(x.length(), y.length())))) return true;
+        // The front cut off: "GateHole" for "SacredGateHole" (23:26, the phone) stopped the walk home
+        // as "not on the home spot's map".
+        String shortOne = x.length() <= y.length() ? x : y, longOne = shortOne == x ? y : x;
+        return shortOne.length() >= 5 && longOne.endsWith(shortOne);
     }
 
     private void leashWalk(float dx, float dy, int ms, long now) {
@@ -3650,6 +3665,7 @@ public class ClickService extends AccessibilityService {
      * a tap on it opens the chat again. Looked for in the chat reads of Farmer and FS.
      */
     private static float CHATB_L = 0.28f, CHATB_T = 0.74f, CHATB_R = 0.76f, CHATB_B = 0.99f;
+    private static final float CHAT_SHOWN_NCC = 0.5f;
     private static final int CHAT_OPEN_GAP_MS = 15_000, CHAT_OPEN_TRIES = 4, CHAT_OPEN_BACKOFF_MS = 5 * 60_000;
     private long chatOpenTapAt;
     private int chatOpenTries;
@@ -3660,6 +3676,12 @@ public class ClickService extends AccessibilityService {
         if (now - chatOpenTapAt < (chatOpenTries >= CHAT_OPEN_TRIES ? CHAT_OPEN_BACKOFF_MS : CHAT_OPEN_GAP_MS)) return;
         float[] c;
         try {
+            // Only with the chat box positively gone: its All > / Expand buttons not where they
+            // belong. White things on the ground (loot, the pet) passed for the bubble on the phone
+            // and opened the chat over and over (23:29, the user).
+            int rad = Math.round(30 * Layout.sy());
+            float all = Layout.near(this, "chatAll", bmp, ox, oy, rad), exp = Layout.near(this, "chatExpand", bmp, ox, oy, rad);
+            if (all < -0.5f || exp < -0.5f || all >= CHAT_SHOWN_NCC || exp >= CHAT_SHOWN_NCC) return;
             c = chatBubble(bmp, ox, oy);
         } catch (RuntimeException | OutOfMemoryError e) {
             return;
@@ -3678,7 +3700,7 @@ public class ClickService extends AccessibilityService {
 
     /** Centre of the "..." bubble in screen pixels, or null. */
     private float[] chatBubble(Bitmap bmp, int ox, int oy) {
-        float s = screenW / 2560f;
+        float s = Layout.active() ? Layout.sy() : screenW / 2560f;
         int x0 = Math.max(0, Math.round(screenW * CHATB_L) - ox), y0 = Math.max(0, Math.round(screenH * CHATB_T) - oy);
         int x1 = Math.min(bmp.getWidth(), Math.round(screenW * CHATB_R) - ox);
         int y1 = Math.min(bmp.getHeight(), Math.round(screenH * CHATB_B) - oy);
@@ -3731,6 +3753,16 @@ public class ClickService extends AccessibilityService {
             }
         }
         if (dark < 20 * s * s || dark > 700 * s * s || bottom - top > 18 * s) return null;   // 52-59 measured
+        // Exactly three dark dots across the band's middle row (the pet's stripes, text: more or fewer).
+        int my = (top + bottom) / 2, dots = 0;
+        boolean in = false;
+        for (int x = l + 2; x <= r - 2; x++) {
+            int p = px[my * w + x];
+            boolean d = Math.max((p >> 16) & 0xff, Math.max((p >> 8) & 0xff, p & 0xff)) < 110;
+            if (d && !in) dots++;
+            in = d;
+        }
+        if (dots != 3) return null;
         return new float[]{(l + r) / 2f, (t + b) / 2f};
     }
 
