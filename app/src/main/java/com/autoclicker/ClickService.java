@@ -161,7 +161,7 @@ public class ClickService extends AccessibilityService {
     private static final int FARM_WALK_MS = 4000;   // big maps: cover ground (and leave a stuck spot)
     private static final int FARM_WALK_SETTLE_MS = 400;
     private static final int FARM_PUSH_MS = 100;
-    private static final float FARM_PUSH = 140 / 2560f;
+    private static float FARM_PUSH = 140 / 2560f;
     private static final int[][] FARM_WALK_DIRS = {{1, 0}, {0, -1}, {-1, 0}, {0, 1}};   // E N W S
     private int farmWalkStep;
     private static final int FARM_MAX_LEG = 4;
@@ -175,7 +175,7 @@ public class ClickService extends AccessibilityService {
     // the HUD is gone twice in a row; a second tap closes that menu if it was opened by mistake.
     private int hudHiddenScans, panelCloseTries;
     private long hudHiddenSince, lastOcrResultAt;
-    private static final float PANEL_X_X = 2340 / 2560f, PANEL_X_Y = 42 / 1600f;
+    private static float PANEL_X_X = 2340 / 2560f, PANEL_X_Y = 42 / 1600f;
     private static final int PANEL_MAX_TRIES = 3;
     // Luring with nothing in range: head for where monsters were last seen (names at the screen
     // edge, e.g. during the fight), else explore in straight lines - the spiral kept going back
@@ -214,7 +214,7 @@ public class ClickService extends AccessibilityService {
     // Loot: the hand button beside F1 picks up everything nearby (the user's pick, 2026-10-04,
     // after walking to gold labels kept stopping short and attacks pulled the character away).
     // While the hand shows, attacks pause until it's picked up (farmLootCheck).
-    private static final float LOOT_HAND_X = 1735 / 2560f, LOOT_HAND_Y = 1430 / 1600f;
+    private static float LOOT_HAND_X = 1735 / 2560f, LOOT_HAND_Y = 1430 / 1600f;
     private static final int LOOT_MAX_PAUSE_MS = 12_000, LOOT_RETAP_MS = 700, LOOT_IGNORE_MS = 8000;
     // Pickups take 3-4 s; an item the game won't hand over kept it tapping for 10 s with monsters
     // around (08:25:19-30, "stuck and didn't loot"). Give up LOOT_STALL_MS after the last pickup
@@ -279,7 +279,7 @@ public class ClickService extends AccessibilityService {
     private static final int LOOT_STEP_AFTER_MS = 1500, KILL_SPOT_FRESH_MS = 5000;
     // Loot report: the chat box prints "Pick up item 'X'." and "Gained 'N' gold."; read it from the
     // fight screenshot and send a Telegram summary every LOOT_REPORT_MS (the user, 2026-10-05).
-    private static final float LOOT_CHAT_L = 0.255f, LOOT_CHAT_T = 0.745f, LOOT_CHAT_W = 0.38f, LOOT_CHAT_H = 0.225f;
+    private static float LOOT_CHAT_L = 0.255f, LOOT_CHAT_T = 0.745f, LOOT_CHAT_W = 0.38f, LOOT_CHAT_H = 0.225f;
     private static final int LOOT_REPORT_MS = 5 * 60_000;
     private final java.util.LinkedHashMap<String, Integer> lootItems = new java.util.LinkedHashMap<>();
     private long lootGold, lootReportFrom;
@@ -326,7 +326,7 @@ public class ClickService extends AccessibilityService {
     // LURE_START_IDLE_MS after the last fight and gives up after LURE_MAX_MS.
     private static final int LURE_COUNT = 3;
     private static final float LURE_NEAR_W = 0.25f, LURE_FAR_W = 0.6f, LURE_BODY_BELOW = 2f, LURE_HIT_HP = 0.97f;
-    private static final float FIST_X = 2362 / 2560f, FIST_Y = 1386 / 1600f;
+    private static float FIST_X = 2362 / 2560f, FIST_Y = 1386 / 1600f;
     private static final int LURE_PULL_GAP_MS = 2500, LURE_SELECT_SETTLE_MS = 300, LURE_PULL_MAX_MS = 7000;
     // Run speed toward a pulled monster (screen px/s, as measured for walks) and one punch's time.
     private static final float LURE_RUN_PX_PER_S = 350f;
@@ -405,11 +405,11 @@ public class ClickService extends AccessibilityService {
     // component (left -> SW, right -> SE), so left-then-right cancelled east/west yet kept adding
     // south and the character crept south every cycle. Centred on y=1190, left and right cancel and
     // it stays put.
-    private static final float JOYSTICK_X = 250 / 2560f;
-    private static final float JOYSTICK_Y = 1190 / 1600f;
+    private static float JOYSTICK_X = 250 / 2560f;
+    private static float JOYSTICK_Y = 1190 / 1600f;
     // ~120 px each way: clearly registers as a left/right step (40 px was below the deadzone). Being
     // centred, not small, is what stops the drift, so the step can be visible and still return.
-    private static final float JOYSTICK_PUSH = 120 / 2560f;
+    private static float JOYSTICK_PUSH = 120 / 2560f;
     private boolean movePending;
     private final Runnable testMoveTick = this::testMoveTick;
     // Chat-triggered full buff: OCR the chat log; when a new message asks for buffs, cast FB. The
@@ -417,7 +417,7 @@ public class ClickService extends AccessibilityService {
     // OCR is quick and the joystick/skill buttons don't get read. fullBuff() has its own 15 s
     // cooldown, so repeats while a request lingers are harmless.
     private static final int CHAT_SCAN_MS = 1000;
-    private static final float CHAT_L = 0.28f, CHAT_T = 0.74f, CHAT_W = 0.44f, CHAT_H = 0.20f;
+    private static float CHAT_L = 0.28f, CHAT_T = 0.74f, CHAT_W = 0.44f, CHAT_H = 0.20f;
     // A message counts as a buff request if it contains any of these (plus "fb" as its own word).
     private static final String[] CHAT_FB_WORDS = {"full buff", "pa buff", "pabuff", "buffs"};
     private final Runnable chatScanTick = this::chatScanTick;
@@ -807,11 +807,13 @@ public class ClickService extends AccessibilityService {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
                     if ("com.autoclicker.SELLTRIP".equals(i.getAction())) handler.post(() -> startSellTripFromAdb());
+                    else if ("com.autoclicker.LAYOUT".equals(i.getAction())) handler.post(() -> remeasureLayout("adb"));
                     else handler.post(() -> sellAll("adb"));
                 }
             };
             android.content.IntentFilter f = new android.content.IntentFilter("com.autoclicker.SELL");
             f.addAction("com.autoclicker.SELLTRIP");
+            f.addAction("com.autoclicker.LAYOUT");
             if (android.os.Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(sellReceiver, f, "android.permission.DUMP", null, android.content.Context.RECEIVER_EXPORTED);
             } else {
@@ -822,6 +824,7 @@ public class ClickService extends AccessibilityService {
         // Android can disconnect and reconnect this same service without destroying it.
         // Clear everything from the previous connection so bars and rings aren't duplicated.
         removeOverlays("connect");
+        startLayout();
         // Farmer keeps its own rings: load the layout of the mode it was last in.
         farmer = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FARMER, false);
         follow = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FOLLOW, false);
@@ -1530,7 +1533,7 @@ public class ClickService extends AccessibilityService {
     // FS (the user, 23:10): the party down to 3 or fewer (for PARTY_SHRINK_MS, so not a misread)
     // -> the Campus Return card in quick slot D, then stop: there's nobody left to support.
     private static final int CAMPUS_PARTY = 3;
-    private static final float CAMPUS_CARD_X = 2470 / 2560f, CAMPUS_CARD_Y = 756 / 1600f;
+    private static float CAMPUS_CARD_X = 2470 / 2560f, CAMPUS_CARD_Y = 756 / 1600f;
     private long lastPartyReadAt;
 
     /*
@@ -1539,8 +1542,8 @@ public class ClickService extends AccessibilityService {
      * pixels against assets/bar_label_d|e.png, shifted around (the letter sits ~10 px off on the
      * other page). A swipe left brings A/S/D back (right goes to Q/W/E, measured 23:13).
      */
-    private static final float BAR_LBL_L = 2390 / 2560f, BAR_LBL_T = 690 / 1600f, BAR_LBL_W = 80 / 2560f, BAR_LBL_H = 70 / 1600f;
-    private static final float BAR_SWIPE_Y = 760 / 1600f, BAR_SWIPE_HI = 2470 / 2560f, BAR_SWIPE_LO = 2130 / 2560f;
+    private static float BAR_LBL_L = 2390 / 2560f, BAR_LBL_T = 690 / 1600f, BAR_LBL_W = 80 / 2560f, BAR_LBL_H = 70 / 1600f;
+    private static float BAR_SWIPE_Y = 760 / 1600f, BAR_SWIPE_HI = 2470 / 2560f, BAR_SWIPE_LO = 2130 / 2560f;
     private boolean[][] lblD, lblE;
 
     /** Runs then once the A/S/D page shows; flips the bar if it's on Q/W/E; never taps when unsure. */
@@ -3150,7 +3153,7 @@ public class ClickService extends AccessibilityService {
     // away (TradingHole 15.6, X right, Y up: measured 19:09 with the map's corner readout, which
     // shows the coordinates of the last spot touched). Each tap's readout corrects the scale.
     private static final float MAP_K_DEFAULT = 15.6f;
-    private static final float MAP_RO_L = 0.86f, MAP_RO_T = 0.785f, MAP_RO_W = 0.11f, MAP_RO_H = 0.06f;
+    private static float MAP_RO_L = 0.86f, MAP_RO_T = 0.785f, MAP_RO_W = 0.11f, MAP_RO_H = 0.06f;
     private static final int MAP_HOME_GAP_MS = 4000;
     private static final java.util.regex.Pattern MAP_READOUT = java.util.regex.Pattern.compile("(\\d{1,4})\\s+(\\d{1,4})");
     private long lastMapHomeAt;
@@ -3182,7 +3185,7 @@ public class ClickService extends AccessibilityService {
 
     // A map walk that can't get there leaves the game's auto-walk on - a "Stop" button under the
     // minimap - and later map taps did nothing: 88 s to get home, most taps not moving it (11:28).
-    private static final float AUTO_STOP_L = 2300 / 2560f, AUTO_STOP_T = 560 / 1600f,
+    private static float AUTO_STOP_L = 2300 / 2560f, AUTO_STOP_T = 560 / 1600f,
             AUTO_STOP_W = 260 / 2560f, AUTO_STOP_H = 140 / 1600f;
 
     /** Taps the game's auto-walk "Stop" if it shows, then runs then. */
@@ -3610,7 +3613,7 @@ public class ClickService extends AccessibilityService {
      * speech bubble (body ~84x58 px, three dark dots) next to the loot button, and moves around;
      * a tap on it opens the chat again. Looked for in the chat reads of Farmer and FS.
      */
-    private static final float CHATB_L = 0.28f, CHATB_T = 0.74f, CHATB_R = 0.76f, CHATB_B = 0.99f;
+    private static float CHATB_L = 0.28f, CHATB_T = 0.74f, CHATB_R = 0.76f, CHATB_B = 0.99f;
     private static final int CHAT_OPEN_GAP_MS = 15_000, CHAT_OPEN_TRIES = 4, CHAT_OPEN_BACKOFF_MS = 5 * 60_000;
     private long chatOpenTapAt;
     private int chatOpenTries;
@@ -3941,7 +3944,7 @@ public class ClickService extends AccessibilityService {
     // The campus map's point that walked the character from the Starting Point to the Sword
     // Instructor ([14,21] -> [18,15], 15:26). Taps 10-40 px off it sat on the room's walls and
     // went nowhere (15:43). The campus map shows the whole campus, so this spot doesn't move.
-    private static final float SELL_MAP_X = 1089 / 2560f, SELL_MAP_Y = 1027 / 1600f;
+    private static float SELL_MAP_X = 1089 / 2560f, SELL_MAP_Y = 1027 / 1600f;
     private int sellMapTaps;
 
     private void sellMapTap() {
@@ -4219,13 +4222,13 @@ public class ClickService extends AccessibilityService {
      * "Shop Trade:Possibility"; buttons ... Sell) -> Sell -> "Do you want sell [name]?" Yes / No.
      * Stacks (a count in the slot) are never equipment and are skipped without opening.
      */
-    private static final float BAG_X0 = 1408 / 2560f, BAG_DX = 191 / 2560f, BAG_Y0 = 371 / 1600f, BAG_DY = 203 / 1600f;
+    private static float BAG_X0 = 1408 / 2560f, BAG_DX = 191 / 2560f, BAG_Y0 = 371 / 1600f, BAG_DY = 203 / 1600f;
     private static final int BAG_COLS = 6, BAG_ROWS = 4;
-    private static final float BAG_L = 1320 / 2560f, BAG_T = 200 / 1600f, BAG_W = 1180 / 2560f, BAG_H = 970 / 1600f;   // title to gold line
-    private static final float BAG_DOWN_X = 2474 / 2560f, BAG_DOWN_Y = 1050 / 1600f;
-    private static final float INFO_W = 1440 / 2560f, INFO_H = 1420 / 1600f;
-    private static final float INFO_X_X = 1371 / 2560f, INFO_X_Y = 81 / 1600f;
-    private static final float CONFIRM_L = 400 / 2560f, CONFIRM_T = 400 / 1600f, CONFIRM_W = 1760 / 2560f, CONFIRM_H = 760 / 1600f;
+    private static float BAG_L = 1320 / 2560f, BAG_T = 200 / 1600f, BAG_W = 1180 / 2560f, BAG_H = 970 / 1600f;   // title to gold line
+    private static float BAG_DOWN_X = 2474 / 2560f, BAG_DOWN_Y = 1050 / 1600f;
+    private static float INFO_W = 1440 / 2560f, INFO_H = 1420 / 1600f;
+    private static float INFO_X_X = 1371 / 2560f, INFO_X_Y = 81 / 1600f;
+    private static float CONFIRM_L = 400 / 2560f, CONFIRM_T = 400 / 1600f, CONFIRM_W = 1760 / 2560f, CONFIRM_H = 760 / 1600f;
     private int sellConfirmTries;
     private static final String[] SELL_TYPES = {"ring", "body", "hand", "foot", "glove", "shoe", "boot", "head", "hat",
             "helm", "neck", "ear", "belt", "wrist", "pant", "skirt", "coat", "robe", "suit"};
@@ -5316,7 +5319,7 @@ public class ClickService extends AccessibilityService {
     }
 
     // The minimap (top right) opens the big map; X (top right) closes it.
-    private static final float MINIMAP_X = 2300 / 2560f, MINIMAP_Y = 270 / 1600f;
+    private static float MINIMAP_X = 2300 / 2560f, MINIMAP_Y = 270 / 1600f;
     private static final int MAP_OPEN_MS = 1200, MAP_FOLLOW_GAP_MS = 5000, MAP_WALK_MS = 4000;
     private long lastMapFollowAt;
     // Through portals (the user, 12:53: "the bot has to follow it after the portal"): the M leaves
@@ -5722,19 +5725,19 @@ public class ClickService extends AccessibilityService {
     private static final int USE_REVIVE_TRIES = 2;
     // After a death (the user, 07:38): no attacks in town; once revived, use the Back Point card in
     // quick slot S to return to the farming spot, then farm on. S = the middle of A/S/D (07:39).
-    private static final float BACK_POINT_X = 2317 / 2560f, BACK_POINT_Y = 755 / 1600f;
+    private static float BACK_POINT_X = 2317 / 2560f, BACK_POINT_Y = 755 / 1600f;
     private static final int BACK_POINT_AFTER_MS = 7000, BACK_POINT_LOAD_MS = 12_000;
     private long deadUntil;
     private final Runnable useBackPoint = this::useBackPoint;
     private final Runnable backAtSpot = this::backAtSpot;
     // The pet stays behind after a death: the paw (top right) asks "Summon your pet?" Yes/No.
-    private static final float PAW_X = 1828 / 2560f, PAW_Y = 42 / 1600f;
+    private static float PAW_X = 1828 / 2560f, PAW_Y = 42 / 1600f;
     /*
      * The pet's bar, right of its card by the chat box (the user, 11:00): shows only while the pet
      * is out, and fills from the bottom - green, yellow, red as its food runs down (80% at 10:02,
      * 56% at 11:00). Missing -> summon it; low -> a Telegram to feed it.
      */
-    private static final float PET_BAR_X = 698 / 2560f, PET_BAR_T = 1389 / 1600f, PET_BAR_B = 1480 / 1600f;
+    private static float PET_BAR_X = 698 / 2560f, PET_BAR_T = 1389 / 1600f, PET_BAR_B = 1480 / 1600f;
     private static final int PET_BAR_EVERY_MS = 5000, PET_GONE_READS = 3, PET_RESUMMON_GAP_MS = 5 * 60_000;
     private static final float PET_LOW = 0.25f;
     private static final long PET_LOW_ALERT_GAP_MS = 60 * 60_000L;
@@ -5793,8 +5796,8 @@ public class ClickService extends AccessibilityService {
         lastPetSummonAt = now;
         summonPet();
     }
-    private static final float PET_YES_X = 1357 / 2560f, PET_YES_Y = 947 / 1600f;   // measured 07:43
-    private static final float PET_NO_X = 1756 / 2560f, PET_NO_Y = 950 / 1600f;     // "Recall your pet?" No, 10:07
+    private static float PET_YES_X = 1357 / 2560f, PET_YES_Y = 947 / 1600f;   // measured 07:43
+    private static float PET_NO_X = 1756 / 2560f, PET_NO_Y = 950 / 1600f;     // "Recall your pet?" No, 10:07
     // Back Point by the map name (10:06: tapped 7 s after Revive while the town was still loading,
     // so it stayed in town): wait until the map is no longer the one it died on, then tap; check
     // it's back on that map after loading, else try once more.
@@ -6990,6 +6993,218 @@ public class ClickService extends AccessibilityService {
             safeRemove(editor);
             editor = null;
         }
+    }
+
+    // ---------- screen layout (non-tablet screens) ----------
+
+    private static final int LAYOUT_RETRY_MS = 30_000, LAYOUT_TRIES = 40;
+    private int layoutTries;
+    private boolean layoutMeasuring;
+    private final Runnable layoutTick = this::layoutTick;
+
+    /** Landscape screen size (long side first). */
+    private int[] realSize() {
+        DisplayMetrics real = new DisplayMetrics();
+        wm.getDefaultDisplay().getRealMetrics(real);
+        return new int[]{Math.max(real.widthPixels, real.heightPixels), Math.min(real.widthPixels, real.heightPixels)};
+    }
+
+    /** On connect: the tablet needs nothing; another screen uses its saved layout or measures one. */
+    private void startLayout() {
+        int[] sz = realSize();
+        if (Layout.isRefScreen(sz[0], sz[1])) return;
+        if (Layout.load(this, sz[0], sz[1])) {
+            applyLayout();
+            Log.i(TAG, "layout: " + sz[0] + "x" + sz[1] + " loaded (" + Layout.summary() + ")");
+            return;
+        }
+        Log.i(TAG, "layout: " + sz[0] + "x" + sz[1] + " isn't the tablet's screen - measuring it once the game shows");
+        layoutTries = 0;
+        watchHandler.removeCallbacks(layoutTick);
+        watchHandler.postDelayed(layoutTick, 5000);
+    }
+
+    /** adb "com.autoclicker.LAYOUT": forget this screen's layout and measure it again. */
+    private void remeasureLayout(String why) {
+        int[] sz = realSize();
+        if (Layout.isRefScreen(sz[0], sz[1])) {
+            Log.i(TAG, "layout: the tablet's own screen, nothing to measure (" + why + ")");
+            return;
+        }
+        Layout.forget(this, sz[0], sz[1]);
+        Log.i(TAG, "layout: measuring again (" + why + ")");
+        layoutTries = 0;
+        watchHandler.removeCallbacks(layoutTick);
+        watchHandler.post(layoutTick);
+    }
+
+    /** Until a layout is in use: with the game in front, one full screenshot, landmarks found off the main thread. */
+    private void layoutTick() {
+        if (Layout.active() || layoutMeasuring) return;
+        if (++layoutTries > LAYOUT_TRIES) {
+            Log.w(TAG, "layout: gave up measuring after " + LAYOUT_TRIES + " tries");
+            return;
+        }
+        String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+        if (!canReadScreen() || !game.equals(foregroundPackage())) {
+            watchHandler.postDelayed(layoutTick, LAYOUT_RETRY_MS);
+            return;
+        }
+        layoutMeasuring = true;
+        captureRegionForOcr(0f, 0f, 1f, 1f, shot -> {
+            if (shot == null) {
+                layoutMeasuring = false;
+                watchHandler.postDelayed(layoutTick, LAYOUT_RETRY_MS);
+                return;
+            }
+            new Thread(() -> {
+                Layout.Result r;
+                try {
+                    r = Layout.measure(this, shot);
+                } catch (RuntimeException | OutOfMemoryError e) {
+                    r = new Layout.Result(new java.util.HashMap<>(), "failed: " + e, false, shot.getWidth(), shot.getHeight());
+                }
+                shot.recycle();
+                Layout.Result res = r;
+                handler.post(() -> {
+                    layoutMeasuring = false;
+                    Log.i(TAG, "layout: " + res.summary);
+                    if (!res.ok) {
+                        watchHandler.postDelayed(layoutTick, LAYOUT_RETRY_MS);
+                        return;
+                    }
+                    Layout.adopt(this, res);
+                    applyLayout();
+                    Log.i(TAG, "layout: in use - " + Layout.summary());
+                    Telegram.send(this, "📐 Ran Online: measured this screen (" + res.w + "x" + res.h + "): "
+                            + Layout.summary() + ".");
+                });
+            }, "layout").start();
+        });
+    }
+
+    /**
+     * Moves every fixed spot (measured on the tablet, in tablet pixels below) to this screen with
+     * Layout's landmarks. Only runs on a non-tablet screen with a measured layout.
+     */
+    private void applyLayout() {
+        if (!Layout.active()) return;
+        // Right side: the X / menu / paw buttons, the Z and fist buttons.
+        PANEL_X_X = Layout.fx("X", 2340, 42);
+        PANEL_X_Y = Layout.fy("X", 2340, 42);
+        MINIMAP_X = Layout.fx("X", 2300, 270);
+        MINIMAP_Y = Layout.fy("X", 2300, 270);
+        AUTO_STOP_L = Layout.fx("X", 2300, 560);
+        AUTO_STOP_T = Layout.fy("X", 2300, 560);
+        AUTO_STOP_W = Layout.fx("X", 2560, 560) - AUTO_STOP_L;
+        AUTO_STOP_H = Layout.fy("X", 2300, 700) - AUTO_STOP_T;
+        PAW_X = Layout.fx("paw", 1828, 42);
+        PAW_Y = Layout.fy("paw", 1828, 42);
+        CAMPUS_CARD_X = Layout.fx("Z", 2470, 756);
+        CAMPUS_CARD_Y = Layout.fy("Z", 2470, 756);
+        BACK_POINT_X = Layout.fx("Z", 2317, 755);
+        BACK_POINT_Y = Layout.fy("Z", 2317, 755);
+        BAR_LBL_L = Layout.fx("Z", 2390, 690);
+        BAR_LBL_T = Layout.fy("Z", 2390, 690);
+        BAR_LBL_W = Layout.fx("Z", 2470, 690) - BAR_LBL_L;
+        BAR_LBL_H = Layout.fy("Z", 2390, 760) - BAR_LBL_T;
+        BAR_SWIPE_Y = Layout.fy("Z", 2470, 760);
+        BAR_SWIPE_HI = Layout.fx("Z", 2470, 760);
+        BAR_SWIPE_LO = Layout.fx("Z", 2130, 760);
+        FIST_X = Layout.fx("fist", 2362, 1386);
+        FIST_Y = Layout.fy("fist", 2362, 1386);
+        LOOT_HAND_X = Layout.fx("f1", 1735, 1430);
+        LOOT_HAND_Y = Layout.fy("f1", 1735, 1430);
+        // Left side: the joystick, the pet bar beside the Q slot.
+        JOYSTICK_X = Layout.fx("joystick", 250, 1190);
+        JOYSTICK_Y = Layout.fy("joystick", 250, 1190);
+        JOYSTICK_PUSH = Layout.fx("joystick", 370, 1190) - JOYSTICK_X;
+        FARM_PUSH = Layout.fx("joystick", 390, 1190) - JOYSTICK_X;
+        PET_BAR_X = Layout.fx("Q", 698, 1389);
+        PET_BAR_T = Layout.fy("Q", 698, 1389);
+        PET_BAR_B = Layout.fy("Q", 698, 1480);
+        // The chat box (its own scale) and the Move button above it.
+        CHAT_L = Layout.fx("chatAll", 716.8f, 1184);
+        CHAT_T = Layout.fy("chatAll", 716.8f, 1184);
+        CHAT_W = Layout.fx("chatAll", 1843.2f, 1184) - CHAT_L;
+        CHAT_H = Layout.fy("chatAll", 716.8f, 1504) - CHAT_T;
+        LOOT_CHAT_L = Layout.fx("chatAll", 652.8f, 1192);
+        LOOT_CHAT_T = Layout.fy("chatAll", 652.8f, 1192);
+        LOOT_CHAT_W = Layout.fx("chatAll", 1625.6f, 1192) - LOOT_CHAT_L;
+        LOOT_CHAT_H = Layout.fy("chatAll", 652.8f, 1552) - LOOT_CHAT_T;
+        CHATB_L = Layout.fx("chatAll", 716.8f, 1184);
+        CHATB_T = Layout.fy("chatAll", 716.8f, 1184);
+        CHATB_R = Math.min(1f, Layout.fx("chatAll", 1945.6f, 1184));
+        CHATB_B = Math.min(1f, Layout.fy("chatAll", 716.8f, 1584));
+        Prompts.LEFT = Layout.fx("chatAll", 1257, 1115);
+        Prompts.TOP = Layout.fy("chatAll", 1257, 1115);
+        Prompts.WIDTH = Layout.fx("chatAll", 1435, 1115) - Prompts.LEFT;
+        Prompts.HEIGHT = Layout.fy("chatAll", 1257, 1153) - Prompts.TOP;
+        // Windows in the middle (pet question, item details, sell confirm, the shop, the big map):
+        // from the screen's centre at the height scale - not yet checked on a phone.
+        PET_YES_X = Layout.fx("center", 1357, 947);
+        PET_YES_Y = Layout.fy("center", 1357, 947);
+        PET_NO_X = Layout.fx("center", 1756, 950);
+        PET_NO_Y = Layout.fy("center", 1756, 950);
+        INFO_W = Math.min(1f, Layout.fx("center", 1440, 1420));
+        INFO_H = Math.min(1f, Layout.fy("center", 1440, 1420));
+        INFO_X_X = Layout.fx("center", 1371, 81);
+        INFO_X_Y = Layout.fy("center", 1371, 81);
+        CONFIRM_L = Layout.fx("center", 400, 400);
+        CONFIRM_T = Layout.fy("center", 400, 400);
+        CONFIRM_W = Layout.fx("center", 2160, 400) - CONFIRM_L;
+        CONFIRM_H = Layout.fy("center", 400, 1160) - CONFIRM_T;
+        BAG_X0 = Layout.fx("center", 1408, 371);
+        BAG_Y0 = Layout.fy("center", 1408, 371);
+        BAG_DX = Layout.fx("center", 1599, 371) - BAG_X0;
+        BAG_DY = Layout.fy("center", 1408, 574) - BAG_Y0;
+        BAG_L = Layout.fx("center", 1320, 200);
+        BAG_T = Layout.fy("center", 1320, 200);
+        BAG_W = Layout.fx("center", 2500, 200) - BAG_L;
+        BAG_H = Layout.fy("center", 1320, 1170) - BAG_T;
+        BAG_DOWN_X = Layout.fx("center", 2474, 1050);
+        BAG_DOWN_Y = Layout.fy("center", 2474, 1050);
+        SELL_MAP_X = Layout.fx("center", 1089, 1027);
+        SELL_MAP_Y = Layout.fy("center", 1089, 1027);
+        MAP_RO_L = Layout.fx("center", 2201.6f, 1256);
+        MAP_RO_T = Layout.fy("center", 2201.6f, 1256);
+        MAP_RO_W = Layout.fx("center", 2483.2f, 1256) - MAP_RO_L;
+        MAP_RO_H = Layout.fy("center", 2201.6f, 1352) - MAP_RO_T;
+        // Screen reading (MobCounter): the Team list and our HP bar (left), the target bar (centre),
+        // the loot hand (by F1), the Z button.
+        MobCounter.S = Layout.sy();
+        MobCounter.TEAM_Y0 = Layout.fy("hp", 179.2f, 393);
+        MobCounter.TEAM_DY = Layout.fy("hp", 179.2f, 439.5f) - MobCounter.TEAM_Y0;
+        MobCounter.TEAM_X0 = Layout.fx("hp", 179.2f, 393);
+        MobCounter.TEAM_X1 = Layout.fx("hp", 440.3f, 393);
+        MobCounter.HPRED_L = Layout.fx("hp", 309.8f, 17.6f);
+        MobCounter.HPRED_R = Layout.fx("hp", 588.8f, 17.6f);
+        MobCounter.HPRED_T = Layout.fy("hp", 309.8f, 17.6f);
+        MobCounter.HPRED_B = Layout.fy("hp", 309.8f, 40);
+        MobCounter.XB_L = Layout.fx("center", 1784.3f, 110.4f);
+        MobCounter.XB_R = Layout.fx("center", 1830.4f, 110.4f);
+        MobCounter.XB_T = Layout.fy("center", 1784.3f, 110.4f);
+        MobCounter.XB_B = Layout.fy("center", 1784.3f, 155.2f);
+        MobCounter.CLOSE_X = Layout.fx("center", 1806, 132);
+        MobCounter.CLOSE_Y = Layout.fy("center", 1806, 132);
+        MobCounter.RED_L = Layout.fx("center", 819.2f, 118.4f);
+        MobCounter.RED_R = Layout.fx("center", 972.8f, 118.4f);
+        MobCounter.RED_T = Layout.fy("center", 819.2f, 118.4f);
+        MobCounter.RED_B = Layout.fy("center", 819.2f, 147.2f);
+        MobCounter.BAR_L = Layout.fx("center", 793.6f, 121.6f);
+        MobCounter.BAR_R = Layout.fx("center", 1766.4f, 121.6f);
+        MobCounter.BAR_T = Layout.fy("center", 793.6f, 121.6f);
+        MobCounter.BAR_B = Layout.fy("center", 793.6f, 144);
+        MobCounter.HAND_L = Layout.fx("f1", 1679.4f, 1369.6f);
+        MobCounter.HAND_R = Layout.fx("f1", 1809.9f, 1369.6f);
+        MobCounter.HAND_T = Layout.fy("f1", 1679.4f, 1369.6f);
+        MobCounter.HAND_B = Layout.fy("f1", 1679.4f, 1489.6f);
+        MobCounter.GLYPH1_X = Layout.fx("Z", 1888, 915.2f);
+        MobCounter.GLYPH1_Y = Layout.fy("Z", 1888, 915.2f);
+        MobCounter.GLYPH1_R = Layout.fx("Z", 1933, 915.2f) - MobCounter.GLYPH1_X;
+        MobCounter.GLYPH2_X = Layout.fx("Z", 2447.4f, 622.4f);
+        MobCounter.GLYPH2_Y = Layout.fy("Z", 2447.4f, 622.4f);
+        MobCounter.GLYPH2_R = Layout.fx("Z", 2487.4f, 622.4f) - MobCounter.GLYPH2_X;
     }
 
     // ---------- saving ----------

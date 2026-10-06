@@ -21,6 +21,18 @@ final class MobCounter {
 
     private static int[] row = new int[0];
 
+    // Spots below are shares of the screen, measured on the tablet (2560x1600). On another screen
+    // ClickService.applyLayout() moves them with Layout's landmarks; S scales pixel sizes.
+    static float S = 1f;
+    static float TEAM_Y0 = 0.2456f, TEAM_DY = 0.02906f, TEAM_X0 = 0.07f, TEAM_X1 = 0.172f;
+    static float XB_L = 0.697f, XB_R = 0.715f, XB_T = 0.069f, XB_B = 0.097f;           // the target bar's ✕
+    static float RED_L = 0.32f, RED_R = 0.38f, RED_T = 0.074f, RED_B = 0.092f;        // its HP bar's left end
+    static float BAR_L = 0.31f, BAR_R = 0.69f, BAR_T = 0.076f, BAR_B = 0.090f;        // the whole HP bar
+    static float HAND_L = 0.656f, HAND_R = 0.707f, HAND_T = 0.856f, HAND_B = 0.931f;  // the loot hand
+    static float HPRED_L = 0.121f, HPRED_R = 0.23f, HPRED_T = 0.011f, HPRED_B = 0.025f; // our HP bar
+    static float GLYPH1_X = 0.7375f, GLYPH1_Y = 0.572f, GLYPH1_R = 0.0176f;           // the Z button
+    static float GLYPH2_X = 0.956f, GLYPH2_Y = 0.389f, GLYPH2_R = 0.0156f;
+
     private MobCounter() {
     }
 
@@ -38,7 +50,7 @@ final class MobCounter {
                 if (onDarkBox(shot, x, y)) redPixels += STEP * STEP;
             }
         }
-        return Math.round(redPixels / (float) PIXELS_PER_NAME);
+        return Math.round(redPixels / (PIXELS_PER_NAME * S * S));
     }
 
     /**
@@ -51,13 +63,14 @@ final class MobCounter {
         if (shot.getWidth() < screenW || shot.getHeight() < screenH) return 0;
         int n = 0;
         for (int k = 0; k < 8; k++) {
-            int c = (int) (screenH * (0.2456f + k * 0.02906f));
+            int c = (int) (screenH * (TEAM_Y0 + k * TEAM_DY));
             int good = 0;
             int total = 0;
-            for (int x = (int) (screenW * 0.07f); x < screenW * 0.172f; x += Math.max(1, (int) (screenW * 0.006f))) {
+            int a = Math.round(27 * S), b = Math.round(17 * S), d = Math.round(16 * S), e = Math.round(26 * S), m = Math.max(1, Math.round(3 * S));
+            for (int x = (int) (screenW * TEAM_X0); x < screenW * TEAM_X1; x += Math.max(1, (int) (screenW * 0.006f))) {
                 total++;
-                if (darkest(shot, x, c - 27, c - 17) < 45 && darkest(shot, x, c + 16, c + 26) < 45
-                        && barHighlight(shot, x, c - 16, c + 16) && neutralOrRed(shot, x, c - 3, c + 3)) {
+                if (darkest(shot, x, c - a, c - b) < 45 && darkest(shot, x, c + d, c + e) < 45
+                        && barHighlight(shot, x, c - d, c + d) && neutralOrRed(shot, x, c - m, c + m)) {
                     good++;
                 }
             }
@@ -97,8 +110,8 @@ final class MobCounter {
     }
 
     // The selected target's bar at the top centre: its ✕ close button, and the start of its HP bar.
-    static final float CLOSE_X = 0.7055f;
-    static final float CLOSE_Y = 0.0825f;
+    static float CLOSE_X = 0.7055f;
+    static float CLOSE_Y = 0.0825f;
 
     /**
      * Whether a target (a player or a monster) is selected. Buffs go to a selected player instead
@@ -109,8 +122,8 @@ final class MobCounter {
         // The white ✕: measured 10% bright pixels in this box with a target, 0% without.
         int bright = 0;
         int total = 0;
-        for (int y = (int) (screenH * 0.069f); y < screenH * 0.097f; y += 2) {
-            for (int x = (int) (screenW * 0.697f); x < screenW * 0.715f; x += 2) {
+        for (int y = (int) (screenH * XB_T); y < screenH * XB_B; y += 2) {
+            for (int x = (int) (screenW * XB_L); x < screenW * XB_R; x += 2) {
                 int c = shot.getPixel(x, y);
                 total++;
                 if (Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c))) > 200) bright++;
@@ -120,8 +133,8 @@ final class MobCounter {
         // And the red HP bar's left end (always red unless the target is nearly dead).
         int red = 0;
         total = 0;
-        for (int y = (int) (screenH * 0.074f); y < screenH * 0.092f; y += 2) {
-            for (int x = (int) (screenW * 0.32f); x < screenW * 0.38f; x += 3) {
+        for (int y = (int) (screenH * RED_T); y < screenH * RED_B; y += 2) {
+            for (int x = (int) (screenW * RED_L); x < screenW * RED_R; x += 3) {
                 int c = shot.getPixel(x, y);
                 total++;
                 if (Color.red(c) > 150 && Color.green(c) < 70 && Color.blue(c) < 70) red++;
@@ -136,11 +149,11 @@ final class MobCounter {
      */
     static float targetHp(Bitmap shot, int screenW, int screenH) {
         if (!targetSelected(shot, screenW, screenH)) return -1;
-        int left = (int) (screenW * 0.31f), right = (int) (screenW * 0.69f);
+        int left = (int) (screenW * BAR_L), right = (int) (screenW * BAR_R);
         int lastRed = -1;
         for (int x = left; x < right; x += 2) {
             int red = 0;
-            for (int y = (int) (screenH * 0.076f); y < screenH * 0.090f; y += 3) {
+            for (int y = (int) (screenH * BAR_T); y < screenH * BAR_B; y += 3) {
                 int c = shot.getPixel(x, y);
                 if (Color.red(c) > 150 && Color.green(c) < 70 && Color.blue(c) < 70) red++;
             }
@@ -158,8 +171,8 @@ final class MobCounter {
         if (shot.getWidth() < screenW || shot.getHeight() < screenH) return false;
         int tan = 0;
         int total = 0;
-        for (int y = (int) (screenH * 0.856f); y < screenH * 0.931f; y += 3) {
-            for (int x = (int) (screenW * 0.656f); x < screenW * 0.707f; x += 3) {
+        for (int y = (int) (screenH * HAND_T); y < screenH * HAND_B; y += 3) {
+            for (int x = (int) (screenW * HAND_L); x < screenW * HAND_R; x += 3) {
                 int c = shot.getPixel(x, y);
                 total++;
                 if (Color.red(c) > 150 && Color.red(c) - Color.blue(c) > 60 && Color.green(c) > 90) tan++;
@@ -179,16 +192,16 @@ final class MobCounter {
         // Server List); a black/broken game screen or the login screen has none (0%) - no X there
         // (23:30: the game failed to redraw after Messenger and X was tapped on a broken screen).
         int red = 0, n = 0;
-        for (int y = (int) (screenH * 0.011f); y < screenH * 0.025f; y += 2) {
-            for (int x = (int) (screenW * 0.121f); x < screenW * 0.23f; x += 4) {
+        for (int y = (int) (screenH * HPRED_T); y < screenH * HPRED_B; y += 2) {
+            for (int x = (int) (screenW * HPRED_L); x < screenW * HPRED_R; x += 4) {
                 int c = shot.getPixel(x, y);
                 n++;
                 if (Color.red(c) > 150 && Color.green(c) < 80 && Color.blue(c) < 80) red++;
             }
         }
         if (n == 0 || red * 100 < n * 15) return false;
-        return brightShare(shot, screenW * 0.7375f, screenH * 0.572f, screenW * 0.0176f) < 0.03f
-                && brightShare(shot, screenW * 0.956f, screenH * 0.389f, screenW * 0.0156f) < 0.02f;
+        return brightShare(shot, screenW * GLYPH1_X, screenH * GLYPH1_Y, screenW * GLYPH1_R) < 0.03f
+                && brightShare(shot, screenW * GLYPH2_X, screenH * GLYPH2_Y, screenW * GLYPH2_R) < 0.02f;
     }
 
     private static float brightShare(Bitmap shot, float cx, float cy, float r) {

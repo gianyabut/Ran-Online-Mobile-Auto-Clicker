@@ -13,10 +13,10 @@ import android.graphics.Color;
 final class Prompts {
 
     // The Move button on a 2560x1600 screen, and its look: 3 x 8 patches, each plain grey.
-    private static final float LEFT = 1257 / 2560f;
-    private static final float TOP = 1115 / 1600f;
-    private static final float WIDTH = 178 / 2560f;
-    private static final float HEIGHT = 38 / 1600f;
+    static float LEFT = 1257 / 2560f;
+    static float TOP = 1115 / 1600f;
+    static float WIDTH = 178 / 2560f;
+    static float HEIGHT = 38 / 1600f;
     private static final int[] MOVE_BUTTON = {
             116, 115, 118, 118, 115, 115, 115, 116,
             67, 67, 117, 129, 105, 109, 70, 67,
