@@ -3672,6 +3672,8 @@ public class ClickService extends AccessibilityService {
 
     /** Taps the "..." bubble if bmp (whose top-left is at ox,oy on screen) shows it. */
     private void openChatIfHidden(Bitmap bmp, int ox, int oy) {
+        // Not on the phone: the user keeps the chat closed there while boosting (23:45).
+        if (Layout.active()) return;
         long now = SystemClock.uptimeMillis();
         if (now - chatOpenTapAt < (chatOpenTries >= CHAT_OPEN_TRIES ? CHAT_OPEN_BACKOFF_MS : CHAT_OPEN_GAP_MS)) return;
         float[] c;
@@ -7209,8 +7211,10 @@ public class ClickService extends AccessibilityService {
         BAR_SWIPE_LO = Layout.fx("Z", 2130, 760);
         FIST_X = Layout.fx("fist", 2362, 1386);
         FIST_Y = Layout.fy("fist", 2362, 1386);
-        LOOT_HAND_X = Layout.fx("f1", 1735, 1430);
-        LOOT_HAND_Y = Layout.fy("f1", 1735, 1430);
+        // The hand sits with the right-hand buttons, not by F1: on the phone it is up-right of F1
+        // (2075,1134), and the F1 spot was on the chat box - every loot tap opened the chat (23:44).
+        LOOT_HAND_X = Layout.fx("fist", 1735, 1430);
+        LOOT_HAND_Y = Layout.fy("fist", 1735, 1430);
         // Left side: the joystick, the pet bar beside the Q slot.
         JOYSTICK_X = Layout.fx("joystick", 250, 1190);
         JOYSTICK_Y = Layout.fy("joystick", 250, 1190);
@@ -7299,10 +7303,10 @@ public class ClickService extends AccessibilityService {
         MobCounter.BAR_R = Layout.fx("center", 1766.4f, 121.6f);
         MobCounter.BAR_T = Layout.fy("center", 793.6f, 121.6f);
         MobCounter.BAR_B = Layout.fy("center", 793.6f, 144);
-        MobCounter.HAND_L = Layout.fx("f1", 1679.4f, 1369.6f);
-        MobCounter.HAND_R = Layout.fx("f1", 1809.9f, 1369.6f);
-        MobCounter.HAND_T = Layout.fy("f1", 1679.4f, 1369.6f);
-        MobCounter.HAND_B = Layout.fy("f1", 1679.4f, 1489.6f);
+        MobCounter.HAND_L = Layout.fx("fist", 1679.4f, 1369.6f);
+        MobCounter.HAND_R = Layout.fx("fist", 1809.9f, 1369.6f);
+        MobCounter.HAND_T = Layout.fy("fist", 1679.4f, 1369.6f);
+        MobCounter.HAND_B = Layout.fy("fist", 1679.4f, 1489.6f);
         MobCounter.GLYPH1_X = Layout.fx("Z", 1888, 915.2f);
         MobCounter.GLYPH1_Y = Layout.fy("Z", 1888, 915.2f);
         MobCounter.GLYPH1_R = Layout.fx("Z", 1933, 915.2f) - MobCounter.GLYPH1_X;
