@@ -1056,14 +1056,12 @@ public class ClickService extends AccessibilityService {
             chatPrimed = false;
             lootReportFrom = System.currentTimeMillis();
             handler.postDelayed(lootReportTick, LOOT_REPORT_MS);
-            // A start of yours brings the pet out if it isn't (the user, 2026-10-06): the paw asks
-            // "Summon your pet?" (Yes) or "Recall your pet?" (No, it's out already).
-            if (why.equals("button")) {
-                busyUntil = farmHoldUntil = SystemClock.uptimeMillis() + 3000;
-                handler.postDelayed(() -> {
-                    if (running && farmer && !manual) summonPet();
-                }, 1000);
-            }
+            // A start brings the pet out if it isn't (the user, 2026-10-06): its bar by the chat box
+            // shows when it's out (petBarCheck); no bar -> the paw, "Summon your pet?" -> Yes
+            // ("Recall your pet?" -> No, in case the bar was just covered).
+            petStartCheck = true;
+            petGoneReads = 0;
+            lastPetBarAt = 0;
         }
         if (run && follow) {
             leaderKey = null;
@@ -3111,6 +3109,7 @@ public class ClickService extends AccessibilityService {
             if (dy > 0 && a[1] + dy > maxY) f = Math.min(f, (maxY - a[1]) / dy);
             if (dy < 0 && a[1] + dy < minY) f = Math.min(f, (minY - a[1]) / dy);
             f = Math.max(0f, f);
+            final boolean onMap = f >= 1f;                          // the spot itself, not the map edge
             float tx = a[0] + dx * f, ty = a[1] + dy * f;
             Log.i(TAG, "farmer: walking " + (hx == homeX && hy == homeY ? "home" : "round") + " by the map: ["
                     + px0 + "," + py0 + "] -> [" + hx + "," + hy + "], tapping "
@@ -3130,13 +3129,28 @@ public class ClickService extends AccessibilityService {
                 } catch (RuntimeException | OutOfMemoryError ignored) {
                 }
                 s2.recycle();
-                closeMap();
-                if (ro == null || map == null) return;
+                if (ro == null || map == null) {
+                    closeMap();
+                    return;
+                }
                 Ocr.read(ro, (lines, words) -> {
                     for (MathQuestion.Line l : lines) {
                         java.util.regex.Matcher m = MAP_READOUT.matcher(l.text);
                         if (!m.find()) continue;
                         int rx = Integer.parseInt(m.group(1)), ry = Integer.parseInt(m.group(2));
+                        // Off by a few units ([128,130] and [129,133] for [129,130], 10:57, the user):
+                        // the map is still open, so tap again where the readout says the spot is.
+                        if (onMap && (Math.abs(rx - hx) >= 2 || Math.abs(ry - hy) >= 2)
+                                && Math.abs(rx - hx) <= 15 && Math.abs(ry - hy) <= 15) {
+                            float cx = tx + (hx - rx) * k, cy = ty - (hy - ry) * k;
+                            Log.i(TAG, "farmer: map tap read [" + rx + "," + ry + "], not [" + hx + "," + hy + "] - tapping "
+                                    + Math.round(cx) + "," + Math.round(cy) + " instead");
+                            tapAt(cx, cy, "map home (corrected)");
+                            busyUntil = farmHoldUntil = Math.max(busyUntil, SystemClock.uptimeMillis() + 1200);
+                            handler.postDelayed(ClickService.this::closeMap, 500);
+                        } else {
+                            closeMap();
+                        }
                         float ux = rx - px0, uy = ry - py0, sum = 0;
                         int n = 0;
                         if (Math.abs(ux) >= 3) {
@@ -3158,6 +3172,7 @@ public class ClickService extends AccessibilityService {
                         }
                         return;
                     }
+                    closeMap();                                     // no readout
                 });
             }), 500);
         }), MAP_OPEN_MS);
@@ -3222,6 +3237,7 @@ public class ClickService extends AccessibilityService {
             leashLastDist = 0;
             mapHomeLastDist = 0;
             mapHomeStuck = 0;
+            returnCheckDist = 0;
             leashWalkEnd = 0;
             calStage = 0;
             Log.i(TAG, "farmer: " + Math.round(dist) + " from home " + homeMap + "[" + homeX + "," + homeY + "] at ["
@@ -3237,6 +3253,13 @@ public class ClickService extends AccessibilityService {
             return false;
         }
         if (canFarmMove(now) && posAt > leashWalkEnd && now - lastMapHomeAt > MAP_HOME_GAP_MS) {
+            // Still on its way from the last map tap (closer on every reading): let it walk. A
+            // second map tap mid-walk ([123,121] -> [123,124], 10:57) cost time for nothing.
+            if (posAt == returnCheckPosAt) return true;             // wait for a new reading
+            boolean closer = returnCheckDist > 0 && dist < returnCheckDist - 0.5f;
+            returnCheckPosAt = posAt;
+            returnCheckDist = dist;
+            if (closer && now - lastMapHomeAt < MAP_WALK_MAX_MS) return true;
             if (mapHomeLastDist > 0 && dist > mapHomeLastDist - 1) mapHomeStuck++;
             else mapHomeStuck = 0;
             mapHomeLastDist = dist;
@@ -3260,7 +3283,9 @@ public class ClickService extends AccessibilityService {
         return true;
     }
 
-    private static final int DETOUR_UNITS = 6;
+    private static final int DETOUR_UNITS = 6, MAP_WALK_MAX_MS = 30_000;
+    private long returnCheckPosAt;
+    private float returnCheckDist;
     private float mapHomeLastDist;
     private int mapHomeStuck, detourSide = 1;
 
@@ -4788,6 +4813,66 @@ public class ClickService extends AccessibilityService {
     private final Runnable backAtSpot = this::backAtSpot;
     // The pet stays behind after a death: the paw (top right) asks "Summon your pet?" Yes/No.
     private static final float PAW_X = 1828 / 2560f, PAW_Y = 42 / 1600f;
+    /*
+     * The pet's bar, right of its card by the chat box (the user, 11:00): shows only while the pet
+     * is out, and fills from the bottom - green, yellow, red as its food runs down (80% at 10:02,
+     * 56% at 11:00). Missing -> summon it; low -> a Telegram to feed it.
+     */
+    private static final float PET_BAR_X = 698 / 2560f, PET_BAR_T = 1389 / 1600f, PET_BAR_B = 1480 / 1600f;
+    private static final int PET_BAR_EVERY_MS = 5000, PET_GONE_READS = 3, PET_RESUMMON_GAP_MS = 5 * 60_000;
+    private static final float PET_LOW = 0.25f;
+    private static final long PET_LOW_ALERT_GAP_MS = 60 * 60_000L;
+    private long lastPetBarAt, lastPetSummonAt, petLowAlertAt;
+    private int petGoneReads;
+    private boolean petStartCheck;                              // a start: summon only if the bar's missing
+
+    /** The pet bar's fill (0..1), or -1 when there's no bar (pet not out, or covered). */
+    private float petBar(Bitmap shot) {
+        int x = Math.round(screenW * PET_BAR_X), t = Math.round(screenH * PET_BAR_T), b = Math.round(screenH * PET_BAR_B);
+        if (x + 4 >= shot.getWidth() || b >= shot.getHeight()) return -1;
+        int fill = 0, empty = 0, other = 0, n = 0;
+        for (int y = t; y <= b; y += 2) {
+            int c = shot.getPixel(x, y);
+            int r = Color.red(c), g = Color.green(c), bl = Color.blue(c);
+            int mx = Math.max(r, Math.max(g, bl)), mn = Math.min(r, Math.min(g, bl));
+            n++;
+            if (mx > 150 && mx - mn > 80) fill++;                   // green / yellow / red
+            else if (mx < 100) empty++;                             // the dark, used-up part
+            else other++;
+        }
+        // The bar: coloured below, dark above, nothing else - and the coloured part at the bottom.
+        // All dark is no bar too: the game's layout shifted once (10:07) and put dark ground there.
+        if (n == 0 || fill == 0 || other > n / 8 || fill + empty < n * 0.85f) return -1;
+        int bottom = shot.getPixel(x, b - 2);
+        int bmx = Math.max(Color.red(bottom), Math.max(Color.green(bottom), Color.blue(bottom)));
+        if (fill > 0 && bmx < 150) return -1;
+        return fill / (float) n;
+    }
+
+    private void petBarCheck(float level, long now) {
+        if (!running || manual || now < deadUntil) return;
+        if (level >= 0) {
+            petGoneReads = 0;
+            if (petStartCheck) {
+                petStartCheck = false;
+                Log.i(TAG, "pet: out (bar " + Math.round(level * 100) + "%)");
+            }
+            if (level <= PET_LOW && (petLowAlertAt == 0 || now - petLowAlertAt >= PET_LOW_ALERT_GAP_MS)) {
+                petLowAlertAt = now;
+                Log.w(TAG, "pet: bar at " + Math.round(level * 100) + "%, needs food");
+                Telegram.send(this, "🐾 Ran Online: your pet's bar is at " + Math.round(level * 100)
+                        + "% - time to give it pet food.");
+            }
+            return;
+        }
+        if (++petGoneReads < (petStartCheck ? 2 : PET_GONE_READS)) return;
+        petGoneReads = 0;
+        if (!petStartCheck && now - lastPetSummonAt < PET_RESUMMON_GAP_MS) return;
+        Log.i(TAG, "pet: no pet bar" + (petStartCheck ? " at the start" : " for " + PET_GONE_READS + " reads") + ", summoning it");
+        petStartCheck = false;
+        lastPetSummonAt = now;
+        summonPet();
+    }
     private static final float PET_YES_X = 1357 / 2560f, PET_YES_Y = 947 / 1600f;   // measured 07:43
     private static final float PET_NO_X = 1756 / 2560f, PET_NO_Y = 950 / 1600f;     // "Recall your pet?" No, 10:07
     // Back Point by the map name (10:06: tapped 7 s after Revive while the town was still loading,
@@ -5325,6 +5410,10 @@ public class ClickService extends AccessibilityService {
                     int members = MobCounter.partySize(shot, screenW, screenH);
                     updateParty(members);
                     noPartyCheck(members, now);
+                }
+                if (farmer && now - lastPetBarAt >= PET_BAR_EVERY_MS) {
+                    lastPetBarAt = now;
+                    petBarCheck(petBar(shot), now);
                 }
                 if (farmer && now - lastMobCountAt >= farmScanMs() - 100) {
                     lastMobCountAt = now;
