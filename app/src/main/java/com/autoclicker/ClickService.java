@@ -5856,10 +5856,32 @@ public class ClickService extends AccessibilityService {
     // bar at 892, 1110-1183 with Q at 838,1235). Unset (-1) on the tablet.
     private static float PET_BAR2_X = -1, PET_BAR2_T = -1, PET_BAR2_B = -1;
 
+    /**
+     * The pet is out when its card shows beside the chat box (the user, 2026-10-07): found by its
+     * picture near the bar's usual spot - it moves per device, and 34 px on the tablet, where the
+     * bar check at the old spot saw no pet and the paw got tapped ("Recall your pet?").
+     * Its food bar is then read right of the card; card but no readable bar = out, food unknown (1).
+     */
     private float petBar(Bitmap shot) {
-        float v = petBarAt(shot, PET_BAR_X, PET_BAR_T, PET_BAR_B);
-        if (v < 0 && PET_BAR2_X > 0) v = petBarAt(shot, PET_BAR2_X, PET_BAR2_T, PET_BAR2_B);
-        return v;
+        float s = screenH / 1600f;
+        float[] card = petCardNear(shot, PET_BAR_X, PET_BAR_T, PET_BAR_B, s);
+        if ((card == null || card[0] < PetCard.MIN_SCORE) && PET_BAR2_X > 0) {
+            float[] c2 = petCardNear(shot, PET_BAR2_X, PET_BAR2_T, PET_BAR2_B, s);
+            if (c2 != null && (card == null || c2[0] > card[0])) card = c2;
+        }
+        if (card == null || card[0] < PetCard.MIN_SCORE) return -1;
+        float v = petBarAt(shot, (card[1] + 114 * s) / screenW, (card[2] + 4 * s) / screenH, (card[2] + card[4] - 3 * s) / screenH);
+        return v >= 0 ? v : 1f;
+    }
+
+    private float[] petCardNear(Bitmap shot, float fx, float ft, float fb, float s) {
+        int bx = Math.round(screenW * fx), t = Math.round(screenH * ft), b = Math.round(screenH * fb);
+        try {
+            return PetCard.find(this, shot, bx - Math.round(260 * s), t - Math.round(120 * s),
+                    bx - Math.round(76 * s), b - Math.round(38 * s), s);
+        } catch (RuntimeException | OutOfMemoryError e) {
+            return null;
+        }
     }
 
     private float petBarAt(Bitmap shot, float fx, float ft, float fb) {
@@ -6184,8 +6206,17 @@ public class ClickService extends AccessibilityService {
         panelQuietUntil = now + 8000;                          // that dialog is ours, not a panel to X
         busyUntil = farmHoldUntil = Math.max(busyUntil, now + 4000);
         tapAt(screenW * PAW_X, screenH * PAW_Y, "pet paw");
-        handler.postDelayed(() -> captureRegionForOcr(0f, 0f, 1f, 0.75f, shot -> {
-            if (shot == null) return;
+        handler.postDelayed(() -> petDialogRead(0), 1500);
+    }
+
+    /** Reads the pet dialog the paw brought up; an empty screenshot is tried again (00:59: it never answered). */
+    private void petDialogRead(int attempt) {
+        captureRegionForOcr(0f, 0f, 1f, 0.75f, shot -> {
+            if (shot == null) {
+                if (attempt < 3) handler.postDelayed(() -> petDialogRead(attempt + 1), 1000);
+                else Log.w(TAG, "pet: couldn't read the screen after the paw");
+                return;
+            }
             Ocr.read(shot, (lines, words) -> {
                 boolean asked = false, recall = false;
                 Rect yes = null, no = null;
@@ -6220,7 +6251,7 @@ public class ClickService extends AccessibilityService {
                 Log.i(TAG, "pet: \"Summon your pet?\" -> Yes at " + Math.round(x) + "," + Math.round(y));
                 tapAt(x, y, "pet yes");
             });
-        }), 1500);
+        });
     }
 
     private void checkForQuestion(String game, List<MathQuestion.Line> lines) {
