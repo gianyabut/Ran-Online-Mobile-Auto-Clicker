@@ -755,6 +755,10 @@ public class ClickService extends AccessibilityService {
         }
 
         void refreshLabel() {
+            if (uiScale() < 0.9f) {
+                badge.setText(shortLabel());
+                return;
+            }
             String text = (priority ? "★" : "") + (targets.indexOf(this) + 1) + " · ";
             if (smartBuff) {
                 text += buffIcon != null ? "smart buff" : formatInterval(interval) + " · learning";
@@ -766,6 +770,24 @@ public class ClickService extends AccessibilityService {
             }
             if (castLast) text += " · last";
             badge.setText(text);
+        }
+
+        /**
+         * Small screens (the phone): long labels like "8 · smart buff 20%" sat over the neighbouring
+         * skills, and the wrong circle got grabbed (the user, 23:18). Just the number and the key
+         * fact: "8 B20%" (smart buff, its recast %), "8 B?" (still learning), "1 500ms";
+         * C = waits for the cooldown, L = cast last, ★ = priority.
+         */
+        String shortLabel() {
+            String text = (priority ? "★" : "") + (targets.indexOf(this) + 1) + " ";
+            if (smartBuff) {
+                text += buffIcon != null ? "B" + Math.round(recastAt * 100) + "%" : "B?";
+            } else {
+                text += formatInterval(interval);
+            }
+            if (waitForCooldown) text += readyLook != null ? " C" : " C?";
+            if (castLast) text += " L";
+            return text;
         }
 
         void setTouchable(boolean touchable) {
