@@ -802,10 +802,12 @@ public class ClickService extends AccessibilityService {
             sellReceiver = new android.content.BroadcastReceiver() {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
-                    handler.post(() -> sellAll("adb"));
+                    if ("com.autoclicker.SELLTRIP".equals(i.getAction())) handler.post(() -> startSellTrip());
+                    else handler.post(() -> sellAll("adb"));
                 }
             };
             android.content.IntentFilter f = new android.content.IntentFilter("com.autoclicker.SELL");
+            f.addAction("com.autoclicker.SELLTRIP");
             if (android.os.Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(sellReceiver, f, "android.permission.DUMP", null, android.content.Context.RECEIVER_EXPORTED);
             } else {
@@ -3119,7 +3121,9 @@ public class ClickService extends AccessibilityService {
 
     private float mapScale(String map) {
         if (map == null) return MAP_K_DEFAULT;
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getFloat("map_k_" + mapKey(map), MAP_K_DEFAULT);
+        // The campus map is drawn ~3x bigger: [15,20] -> [19,15] was 183 px / 4 and 249 px / 5 (14:48).
+        float def = mapKey(map).startsWith("sgcamp") ? 47.8f : MAP_K_DEFAULT;
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getFloat("map_k_" + mapKey(map), def);
     }
 
     private static String mapKey(String map) {
@@ -3819,11 +3823,132 @@ public class ClickService extends AccessibilityService {
                         + " to town (still in " + map + "). Farming on - please check the card.");
                 return;
             }
-            sellStage = 0;
-            Log.i(TAG, "sell trip: in " + map + " - stopping here for now (walking to the sword section is next)");
-            Telegram.send(this, "🎒 Ran Online: inventory full - used the Campus Return card, now in " + map
-                    + ". Stopped there (selling isn't built yet).");
-            setManual(true, "sell trip: in town");
+            Log.i(TAG, "sell trip: in " + map + " - walking to the Sword Section [" + SELL_NPC_X + "," + SELL_NPC_Y + "]");
+            sellStage = 2;
+            sellStageAt = SystemClock.uptimeMillis();
+            sellWalkTapAt = 0;
+            handler.postDelayed(this::sellTripTick, 1500);
+        });
+    }
+
+    // The Sword Instructor at the Sword Section of SG_Campus1F (the user walked there, 14:50).
+    private static final int SELL_NPC_X = 19, SELL_NPC_Y = 15, SELL_WALK_MAX_MS = 90_000, SELL_TALK_TRIES = 3;
+    private long sellStageAt, sellWalkTapAt;
+    private int sellTalkTries;
+
+    /** Stage 2: walk to the NPC by the map; stage 3: talk to it and open the shop. */
+    private void sellTripTick() {
+        if (!running || sellStage < 2) return;
+        long now = SystemClock.uptimeMillis();
+        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + 5000);
+        if (sellStage == 3) {
+            sellTalk();
+            return;
+        }
+        if (sellStage != 2) return;
+        if (now - sellStageAt > SELL_WALK_MAX_MS) {
+            sellTripEnd("couldn't walk to the Sword Section in " + SELL_WALK_MAX_MS / 1000 + " s", false);
+            return;
+        }
+        readPosition((map, x, y) -> {
+            if (!running || sellStage != 2) return;
+            if (map == null) {
+                handler.postDelayed(this::sellTripTick, 2000);
+                return;
+            }
+            posMap = map;
+            posX = x;
+            posY = y;
+            posAt = SystemClock.uptimeMillis();
+            if (Math.hypot(x - SELL_NPC_X, y - SELL_NPC_Y) <= 1.5) {
+                Log.i(TAG, "sell trip: at the Sword Section [" + x + "," + y + "], talking to the Sword Instructor");
+                sellStage = 3;
+                sellTalkTries = 0;
+                handler.postDelayed(this::sellTripTick, 800);
+                return;
+            }
+            if (SystemClock.uptimeMillis() - sellWalkTapAt > 9000) {
+                sellWalkTapAt = SystemClock.uptimeMillis();
+                mapWalkTo(sellWalkTapAt, SELL_NPC_X, SELL_NPC_Y);
+            }
+            handler.postDelayed(this::sellTripTick, 2000);
+        });
+    }
+
+    /** Tap the NPC under its "Sword Instructor" tag, then "Item Trading", then sell. */
+    private void sellTalk() {
+        if (!running || sellStage != 3) return;
+        if (++sellTalkTries > SELL_TALK_TRIES) {
+            sellTripEnd("couldn't open the Sword Instructor's shop", false);
+            return;
+        }
+        captureRegionForOcr(0f, 0f, 1f, 0.9f, crop -> {
+            if (crop == null) {
+                handler.postDelayed(this::sellTalk, 1500);
+                return;
+            }
+            Ocr.read(crop, (lines, words) -> {
+                if (!running || sellStage != 3) return;
+                Rect trading = null, npc = null;
+                for (MathQuestion.Line l : lines) {
+                    String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+                    if (k.contains("itemtrading")) trading = new Rect(l.box);
+                    if (k.contains("swordinstruct")) npc = new Rect(l.box);
+                }
+                if (trading != null) {
+                    Log.i(TAG, "sell trip: Item Trading");
+                    tapAt(trading.exactCenterX(), trading.exactCenterY(), "item trading");
+                    sellStage = 4;
+                    handler.postDelayed(() -> {
+                        if (running && sellStage == 4) sellAll("trip");
+                    }, 1800);
+                    return;
+                }
+                if (npc == null) {
+                    Log.w(TAG, "sell trip: no Sword Instructor tag on screen (try " + sellTalkTries + ")");
+                    handler.postDelayed(this::sellTalk, 2000);
+                    return;
+                }
+                float x = npc.exactCenterX(), y = npc.bottom + npc.height() * 1.5f;   // its body, under the tag
+                Log.i(TAG, "sell trip: tapping the Sword Instructor at " + Math.round(x) + "," + Math.round(y));
+                tapAt(x, y, "sword instructor");
+                handler.postDelayed(this::sellTalk, 1800);
+            }, true);
+        });
+    }
+
+    /** The trip's over (sold, or stuck): close the shop, say so, and hand over. */
+    private void sellTripEnd(String how, boolean sold) {
+        if (sellStage == 0) return;
+        sellStage = 0;
+        Log.i(TAG, "sell trip: " + how);
+        if (sold) closeMap();                                   // the X closes the shop too
+        Telegram.send(this, (sold ? "\uD83D\uDCB0" : "\u26A0") + " Ran Online: sell trip - " + how
+                + ". Stopped on the campus (the way back to the farm isn't built yet).");
+        setManual(true, "sell trip over");
+    }
+
+    interface PosCallback {
+        void onPos(String map, int x, int y);
+    }
+
+    /** One read of the coordinates line (no agreement check - callers read again anyway). */
+    private void readPosition(PosCallback cb) {
+        captureRegionForOcr(COORD_L, COORD_T, COORD_W, COORD_H, crop -> {
+            if (crop == null) {
+                cb.onPos(null, 0, 0);
+                return;
+            }
+            Ocr.read(crop, (lines, words) -> {
+                for (MathQuestion.Line l : lines) {
+                    java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
+                    if (m.find()) {
+                        cb.onPos(m.group(1), coordNumber(m.group(2)), coordNumber(m.group(3)));
+                        return;
+                    }
+                }
+                cb.onPos(null, 0, 0);
+            });
         });
     }
 
@@ -3873,6 +3998,10 @@ public class ClickService extends AccessibilityService {
         if (!sellRunning) return;
         sellRunning = false;
         Log.i(TAG, "sell: done (" + how + ") - " + sellSold + " sold, gold " + sellGoldBefore + " -> " + sellGoldNow);
+        if (sellStage == 4) {
+            sellTripEnd("sold " + sellSold + " item(s) (" + how + "), gold " + sellGoldBefore + " -> " + sellGoldNow, true);
+            return;
+        }
         Telegram.send(this, "💰 Ran Online: sold " + sellSold + " item(s) at the NPC (" + how + "). Gold "
                 + sellGoldBefore + " -> " + sellGoldNow + ".");
     }
