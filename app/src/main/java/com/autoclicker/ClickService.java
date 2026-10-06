@@ -1861,9 +1861,10 @@ public class ClickService extends AccessibilityService {
     private void refreshModeButton() {
         if (farmer) {
             // Farmer: KILL fights whatever comes; LURE gathers LURE_COUNT first (the user, 14:44).
-            modeButton.setText(lureMode ? "LURE" : "KILL");
+            boolean sell = sellStage != 0 || sellRunning;
+            modeButton.setText(sell ? "SELL" : lureMode ? "LURE" : "KILL");
             modeButton.setTextSize(11);
-            modeButton.setBackground(circle(lureMode ? Color.rgb(60, 120, 40) : Color.rgb(170, 40, 40)));
+            modeButton.setBackground(circle(sell ? Color.rgb(200, 150, 30) : lureMode ? Color.rgb(60, 120, 40) : Color.rgb(170, 40, 40)));
         } else if (booster) {
             modeButton.setText("BOOST");
             modeButton.setTextSize(11);
@@ -1878,7 +1879,17 @@ public class ClickService extends AccessibilityService {
     /** Mode button (FS only): toggle End Game / Low Level. BOOST is chosen on the ▶/AUTO chooser. */
     private void onModeButton() {
         if (farmer) {
-            setLureMode(!lureMode);
+            // KILL <-> SELL (the user, 15:16; LURE is parked): SELL goes to the NPC and sells now,
+            // tapping it again calls the trip off.
+            if (sellStage != 0 || sellRunning) {
+                sellQueue.clear();
+                sellRunning = false;
+                sellTripEnd("called off with the button", false);
+            } else if (running && !manual) {
+                startSellTrip();
+            }
+            refreshModeButton();
+            shake(modeButton);
             return;
         }
         setEndGame(!endGame, "button");
@@ -3791,10 +3802,12 @@ public class ClickService extends AccessibilityService {
             sellStageAt = SystemClock.uptimeMillis();
             sellWalkTapAt = 0;
             busyUntil = farmHoldUntil = Math.max(farmHoldUntil, sellStageAt + 5000);
+            refreshModeButton();
             handler.post(this::sellTripTick);
             return;
         }
         sellStage = 1;
+        refreshModeButton();
         sellCardTries = 0;
         sellFromMap = posMap != null ? posMap : homeMap;
         Log.w(TAG, "sell trip: bag full - Campus Return card (D) to town");
@@ -3964,6 +3977,7 @@ public class ClickService extends AccessibilityService {
     private void sellTripEnd(String how, boolean sold) {
         if (sellStage == 0) return;
         sellStage = 0;
+        refreshModeButton();                                    // SELL -> KILL
         Log.i(TAG, "sell trip: " + how);
         if (sold) closeMap();                                   // the X closes the shop too
         Telegram.send(this, (sold ? "\uD83D\uDCB0" : "\u26A0") + " Ran Online: sell trip - " + how
@@ -4129,7 +4143,7 @@ public class ClickService extends AccessibilityService {
             Ocr.read(crop, (lines, words) -> {
                 if (!sellRunning) return;
                 String name = null, type = null;
-                boolean shop = false;
+                boolean shopNo = false;
                 Rect sell = null, close = null;
                 int nameTop = Integer.MAX_VALUE;
                 for (MathQuestion.Line l : lines) {
@@ -4139,7 +4153,10 @@ public class ClickService extends AccessibilityService {
                         name = l.text.trim();                    // the title
                     }
                     if (k.contains("type") && l.text.contains(":") && type == null) type = k.substring(k.indexOf("type") + 4);
-                    if (k.contains("shoptrade") && k.contains("possib")) shop = true;
+                    // "Shop Trade:Impossibility" means no. On rings that line sits at the window's left
+                    // edge under the bot's bar and read as "...Trade:Possibility" - so only a clear no
+                    // counts ("User Trade" is about other players).
+                    if (k.contains("trade") && k.contains("imposs") && !k.contains("user")) shopNo = true;
                     if (k.equals("sell")) sell = new Rect(l.box);
                     if (k.equals("x") && l.box.top < screenH * 0.1f) close = new Rect(l.box);
                 }
@@ -4147,6 +4164,7 @@ public class ClickService extends AccessibilityService {
                 boolean equipment = type != null && java.util.Arrays.stream(SELL_TYPES).anyMatch(type::contains)
                         && java.util.Arrays.stream(NEVER_SELL_TYPES).noneMatch(type::contains);
                 boolean keep = java.util.Arrays.stream(NEVER_SELL).anyMatch(nk::contains);
+                boolean shop = !shopNo;
                 if (name == null && sell == null) {
                     Log.i(TAG, "sell: no details window, next slot");
                     handler.postDelayed(this::sellNext, 300);
