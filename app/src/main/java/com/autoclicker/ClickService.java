@@ -226,6 +226,9 @@ public class ClickService extends AccessibilityService {
     private static final int LOOT_SCAN_MS = 1000;
     // A skill still animating ignores other input; give it this long after the last attack tap.
     private static final int LOOT_AFTER_SKILL_MS = 700;
+    // No walking for loot: the loot button walks the character to the item by itself (the user,
+    // 2026-10-07 00:56). Off: steps toward a drop or the kill spot, and taps on a drop's label.
+    private static final boolean LOOT_WALKS = false;
     private long lootStartedAt, lootIgnoreUntil;
     // Taps allowed per screenshot that shows the hand (0.7 s apart, inside the 2 s scan).
     private static final int LOOT_TAPS_PER_LOOK = 2;
@@ -2408,7 +2411,7 @@ public class ClickService extends AccessibilityService {
                     postKillUntil = now;
                     busyUntil = now;
                     schedulePump(0);
-                } else if (dropSteps < DROP_MAX_STEPS && now - killAt >= 900 && d > screenW * 0.03f && canFarmMove(now)) {
+                } else if (LOOT_WALKS && dropSteps < DROP_MAX_STEPS && now - killAt >= 900 && d > screenW * 0.03f && canFarmMove(now)) {
                     dropSteps++;
                     dropStepAt = now;
                     int ms = (int) Math.max(300, Math.min(1000, d * 900f / LURE_RUN_PX_PER_S));
@@ -2432,7 +2435,7 @@ public class ClickService extends AccessibilityService {
             }
         }
         // No hand yet: step to where the monster died, so the drop comes into reach.
-        if (!target && now < postKillUntil && lootStartedAt == 0 && !killStepDone && postKillOcrAt < killAt
+        if (LOOT_WALKS && !target && now < postKillUntil && lootStartedAt == 0 && !killStepDone && postKillOcrAt < killAt
                 && now - killAt >= LOOT_STEP_AFTER_MS && now - killSpotAt < KILL_SPOT_FRESH_MS && canFarmMove(now)) {
             killStepDone = true;
             float dx = killSpotX - screenW * 0.5f, dy = killSpotY - screenH * 0.53f;
@@ -4893,7 +4896,7 @@ public class ClickService extends AccessibilityService {
         if (lootStartedAt > 0) {                            // a pickup is under way
             boolean gaveUp = now - lootStartedAt >= LOOT_MAX_PAUSE_MS
                     || now - Math.max(Math.max(lootStartedAt, lastPickupAt), lootLabelTapAt) >= LOOT_STALL_MS;
-            if (handShowing && !gaveUp && now - Math.max(lootStartedAt, lastPickupAt) >= LOOT_LABEL_AFTER_MS
+            if (LOOT_WALKS && handShowing && !gaveUp && now - Math.max(lootStartedAt, lastPickupAt) >= LOOT_LABEL_AFTER_MS
                     && now - lootLabelAskAt >= LOOT_LABEL_GAP_MS) {
                 // The hand taps aren't picking it up (16 taps standing still, the user then walked
                 // over and got it, 11:14): read the ground and tap the item's label instead - the
