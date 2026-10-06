@@ -3913,6 +3913,9 @@ public class ClickService extends AccessibilityService {
     // The Sword Instructor at the Sword Section of SG_Campus1F (the user walked there, 14:50).
     private static final int SELL_NPC_X = 19, SELL_NPC_Y = 15, SELL_WALK_MAX_MS = 90_000, SELL_TALK_TRIES = 4;
     private static final int SELL_NPC_SEE = 6;
+    // From the Starting Point to the Sword Section: tiles the character stood on in the trips that
+    // made it (15:10 and 15:26) - all floor, no walls.
+    private static final int[][] SELL_PATH = {{16, 18}, {18, 16}, {19, 15}};
     private long sellStageAt, sellWalkTapAt, sellTalkFailedUntil;
     private int sellTalkTries;
 
@@ -3952,7 +3955,20 @@ public class ClickService extends AccessibilityService {
             }
             if (SystemClock.uptimeMillis() - sellWalkTapAt > 9000) {
                 sellWalkTapAt = SystemClock.uptimeMillis();
-                mapWalkTo(sellWalkTapAt, SELL_NPC_X, SELL_NPC_Y);
+                // Straight at the NPC from the Starting Point the taps hit walls and it never moved
+                // (15:43, the user). Go by spots it has stood on: the nearest one closer to the NPC.
+                int[] via = null;
+                double viaD = Double.MAX_VALUE;
+                for (int[] w : SELL_PATH) {
+                    if (Math.hypot(w[0] - SELL_NPC_X, w[1] - SELL_NPC_Y) >= toNpc - 0.5) continue;
+                    double d = Math.hypot(w[0] - x, w[1] - y);
+                    if (d < viaD) {
+                        viaD = d;
+                        via = w;
+                    }
+                }
+                if (via == null) via = new int[]{SELL_NPC_X, SELL_NPC_Y};
+                mapWalkTo(sellWalkTapAt, via[0], via[1]);
             }
             handler.postDelayed(this::sellTripTick, 2000);
         });
