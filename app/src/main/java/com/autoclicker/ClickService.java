@@ -3880,8 +3880,9 @@ public class ClickService extends AccessibilityService {
     }
 
     // The Sword Instructor at the Sword Section of SG_Campus1F (the user walked there, 14:50).
-    private static final int SELL_NPC_X = 19, SELL_NPC_Y = 15, SELL_WALK_MAX_MS = 90_000, SELL_TALK_TRIES = 3;
-    private long sellStageAt, sellWalkTapAt;
+    private static final int SELL_NPC_X = 19, SELL_NPC_Y = 15, SELL_WALK_MAX_MS = 90_000, SELL_TALK_TRIES = 4;
+    private static final int SELL_NPC_SEE = 6;
+    private long sellStageAt, sellWalkTapAt, sellTalkFailedUntil;
     private int sellTalkTries;
 
     /** Stage 2: walk to the NPC by the map; stage 3: talk to it and open the shop. */
@@ -3908,8 +3909,11 @@ public class ClickService extends AccessibilityService {
             posX = x;
             posY = y;
             posAt = SystemClock.uptimeMillis();
-            if (Math.hypot(x - SELL_NPC_X, y - SELL_NPC_Y) <= 1.5) {
-                Log.i(TAG, "sell trip: at the Sword Section [" + x + "," + y + "], talking to the Sword Instructor");
+            double toNpc = Math.hypot(x - SELL_NPC_X, y - SELL_NPC_Y);
+            // Close enough to see it: tap the NPC itself - the game walks there and opens its
+            // dialog. Map taps near the room kept landing a tile off and going nowhere (15:21).
+            if (toNpc <= 1.5 || (toNpc <= SELL_NPC_SEE && SystemClock.uptimeMillis() > sellTalkFailedUntil)) {
+                Log.i(TAG, "sell trip: at [" + x + "," + y + "], " + Math.round(toNpc) + " from the Sword Instructor - talking to it");
                 sellStage = 3;
                 sellTalkTries = 0;
                 handler.postDelayed(this::sellTripTick, 800);
@@ -3962,6 +3966,14 @@ public class ClickService extends AccessibilityService {
                 }
                 if (npc == null) {
                     Log.w(TAG, "sell trip: no Sword Instructor tag on screen (try " + sellTalkTries + ")");
+                    if (sellTalkTries >= 2) {
+                        // Not in sight from here: walk by the map again, closer first.
+                        sellStage = 2;
+                        sellTalkFailedUntil = SystemClock.uptimeMillis() + 15_000;
+                        sellWalkTapAt = 0;
+                        handler.postDelayed(this::sellTripTick, 500);
+                        return;
+                    }
                     handler.postDelayed(this::sellTalk, 2000);
                     return;
                 }
@@ -3976,13 +3988,75 @@ public class ClickService extends AccessibilityService {
     /** The trip's over (sold, or stuck): close the shop, say so, and hand over. */
     private void sellTripEnd(String how, boolean sold) {
         if (sellStage == 0) return;
-        sellStage = 0;
-        refreshModeButton();                                    // SELL -> KILL
         Log.i(TAG, "sell trip: " + how);
-        if (sold) closeMap();                                   // the X closes the shop too
-        Telegram.send(this, (sold ? "\uD83D\uDCB0" : "\u26A0") + " Ran Online: sell trip - " + how
-                + ". Stopped on the campus (the way back to the farm isn't built yet).");
-        setManual(true, "sell trip over");
+        if (!sold) {
+            sellStage = 0;
+            refreshModeButton();
+            Telegram.send(this, "\u26A0 Ran Online: sell trip - " + how + ". Stopped on the campus, please check.");
+            setManual(true, "sell trip over");
+            return;
+        }
+        // Sold: close the shop, Back Point (quick slot S) to the farm, then pet + KILL (the user, 15:22).
+        Telegram.send(this, "\uD83D\uDCB0 Ran Online: sell trip - " + how + ". Back Point to the farm next.");
+        sellStage = 5;
+        sellBackTries = 0;
+        closeMap();                                             // the X closes the shop too
+        handler.postDelayed(this::sellBackPoint, 1200);
+    }
+
+    private static final int SELL_BACK_TRIES = 2;
+    private int sellBackTries;
+    private long sellBackAt;
+
+    private void sellBackPoint() {
+        if (!running || sellStage != 5) return;
+        sellBackTries++;
+        sellBackAt = SystemClock.uptimeMillis();
+        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, sellBackAt + SELL_ARRIVE_MAX_MS);
+        Log.i(TAG, "sell trip: Back Point (S) to the farm (try " + sellBackTries + ")");
+        onCardPage(() -> tapAt(screenW * BACK_POINT_X, screenH * BACK_POINT_Y, "back point (sell trip)"), "Back Point");
+        handler.postDelayed(this::sellBackCheck, SELL_LOAD_MS);
+    }
+
+    /** Off the campus yet? Then the pet and KILL; still loading: look again; still there: once more. */
+    private void sellBackCheck() {
+        if (!running || sellStage != 5) return;
+        readPosition((map, x, y) -> {
+            if (!running || sellStage != 5) return;
+            long now = SystemClock.uptimeMillis();
+            if (map == null && now - sellBackAt < SELL_ARRIVE_MAX_MS) {
+                handler.postDelayed(this::sellBackCheck, 2000);
+                return;
+            }
+            boolean away = map != null && !map.toLowerCase(java.util.Locale.ROOT).contains("campus");
+            if (!away) {
+                if (sellBackTries < SELL_BACK_TRIES) {
+                    sellBackPoint();
+                    return;
+                }
+                sellStage = 0;
+                refreshModeButton();
+                Telegram.send(this, "\u26A0 Ran Online: sold, but the Back Point (S) didn't take me back (still in " + map
+                        + "). Stopped on the campus.");
+                setManual(true, "sell trip over");
+                return;
+            }
+            lastSeenMap = map;
+            lastSeenMapAt = now;
+            posMap = map;
+            posX = x;
+            posY = y;
+            posAt = now;
+            sellStage = 0;
+            refreshModeButton();                                // SELL -> KILL
+            Log.i(TAG, "sell trip: back in " + map + "[" + x + "," + y + "] - pet, then KILL");
+            Telegram.send(this, "\u2694 Ran Online: back in " + map + " after selling - farming again (KILL).");
+            busyUntil = farmHoldUntil = now + 4000;
+            farmMobsSeenAt = farmProgressAt = lastTargetBarAt = now;
+            lastPetSummonAt = now;
+            summonPet();
+            schedulePump(0);
+        });
     }
 
     interface PosCallback {
@@ -4000,6 +4074,8 @@ public class ClickService extends AccessibilityService {
                 for (MathQuestion.Line l : lines) {
                     java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
                     if (m.find()) {
+                        lastSeenMap = m.group(1);
+                        lastSeenMapAt = SystemClock.uptimeMillis();
                         cb.onPos(m.group(1), coordNumber(m.group(2)), coordNumber(m.group(3)));
                         return;
                     }
@@ -5553,7 +5629,9 @@ public class ClickService extends AccessibilityService {
     }
 
     private void petBarCheck(float level, long now) {
-        if (!running || manual || now < deadUntil || inCampus()) return;   // no pets on the campus
+        // No pets on the campus, and none during a sell trip: right after the card the pet bar was
+        // gone ("Pets are not allowed") before the campus was read, and it summoned (15:20).
+        if (!running || manual || now < deadUntil || inCampus() || sellStage != 0 || sellRunning) return;
         if (level >= 0) {
             petGoneReads = 0;
             if (petStartCheck) {
