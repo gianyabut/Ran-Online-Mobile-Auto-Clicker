@@ -5136,6 +5136,9 @@ public class ClickService extends AccessibilityService {
         long now = SystemClock.uptimeMillis();
         if (!running || !follow || manual || questionSeen || now < followHoldUntil || !boosterCanAct()) return;
         if (now - userTouchAt < USER_TOUCH_PAUSE_MS) return;
+        // FS + follow: never walk while a skill casts (the user, 21:27) - not in the cast after a
+        // tap (the game's skill lock, busyUntil), nor with a heal or buff waiting to go out.
+        if (!booster && (now < busyUntil || now - lastAnyTapAt < FOLLOW_AFTER_CAST_MS || !pending.isEmpty())) return;
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         // One region from the top-left corner (OCR boxes are screen pixels): Team list + play area.
         captureRegionForOcr(0f, 0f, 0.92f, 0.74f, shot -> {
@@ -5526,6 +5529,7 @@ public class ClickService extends AccessibilityService {
 
     /** Big map open and stuck: tap ~80 px from our arrow toward the map's middle to walk off a portal. */
     private long followMapUntil;
+    private static final int FOLLOW_AFTER_CAST_MS = 2600;   // the skill lock after a heal/buff
 
     private void stepOffViaMap() {
         followMapUntil = SystemClock.uptimeMillis() + 3000;
