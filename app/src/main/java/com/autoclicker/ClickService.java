@@ -2279,7 +2279,16 @@ public class ClickService extends AccessibilityService {
                 float dx = dropX - screenW * 0.5f, dy = dropY - screenH * 0.53f;
                 float d = (float) Math.hypot(dx, dy);
                 if (dropSteps == 0) dropFirstD = d;
-                if (dropSteps > 0 && dropSeenAt > dropStepAt + 800 && Math.abs(d - dropFirstD) < screenW * 0.008f && dropBox != null
+                if (dropSteps > 0 && postKillOcrAt < dropStepAt + 800) {
+                    // No read since the last step yet: walking on from the old spot took all three
+                    // steps toward a "2332" that never got closer (10:30, the user: needless walking).
+                } else if (dropSteps > 0 && dropSeenAt < dropStepAt + 800) {
+                    Log.i(TAG, "farmer: \"" + dropText + "\" gone after the step, attacking");
+                    dropSeenAt = 0;
+                    postKillUntil = now;
+                    busyUntil = now;
+                    schedulePump(0);
+                } else if (dropSteps > 0 && Math.abs(d - dropFirstD) < screenW * 0.008f && dropBox != null
                         && canFarmMove(now)) {
                     // Walked toward it and it stayed put on the screen: screen text, not a drop.
                     if (staticLabels.size() >= 8) staticLabels.remove(0);
@@ -2444,8 +2453,18 @@ public class ClickService extends AccessibilityService {
      * fragment like "hode", which matched any text containing it.
      */
     private static boolean learnableMonster(String key) {
-        return key.length() >= 5;
+        if (key.length() < 5) return false;
+        for (String s : SCENERY_TEXT) if (key.contains(s)) return false;
+        return true;
     }
+
+    // The bus parked at TradingHole: "SAMAHAN NIYO AKO IBALIK ANG RAN PH" / "PAG INGGIT PIKIT".
+    // Read at the top of the screen it was learned as ~80 "monsters" (10:31, the user: needless
+    // movement). Pieces of it, never in a monster's name.
+    private static final String[] SCENERY_TEXT = {"samah", "mahan", "anniy", "niyo", "yoako", "ibalik", "ralik",
+            "alkan", "lkanc", "kancb", "kancr", "ranph", "banph", "andh", "randh", "radh", "pagin", "aging",
+            "nggit", "ngoit", "pikit", "ranonl", "ancban", "kangban", "kangran", "angran", "angban", "oiral",
+            "camah", "samam", "wanan", "wahan", "gamam", "camana", "hanny"};
 
     /**
      * Where a lure tap is safe: open ground, not the minimap, the top buttons, the skill rings,
@@ -2594,7 +2613,8 @@ public class ClickService extends AccessibilityService {
             float mid = line.box.exactCenterX();
             String key = monsterKey(line.text);
             boolean skipped = java.util.Arrays.stream(FARM_SKIP_NAMES).anyMatch(key::contains);   // never lure Caloyski
-            if (!skipped && mid > screenW * 0.3f && mid < screenW * 0.7f && learnableMonster(key) && knownMonsters.add(key)) {
+            // The title is centred over the bar (mid ~0.50W); text off-centre up there is scenery.
+            if (!skipped && mid > screenW * 0.42f && mid < screenW * 0.58f && learnableMonster(key) && knownMonsters.add(key)) {
                 Log.i(TAG, "farmer: learned monster name \"" + line.text.trim() + "\"");
                 // Kept across restarts and installs, so luring works from the first fight.
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
