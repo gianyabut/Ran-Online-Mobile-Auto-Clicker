@@ -1898,6 +1898,11 @@ public class ClickService extends AccessibilityService {
 
     /** ✋/AUTO: go manual, or (from manual) pick a mode to start in. */
     private void onManualButton() {
+        if (sellRunning) {                           // ✋/AUTO stops selling at the NPC
+            sellQueue.clear();
+            sellDone("stopped with the button");
+            return;
+        }
         if (manual) showModeChooser(manualButton);   // startInMode turns manual off and starts
         else setManual(true, "button");
     }
