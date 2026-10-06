@@ -2937,6 +2937,7 @@ public class ClickService extends AccessibilityService {
     private void setHome(String map, int x, int y, String why) {
         homeReading = false;
         homeCandMap = null;
+        if (homeMap == null || !sameMap(map, homeMap)) trail.clear();
         homeMap = map;
         homeX = x;
         homeY = y;
@@ -3057,6 +3058,13 @@ public class ClickService extends AccessibilityService {
                 posX = rx;
                 posY = ry;
                 posAt = t;
+                if (homeMap != null && sameMap(map, homeMap)) {
+                    int[] last = trail.peekLast();
+                    if (last == null || last[0] != rx || last[1] != ry) {
+                        trail.addLast(new int[]{rx, ry});
+                        while (trail.size() > TRAIL_MAX) trail.removeFirst();
+                    }
+                }
                 if (homeMap != null) {
                     Log.d(TAG, "position " + posMap + "[" + posX + "," + posY + "], "
                             + Math.round(Math.hypot(homeX - posX, homeY - posY)) + " from home");
@@ -3214,11 +3222,10 @@ public class ClickService extends AccessibilityService {
                         // Off by a few units ([128,130] and [129,133] for [129,130], 10:57, the user):
                         // the map is still open, so tap again where the readout says the spot is.
                         float off = (float) Math.hypot(rx - hx, ry - hy);
-                        // Near is enough - unless the last walk got nowhere: [123,128] for [123,130]
-                        // was inside the fenced garden and the character never moved (11:23). Home
-                        // itself is walkable (it stood there), so then hit it exactly.
-                        float allowed = mapHomeStuck > 0 ? 0.5f : leashBackR();
-                        if (onMap && hx == homeX && hy == homeY && off > allowed && off <= 15) {
+                        // Always the exact tile: a tile or two off lands in a building or the fenced
+                        // garden, which the game won't walk to ([123,128] for [123,130], 11:23; the
+                        // user, 11:40). The target is a spot the character stood on, so walkable.
+                        if (onMap && off >= 1 && off <= 15) {
                             float cx = tx + (hx - rx) * k, cy = ty - (hy - ry) * k;
                             Log.i(TAG, "farmer: map tap read [" + rx + "," + ry + "], not [" + hx + "," + hy + "] - tapping "
                                     + Math.round(cx) + "," + Math.round(cy) + " instead");
@@ -3346,12 +3353,31 @@ public class ClickService extends AccessibilityService {
                 // the other side next time.
                 mapHomeStuck = 0;
                 mapHomeLastDist = 0;
-                float gx = homeX - posX, gy = homeY - posY;
-                int side = detourSide;
-                detourSide = -detourSide;
-                int wx = Math.round(posX + gx / dist * 3 - gy / dist * DETOUR_UNITS * side);
-                int wy = Math.round(posY + gy / dist * 3 + gx / dist * DETOUR_UNITS * side);
-                Log.i(TAG, "farmer: no closer to home after two map walks, going round via [" + wx + "," + wy + "]");
+                // Round it via a spot the character has stood on (walkable for sure), the one
+                // nearest home; a made-up spot off to the side could be inside a building.
+                int[] via = null;
+                float viaD = dist - 1;
+                for (int[] p : trail) {
+                    if (Math.hypot(p[0] - posX, p[1] - posY) < 2) continue;
+                    float d = (float) Math.hypot(homeX - p[0], homeY - p[1]);
+                    if (d < viaD) {
+                        viaD = d;
+                        via = p;
+                    }
+                }
+                int wx, wy;
+                if (via != null) {
+                    wx = via[0];
+                    wy = via[1];
+                } else {
+                    float gx = homeX - posX, gy = homeY - posY;
+                    int side = detourSide;
+                    detourSide = -detourSide;
+                    wx = Math.round(posX + gx / dist * 3 - gy / dist * DETOUR_UNITS * side);
+                    wy = Math.round(posY + gy / dist * 3 + gx / dist * DETOUR_UNITS * side);
+                }
+                Log.i(TAG, "farmer: no closer to home after two map walks, going round via [" + wx + "," + wy + "]"
+                        + (via != null ? " (a spot it stood on)" : ""));
                 mapWalkTo(now, wx, wy);
             } else {
                 mapWalkHome(now);
@@ -3360,7 +3386,9 @@ public class ClickService extends AccessibilityService {
         return true;
     }
 
-    private static final int DETOUR_UNITS = 6, MAP_WALK_MAX_MS = 30_000;
+    private static final int DETOUR_UNITS = 6, MAP_WALK_MAX_MS = 30_000, TRAIL_MAX = 60;
+    // Spots the character stood on (confirmed readings) on the home map, newest last.
+    private final java.util.ArrayDeque<int[]> trail = new java.util.ArrayDeque<>();
     private long returnCheckPosAt;
     private float returnCheckDist;
     private float mapHomeLastDist;
