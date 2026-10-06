@@ -1891,11 +1891,6 @@ public class ClickService extends AccessibilityService {
      * sits at the right edge); the one tapped starts the clicker in that mode.
      */
     private void showModeChooser(View anchor) {
-        closeModeChooser();
-        closeEditor();
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.HORIZONTAL);
-        int size = dp(40), gap = dp(6);
         TextView fs = roundButton("FS");
         fs.setTextSize(14);
         fs.setBackground(circle(Color.rgb(170, 40, 40)));
@@ -1913,6 +1908,16 @@ public class ClickService extends AccessibilityService {
         boost.setOnClickListener(v -> startInMode(true, false, false));
         farm.setOnClickListener(v -> startInMode(false, true, false));
         fol.setOnClickListener(v -> startInMode(true, false, true));
+        showChooser(anchor, choices);
+    }
+
+    /** A row of small circles right beside anchor (on its left at the right edge); closes on an outside tap. */
+    private void showChooser(View anchor, TextView[] choices) {
+        closeModeChooser();
+        closeEditor();
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.HORIZONTAL);
+        int size = dp(40), gap = dp(6);
         for (int i = 0; i < choices.length; i++) {
             choices[i].setTypeface(Typeface.DEFAULT_BOLD);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
@@ -2785,38 +2790,62 @@ public class ClickService extends AccessibilityService {
         refreshLeashButton();
     }
 
-    /** ⚓: no home set -> make where the character stands home; home set -> clear it and roam. */
+    /**
+     * ⚓ opens a small menu (the user, 10:50: options instead of cycling through them): 6 / 10 / 15
+     * - with no home, sets home where the character stands with that radius; with a home, changes
+     * just the radius (the current one lit) - and OFF clears the home.
+     */
     private void onSetLeash() {
         shake(leashButton);
         // Still reading the spot: a second tap (nothing seemed to happen) bumped the radius to 10
         // before the home was even set (10:11, the user asked why it's slow).
         if (homeReading) return;
-        if (homeMap != null && leashR < LEASH_RADII[LEASH_RADII.length - 1]) {
-            // Home set: next radius, same home.
-            for (int r : LEASH_RADII) {
-                if (r > leashR) {
-                    leashR = r;
-                    break;
-                }
-            }
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LEASH_R, leashR).apply();
+        if (modeChooser != null) {
+            closeModeChooser();
+            return;
+        }
+        List<TextView> choices = new ArrayList<>();
+        for (int r : LEASH_RADII) {
+            TextView b = roundButton(String.valueOf(r));
+            b.setTextSize(14);
+            boolean current = homeMap != null && r == leashR;
+            b.setBackground(circle(current ? Color.rgb(30, 130, 140) : Color.rgb(70, 90, 100)));
+            b.setOnClickListener(v -> {
+                closeModeChooser();
+                pickLeash(r);
+            });
+            choices.add(b);
+        }
+        if (homeMap != null) {
+            TextView off = roundButton("OFF");
+            off.setTextSize(11);
+            off.setBackground(circle(Color.rgb(110, 110, 110)));
+            off.setOnClickListener(v -> {
+                closeModeChooser();
+                homeMap = null;
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_HOME).apply();
+                refreshLeashButton();
+                Log.i(TAG, "farmer: home cleared, roaming (button)");
+                android.widget.Toast.makeText(this, "Leash off: roaming", android.widget.Toast.LENGTH_SHORT).show();
+            });
+            choices.add(off);
+        }
+        showChooser(leashButton, choices.toArray(new TextView[0]));
+    }
+
+    private void pickLeash(int r) {
+        if (homeReading) return;
+        leashR = r;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LEASH_R, leashR).apply();
+        if (homeMap != null) {
+            // Home set: just the radius, same home.
             refreshLeashButton();
             Log.i(TAG, "farmer: leash radius " + leashR + " (button)");
             android.widget.Toast.makeText(this, "Leash: within " + leashR + " of " + homeMap + "[" + homeX + "," + homeY + "]",
                     android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
-        if (homeMap != null) {
-            homeMap = null;
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_HOME).apply();
-            refreshLeashButton();
-            Log.i(TAG, "farmer: home cleared, roaming (button)");
-            android.widget.Toast.makeText(this, "Leash off: roaming", android.widget.Toast.LENGTH_SHORT).show();
-            return;
-        }
         homeCandMap = null;
-        leashR = LEASH_RADII[0];                                    // a new home starts on the tightest leash
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LEASH_R, leashR).apply();
         if (posMap != null && SystemClock.uptimeMillis() - posAt < HOME_FRESH_MS) {
             // The farming loop confirmed the position a moment ago: home straight away.
             setHome(posMap, posX, posY, "button, last reading");
