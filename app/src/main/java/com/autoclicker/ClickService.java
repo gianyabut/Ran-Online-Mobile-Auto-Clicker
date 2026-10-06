@@ -3705,6 +3705,26 @@ public class ClickService extends AccessibilityService {
                 + (farmer ? " If I get killed, I'll stay in town until it's over." : ""));
     }
 
+    // Bag full (the user, 12:00: the game should say so in the chat; the exact text isn't known yet,
+    // so anything about the inventory/bag being full or out of space counts, logged word for word).
+    // The first step toward selling to an NPC: a full bag is what will send the character to town.
+    private static final long BAG_FULL_ALERT_GAP_MS = 30 * 60_000L;
+    private long bagFullAt, bagFullAlertAt;
+
+    private void checkInventoryLine(String text) {
+        if (text.contains("(#") || text.contains("]:")) return;     // a player's message ("[Name(#123)]:...")
+        String k = text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+        if (!(k.contains("inventor") || k.contains("bag"))) return;
+        if (!(k.contains("full") || k.contains("space") || k.contains("room") || k.contains("notenough"))) return;
+        long now = SystemClock.uptimeMillis();
+        boolean fresh = bagFullAt == 0 || now - bagFullAt > 60_000;
+        bagFullAt = now;
+        if (fresh) Log.w(TAG, "bag full: \"" + text.trim() + "\"");
+        if (bagFullAlertAt != 0 && now - bagFullAlertAt < BAG_FULL_ALERT_GAP_MS) return;
+        bagFullAlertAt = now;
+        Telegram.send(this, "🎒 Ran Online: the inventory is full (\"" + text.trim() + "\").");
+    }
+
     /** Reads the chat box for pickups and gold; each line counted once as the chat scrolls. */
     private void farmChatRead(Bitmap shot) {
         openChatIfHidden(shot, 0, 0);
@@ -3727,6 +3747,7 @@ public class ClickService extends AccessibilityService {
             List<String> cur = new ArrayList<>(), curKeys = new ArrayList<>();
             for (MathQuestion.Line l : sorted) {
                 checkPkLine(l.text);
+                checkInventoryLine(l.text);
                 String entry = lootEntry(l.text);
                 if (entry == null) continue;
                 cur.add(entry);
