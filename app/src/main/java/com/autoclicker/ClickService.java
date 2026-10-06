@@ -2832,7 +2832,37 @@ public class ClickService extends AccessibilityService {
         }
         homeReading = true;
         refreshLeashButton();
+        if (running && farmer) {
+            // Farming: read it off the fight screenshots (every scan until set). Its own screenshot
+            // waited for a gap in the ring taps that rarely came: "…" for good (10:39, the user).
+            homeReadStartedAt = SystemClock.uptimeMillis();
+            lastCoordReadAt = 0;
+            handler.postDelayed(this::homeReadTimeout, HOME_READ_MAX_MS);
+            return;
+        }
         readHomeSpot(4);
+    }
+
+    private static final int HOME_READ_MAX_MS = 12_000;
+    private long homeReadStartedAt;
+
+    private void homeReadTimeout() {
+        if (!homeReading || SystemClock.uptimeMillis() - homeReadStartedAt < HOME_READ_MAX_MS - 100) return;
+        homeReadFailed(1);
+    }
+
+    /** A coordinates read from the fight screenshot while ⚓ waits: home once two reads agree. */
+    private void homeFromFarmRead(String map, int x, int y) {
+        boolean confirmed = posMap != null && sameMap(map, posMap) && SystemClock.uptimeMillis() - posAt < 20_000
+                && Math.hypot(x - posX, y - posY) <= 3;
+        if (confirmed || (homeCandMap != null && sameMap(map, homeCandMap)
+                && Math.abs(x - homeCandX) <= 2 && Math.abs(y - homeCandY) <= 2)) {
+            setHome(map, x, y, "button");
+            return;
+        }
+        homeCandMap = map;
+        homeCandX = x;
+        homeCandY = y;
     }
 
     private static final int HOME_FRESH_MS = 2500;
@@ -2928,11 +2958,13 @@ public class ClickService extends AccessibilityService {
             return;
         }
         Ocr.read(crop, (lines, words) -> {
+            if (homeReading) lastCoordReadAt = 0;                   // ⚓ waiting: read every scan
             for (MathQuestion.Line l : lines) {
                 java.util.regex.Matcher m = COORD_TEXT.matcher(l.text);
                 if (!m.find()) continue;
                 String map = m.group(1);
                 int rx = coordNumber(m.group(2)), ry = coordNumber(m.group(3));
+                if (homeReading) homeFromFarmRead(map, rx, ry);
                 long t = SystemClock.uptimeMillis();
                 // A dropped digit ("[126,11" for [126,115], 19:05) looks like a 100-unit jump: the
                 // character covers ~1-2 units a second, so take a big jump only when read twice.
