@@ -4088,7 +4088,8 @@ public class ClickService extends AccessibilityService {
     private void sellCloseShop() {
         if (!running || sellStage != 5) return;
         closeMap();
-        handler.postDelayed(() -> captureRegionForOcr(BAG_L, BAG_T, BAG_W, 120 / 1600f, crop -> {
+        // Both windows: one X closed the bag ("Equipment's Tool") but left the "Store" up (16:00).
+        handler.postDelayed(() -> captureRegionForOcr(0f, 180 / 1600f, 1f, 160 / 1600f, crop -> {
             if (!running || sellStage != 5) return;
             if (crop == null) {
                 handler.postDelayed(this::sellBackPoint, 500);
@@ -4097,9 +4098,10 @@ public class ClickService extends AccessibilityService {
             Ocr.read(crop, (lines, words) -> {
                 boolean shopUp = false;
                 for (MathQuestion.Line l : lines) {
-                    if (l.text.toLowerCase(java.util.Locale.ROOT).contains("equipment")) shopUp = true;
+                    String t = l.text.toLowerCase(java.util.Locale.ROOT);
+                    if (t.contains("equipment") || t.contains("store") || t.contains("clothes")) shopUp = true;
                 }
-                if (shopUp && ++sellCloseTries < 4) {
+                if (shopUp && ++sellCloseTries < 5) {
                     Log.i(TAG, "sell trip: the shop is still open, closing it again");
                     sellCloseShop();
                     return;
