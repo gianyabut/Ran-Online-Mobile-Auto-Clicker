@@ -3821,6 +3821,7 @@ public class ClickService extends AccessibilityService {
             sellStage = 2;
             sellStageAt = SystemClock.uptimeMillis();
             sellWalkTapAt = 0;
+            sellMapTaps = 0;
             busyUntil = farmHoldUntil = Math.max(farmHoldUntil, sellStageAt + 5000);
             refreshModeButton();
             handler.post(this::sellTripTick);
@@ -3906,6 +3907,7 @@ public class ClickService extends AccessibilityService {
             sellStage = 2;
             sellStageAt = SystemClock.uptimeMillis();
             sellWalkTapAt = 0;
+            sellMapTaps = 0;
             handler.postDelayed(this::sellTripTick, 1500);
         });
     }
@@ -3916,6 +3918,30 @@ public class ClickService extends AccessibilityService {
     // From the Starting Point to the Sword Section: tiles the character stood on in the trips that
     // made it (15:10 and 15:26) - all floor, no walls.
     private static final int[][] SELL_PATH = {{16, 18}, {18, 16}, {19, 15}};
+    // The campus map's point that walked the character from the Starting Point to the Sword
+    // Instructor ([14,21] -> [18,15], 15:26). Taps 10-40 px off it sat on the room's walls and
+    // went nowhere (15:43). The campus map shows the whole campus, so this spot doesn't move.
+    private static final float SELL_MAP_X = 1089 / 2560f, SELL_MAP_Y = 1027 / 1600f;
+    private int sellMapTaps;
+
+    private void sellMapTap() {
+        stopAutoWalk(() -> {
+            if (!running || sellStage != 2) return;
+            tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
+            handler.postDelayed(() -> captureHalfScreen(shot -> {
+                if (!running || sellStage != 2) return;
+                boolean open = shot != null && mapIsOpen(shot, 1f);
+                if (shot != null) shot.recycle();
+                if (!open) {
+                    Log.i(TAG, "sell trip: the map didn't open");
+                    return;
+                }
+                Log.i(TAG, "sell trip: tapping the Sword Section spot on the campus map");
+                tapAt(screenW * SELL_MAP_X, screenH * SELL_MAP_Y, "map sword section");
+                handler.postDelayed(this::closeMap, 700);
+            }), MAP_OPEN_MS);
+        });
+    }
     private long sellStageAt, sellWalkTapAt, sellTalkFailedUntil;
     private int sellTalkTries;
 
@@ -3968,7 +3994,12 @@ public class ClickService extends AccessibilityService {
                     }
                 }
                 if (via == null) via = new int[]{SELL_NPC_X, SELL_NPC_Y};
-                mapWalkTo(sellWalkTapAt, via[0], via[1]);
+                if (sellMapTaps++ % 2 == 0) {
+                    // The campus map is the whole campus at a fixed spot: tap the proven point.
+                    sellMapTap();
+                } else {
+                    mapWalkTo(sellWalkTapAt, via[0], via[1]);
+                }
             }
             handler.postDelayed(this::sellTripTick, 2000);
         });
@@ -5679,6 +5710,8 @@ public class ClickService extends AccessibilityService {
         // No pets on the campus, and none during a sell trip: right after the card the pet bar was
         // gone ("Pets are not allowed") before the campus was read, and it summoned (15:20).
         if (!running || manual || now < deadUntil || inCampus() || sellStage != 0 || sellRunning) return;
+        // Only where the map is known: started on the campus with the map unread, it summoned (15:45).
+        if (lastSeenMap == null || now - lastSeenMapAt > 20_000) return;
         if (level >= 0) {
             petGoneReads = 0;
             if (petStartCheck) {
