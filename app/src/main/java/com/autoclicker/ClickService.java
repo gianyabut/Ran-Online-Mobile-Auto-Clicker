@@ -3192,8 +3192,13 @@ public class ClickService extends AccessibilityService {
     private float mapScale(String map) {
         if (map == null) return MAP_K_DEFAULT;
         // The campus map is drawn ~3x bigger: [15,20] -> [19,15] was 183 px / 4 and 249 px / 5 (14:48).
-        float def = mapKey(map).startsWith("sgcamp") ? 47.8f : MAP_K_DEFAULT;
+        float def = (mapKey(map).startsWith("sgcamp") ? 47.8f : MAP_K_DEFAULT) * Layout.sx(Layout.RIGHT);
         return getSharedPreferences(PREFS, MODE_PRIVATE).getFloat("map_k_" + mapKey(map), def);
+    }
+
+    /** Down vs across on the big map: 1 on the tablet, 0.80 / 0.854 on the phone (its map is wider than tall). */
+    private static float mapYRatio() {
+        return Layout.sy() / Layout.sx(Layout.RIGHT);
     }
 
     private static String mapKey(String map) {
@@ -3276,7 +3281,7 @@ public class ClickService extends AccessibilityService {
                 return;
             }
             float k = mapScale(map);
-            float dx = (hx - px0) * k, dy = -(hy - py0) * k;
+            float dx = (hx - px0) * k, dy = -(hy - py0) * k * mapYRatio();
             // Home off the visible map: go as far as the map shows that way.
             float minX = screenW * 0.05f, maxX = screenW * 0.95f, minY = screenH * 0.15f, maxY = screenH * 0.82f, f = 1f;
             if (dx > 0 && a[0] + dx > maxX) f = Math.min(f, (maxX - a[0]) / dx);
@@ -3320,7 +3325,7 @@ public class ClickService extends AccessibilityService {
                         // garden, which the game won't walk to ([123,128] for [123,130], 11:23; the
                         // user, 11:40). The target is a spot the character stood on, so walkable.
                         if (onMap && off >= 1 && off <= 15) {
-                            float cx = tx + (hx - rx) * k, cy = ty - (hy - ry) * k;
+                            float cx = tx + (hx - rx) * k, cy = ty - (hy - ry) * k * mapYRatio();
                             Log.i(TAG, "farmer: map tap read [" + rx + "," + ry + "], not [" + hx + "," + hy + "] - tapping "
                                     + Math.round(cx) + "," + Math.round(cy) + " instead");
                             tapAt(cx, cy, "map home (corrected)");
@@ -3336,7 +3341,7 @@ public class ClickService extends AccessibilityService {
                             n++;
                         }
                         if (Math.abs(uy) >= 3) {
-                            sum += -(ty - a[1]) / uy;
+                            sum += -(ty - a[1]) / uy / mapYRatio();
                             n++;
                         }
                         if (n == 0) return;
@@ -5549,6 +5554,10 @@ public class ClickService extends AccessibilityService {
         return sum / (double) (M_TPL * M_TPL * 3);
     }
 
+    // Where the map's title bar runs (shares of the screen). The phone's map window is narrower
+    // (85%, centred) and never filled the tablet's 5-95% span: "the map didn't open" (23:21).
+    private static float MAPBAR_L = 0.05f, MAPBAR_R = 0.95f, MAPBAR_T = 0.08f, MAPBAR_B = 0.13f;
+
     /** The big map has a light grey title bar right across the top (100% of a row vs <=51% otherwise). */
     private boolean mapIsOpen(Bitmap shot, float heightShare) {
         int w = shot.getWidth(), h = shot.getHeight();
@@ -5556,10 +5565,10 @@ public class ClickService extends AccessibilityService {
         int[] row = new int[w];
         // Rows as a share of the screen: follow captures only the top 74%, which put 13% of the
         // capture just above the bar and the open map went unnoticed (13:02).
-        for (int y = Math.round(fullH * 0.08f); y < Math.min(h, Math.round(fullH * 0.13f)); y++) {
+        for (int y = Math.round(fullH * MAPBAR_T); y < Math.min(h, Math.round(fullH * MAPBAR_B)); y++) {
             shot.getPixels(row, 0, w, 0, y, w, 1);
             int n = 0, tot = 0;
-            for (int x = Math.round(w * 0.05f); x < Math.round(w * 0.95f); x += 4) {
+            for (int x = Math.round(w * MAPBAR_L); x < Math.round(w * MAPBAR_R); x += 4) {
                 int c = row[x], r = (c >> 16) & 0xff, g = (c >> 8) & 0xff, b = c & 0xff;
                 tot++;
                 if (r > 165 && g > 165 && b > 165 && Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b)) < 25) n++;
@@ -5777,8 +5786,18 @@ public class ClickService extends AccessibilityService {
     private boolean petStartCheck;                              // a start: summon only if the bar's missing
 
     /** The pet bar's fill (0..1), or -1 when there's no bar (pet not out, or covered). */
+    // A second place for it: the phone shows the pet card above the Q slot, not beside it (23:22:
+    // bar at 892, 1110-1183 with Q at 838,1235). Unset (-1) on the tablet.
+    private static float PET_BAR2_X = -1, PET_BAR2_T = -1, PET_BAR2_B = -1;
+
     private float petBar(Bitmap shot) {
-        int x = Math.round(screenW * PET_BAR_X), t = Math.round(screenH * PET_BAR_T), b = Math.round(screenH * PET_BAR_B);
+        float v = petBarAt(shot, PET_BAR_X, PET_BAR_T, PET_BAR_B);
+        if (v < 0 && PET_BAR2_X > 0) v = petBarAt(shot, PET_BAR2_X, PET_BAR2_T, PET_BAR2_B);
+        return v;
+    }
+
+    private float petBarAt(Bitmap shot, float fx, float ft, float fb) {
+        int x = Math.round(screenW * fx), t = Math.round(screenH * ft), b = Math.round(screenH * fb);
         if (x + 4 >= shot.getWidth() || b >= shot.getHeight()) return -1;
         int fill = 0, empty = 0, other = 0, n = 0;
         for (int y = t; y <= b; y += 2) {
@@ -7168,6 +7187,14 @@ public class ClickService extends AccessibilityService {
         PET_BAR_X = Layout.fx("Q", 698, 1389);
         PET_BAR_T = Layout.fy("Q", 698, 1389);
         PET_BAR_B = Layout.fy("Q", 698, 1480);
+        PET_BAR2_X = Layout.fx("Q", 611, 1322);
+        PET_BAR2_T = Layout.fy("Q", 611, 1322);
+        PET_BAR2_B = Layout.fy("Q", 611, 1413);
+        // The big map's title bar: the window is centred and scales like the right side.
+        MAPBAR_L = Layout.fx("center", 128, 128);
+        MAPBAR_R = Layout.fx("center", 2432, 128);
+        MAPBAR_T = Layout.fy("center", 128, 128);
+        MAPBAR_B = Layout.fy("center", 128, 208);
         // The chat box (its own scale) and the Move button above it.
         CHAT_L = Layout.fx("chatAll", 716.8f, 1184);
         CHAT_T = Layout.fy("chatAll", 716.8f, 1184);

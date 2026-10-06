@@ -230,7 +230,9 @@ final class Layout {
      */
     static float[] pt(String lm, float tx, float ty) {
         if (!active) return new float[]{tx / REF_W * W, ty / REF_H * H};
-        if (lm.equals("center")) return new float[]{W / 2f + (tx - REF_W / 2f) * sy, H / 2f + (ty - REF_H / 2f) * sy};
+        // Windows in the middle scale like the right side across (the phone's target bar: 0.85 wide,
+        // its X 27 px off at the height scale, 23:22) and like everything else down.
+        if (lm.equals("center")) return new float[]{W / 2f + (tx - REF_W / 2f) * sxRight, H / 2f + (ty - REF_H / 2f) * sy};
         Lm m = byName.get(lm);
         Found f = found.get(lm);
         if (f == null && m != null) {
