@@ -1328,6 +1328,11 @@ public class ClickService extends AccessibilityService {
             schedulePump(1000);
             return;
         }
+        // FS + follow: the big map is open for a follow step - a heal tap there would walk us off.
+        if (follow && SystemClock.uptimeMillis() < followMapUntil) {
+            schedulePump(followMapUntil - SystemClock.uptimeMillis() + 50);
+            return;
+        }
         // Selling / on the campus: no skills at all - a buff recast closed the NPC's popup (15:13).
         if (sellStage != 0 || sellRunning || inCampus()) {
             schedulePump(1000);
@@ -1942,8 +1947,14 @@ public class ClickService extends AccessibilityService {
         TextView fol = roundButton("FOLLOW");
         textSize(fol, 8);
         fol.setBackground(circle(Color.rgb(40, 90, 160)));
-        TextView[] choices = {fs, boost, farm, fol};
+        // FS + follow (the user, 2026-10-06 21:25): heals and buffs like FS while walking after
+        // the party master.
+        TextView fsf = roundButton("FS·F");
+        textSize(fsf, 11);
+        fsf.setBackground(circle(Color.rgb(120, 40, 120)));
+        TextView[] choices = {fs, fsf, boost, farm, fol};
         fs.setOnClickListener(v -> startInMode(false, false, false));
+        fsf.setOnClickListener(v -> startInMode(false, false, true));
         boost.setOnClickListener(v -> startInMode(true, false, false));
         farm.setOnClickListener(v -> startInMode(false, true, false));
         fol.setOnClickListener(v -> startInMode(true, false, true));
@@ -2004,7 +2015,7 @@ public class ClickService extends AccessibilityService {
         follow = on;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_FOLLOW, on).apply();
         if (changed || !why.equals("restored")) {
-            Log.i(TAG, "follow mode " + (on ? "on: staying close to the party master, no skills" : "off") + " (" + why + ")");
+            Log.i(TAG, "follow mode " + (on ? "on: staying close to the party master" : "off") + " (" + why + ")");
         }
     }
 
@@ -2155,6 +2166,7 @@ public class ClickService extends AccessibilityService {
             if (boosterCanAct()) testMove(SystemClock.uptimeMillis());
             return;
         }
+        if (follow && SystemClock.uptimeMillis() - lastFollowWalkAt < TEST_MOVE_EVERY_MS) return;   // following moves us
         movePending = true;
         schedulePump(0);
     }
@@ -5310,6 +5322,7 @@ public class ClickService extends AccessibilityService {
     private void mapFollow(long now) {
         lastMapFollowAt = now;
         followHoldUntil = now + MAP_OPEN_MS + 3500;             // room for a refused screenshot's retry
+        followMapUntil = followHoldUntil;                       // FS+follow: skills wait off the map
         tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
         handler.postDelayed(() -> captureHalfScreen(shot -> {
             if (shot == null) {
@@ -5512,7 +5525,10 @@ public class ClickService extends AccessibilityService {
     }
 
     /** Big map open and stuck: tap ~80 px from our arrow toward the map's middle to walk off a portal. */
+    private long followMapUntil;
+
     private void stepOffViaMap() {
+        followMapUntil = SystemClock.uptimeMillis() + 3000;
         captureHalfScreen(shot -> {
             if (shot == null) return;
             int[] arrow = mapIsOpen(shot, 1f) ? mapCluster(shot, true) : null;
