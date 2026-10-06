@@ -1033,7 +1033,15 @@ public class ClickService extends AccessibilityService {
         lootIgnoreUntil = 0;                                    // a start always loots again
         lootFailStreak = 0;
         if (run) {
-            loadHome();                                         // the ⚓ spot; none set = roam (the user, 08:03)
+            if (why.equals("button")) {
+                // A start of yours begins with the leash off (the user, 2026-10-06): tap the anchor
+                // at the spot to set it. A resume after Android restarted the app keeps it.
+                homeMap = null;
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_HOME).apply();
+                refreshLeashButton();
+            } else {
+                loadHome();                                     // the ⚓ spot; none set = roam (the user, 08:03)
+            }
             calStage = 0;
             calValid = false;
             leashMisses = 0;
