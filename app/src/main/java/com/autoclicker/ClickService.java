@@ -593,6 +593,9 @@ public class ClickService extends AccessibilityService {
         int failStreak;
         // Goes after every other buff that's due (and last in a full buff).
         boolean castLast;
+        // Only cast once the fight is over (Lightspeed, the user 2026-10-07: "only after all
+        // monsters nearby are killed, not during fight"). Farmer only.
+        boolean betweenFights;
         // Dropped from a full buff that a returning wave stopped; cast when it resumes.
         boolean owed;
         long queuedAt;
@@ -784,6 +787,7 @@ public class ClickService extends AccessibilityService {
                 if (waitForCooldown) text += readyLook != null ? " · CD" : " · CD?";
             }
             if (castLast) text += " · last";
+            if (betweenFights) text += " · after fights";
             badge.setText(text);
         }
 
@@ -802,6 +806,7 @@ public class ClickService extends AccessibilityService {
             }
             if (waitForCooldown) text += readyLook != null ? " C" : " C?";
             if (castLast) text += " L";
+            if (betweenFights) text += " P";
             return text;
         }
 
@@ -1421,6 +1426,17 @@ public class ClickService extends AccessibilityService {
             }
         }
         if (pending.isEmpty()) return;
+        if (farmer && farmFighting(now)) {
+            // "Only between fights" rings wait out the whole fight, the 30 s buff window too.
+            for (int i = pending.size() - 1; i >= 0; i--) {
+                Target t = pending.get(i);
+                if (!t.betweenFights) continue;
+                pending.remove(i);
+                handler.removeCallbacks(t.tick);
+                handler.postDelayed(t.tick, SMART_RECHECK_MS);
+            }
+            if (pending.isEmpty()) return;
+        }
         if (farmer && farmBuffsHeld(now) && pending.stream().allMatch(t -> t.isSmart() && !t.forced)) {
             schedulePump(1000);                         // only buffs waiting, and a fight is on
             return;
@@ -2793,6 +2809,13 @@ public class ClickService extends AccessibilityService {
         }
         Log.i(TAG, "farmer: fight over, full buff: " + low.size() + " at or below "
                 + Math.round(FARM_TOPUP_AT * 100) + "% (targets " + which + ")");
+    }
+
+    /** Farmer: a fight is on - a target, monsters close by, loot, or just after a kill. */
+    private boolean farmFighting(long now) {
+        return running && farmer && (lootStartedAt > 0 || pullingSince > 0
+                || now - lastHandSeenAt < FARM_SCAN_MS + 500 || (!luring
+                && (farmTargetHp >= 0 || now - nearTagAt < NEAR_TAG_FIGHT_MS || now < postKillUntil)));
     }
 
     /** Farmer: hold buff casts while a fight is on. */
@@ -7378,6 +7401,21 @@ public class ClickService extends AccessibilityService {
         castLastLp.topMargin = dp(8);
         panel.addView(castLast, castLastLp);
 
+        TextView between = pillButton("", Color.rgb(70, 70, 70), null);
+        Runnable showBetween = () -> between.setText(t.betweenFights
+                ? "\u262E Only between fights: On (Farmer: never while monsters are near)"
+                : "Only between fights: Off");
+        between.setOnClickListener(v -> {
+            t.betweenFights = !t.betweenFights;
+            showBetween.run();
+            t.refreshLabel();
+            saveTargets();
+        });
+        showBetween.run();
+        LinearLayout.LayoutParams betweenLp = fullWidth();
+        betweenLp.topMargin = dp(8);
+        panel.addView(between, betweenLp);
+
         if (canReadScreen()) {
             TextView smartNote = new TextView(this);
             smartNote.setTextColor(Color.LTGRAY);
@@ -7779,6 +7817,7 @@ public class ClickService extends AccessibilityService {
             sb.append(',').append(t.extraGapMs);
             sb.append(',').append(t.castLast ? 1 : 0);
             sb.append(',').append(t.centerX);
+            sb.append(',').append(t.betweenFights ? 1 : 0);
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(targetsKey(), sb.toString()).apply();
     }
@@ -7807,6 +7846,7 @@ public class ClickService extends AccessibilityService {
                 if (parts.length >= 6) t.priority = parts[5].equals("1");
                 if (parts.length >= 13) t.castLast = parts[12].equals("1");
                 if (parts.length >= 14 && !parts[13].isEmpty()) t.centerX = Integer.parseInt(parts[13]);
+                if (parts.length >= 15) t.betweenFights = parts[14].equals("1");
                 if (parts.length >= 12 && !parts[11].isEmpty()) {
                     t.extraGapMs = Math.max(0, Math.min(MAX_EXTRA_GAP_MS, Integer.parseInt(parts[11])));
                 }
