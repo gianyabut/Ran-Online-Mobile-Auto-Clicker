@@ -1403,6 +1403,10 @@ public class ClickService extends AccessibilityService {
             schedulePump(followMapUntil - SystemClock.uptimeMillis() + 50);
             return;
         }
+        if (follow && SystemClock.uptimeMillis() < followClaimUntil) {
+            schedulePump(followClaimUntil - SystemClock.uptimeMillis() + 50);   // follow moves first
+            return;
+        }
         // Selling / on the campus: no skills at all - a buff recast closed the NPC's popup (15:13).
         if (sellStage != 0 || sellRunning || feedRunning || inCampus()) {
             schedulePump(1000);
@@ -5474,7 +5478,10 @@ public class ClickService extends AccessibilityService {
         if (now - userTouchAt < USER_TOUCH_PAUSE_MS) return;
         // FS + follow: never walk while a skill casts (the user, 21:27) - not in the cast after a
         // tap (the game's skill lock, busyUntil), nor with a heal or buff waiting to go out.
-        if (!booster && (now < busyUntil || now - lastAnyTapAt < FOLLOW_AFTER_CAST_MS || !pending.isEmpty())) return;
+        // Reading never moves anyone, so it goes on during casts; only the move waits (followMayMove).
+        // Gating the read too starved follow on the phone: a heal every 3 s never left a gap (02:54).
+        followCastBusy = !booster && (now < busyUntil || now - lastAnyTapAt < FOLLOW_AFTER_CAST_MS
+                || (!pending.isEmpty() && now >= followClaimUntil));
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         // One region from the top-left corner (OCR boxes are screen pixels): Team list + play area.
         captureRegionForOcr(0f, 0f, 0.92f, 0.74f, shot -> {
@@ -5499,6 +5506,22 @@ public class ClickService extends AccessibilityService {
                 if (running && follow && !questionSeen) followStep(lines);
             });
         });
+    }
+
+    private boolean followCastBusy;
+    private long followClaimUntil;
+
+    /**
+     * May follow move now? Not during a cast: then it claims the next gap instead - new skill taps
+     * hold off until the current cast's lock is over, and the next follow tick moves.
+     */
+    private boolean followMayMove(long now) {
+        if (!followCastBusy) return true;
+        if (now >= followClaimUntil) {
+            followClaimUntil = now + FOLLOW_AFTER_CAST_MS + 800;
+            Log.d(TAG, "follow: needs to move - holding the next skill until this cast is done");
+        }
+        return false;
     }
 
     private void followStep(List<MathQuestion.Line> lines) {
@@ -5534,12 +5557,14 @@ public class ClickService extends AccessibilityService {
             float[][] dirs = {{0, 1}, {1, 0}, {-1, 0}, {0, -1}};
             float[] d = dirs[portalStepDir++ % dirs.length];
             float push = screenW * FARM_PUSH;
+            if (!followMayMove(now)) return;
             Log.i(TAG, "follow: on a portal's 'Move to the area' - stepping off it");
             followWalk(d[0] * push, d[1] * push, 800, now);
             return;
         }
         if (portalChase) {
             if (portalAsks && moveBtn != null) {
+                if (!followMayMove(now)) return;
                 Log.i(TAG, "follow: at the portal the master took - Move");
                 tapAt(moveBtn.exactCenterX(), moveBtn.exactCenterY(), "portal move");
                 portalChase = false;
@@ -5567,7 +5592,7 @@ public class ClickService extends AccessibilityService {
             // the party master all the same.
             if (!followNoPartyLogged) Log.i(TAG, "follow: no Team list on screen - following the M on the map");
             followNoPartyLogged = true;
-            if (now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) mapFollow(now);
+            if (now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS && followMayMove(now)) mapFollow(now);
             return;
         }
         // Their name tag in the world (not the Team list, the top strip or the minimap).
@@ -5611,6 +5636,7 @@ public class ClickService extends AccessibilityService {
                 dy = leaderDirX * followSideSign;
                 ms = 900;
             }
+            if (!followMayMove(now)) return;
             lastWalkLeaderDist = blocked ? 0 : tagDist;
             Log.i(TAG, "follow: " + leaderShown + " is " + Math.round(tagDist) + " px away, "
                     + (blocked ? "blocked, stepping aside" : "walking " + ms + " ms toward them"));
@@ -5621,7 +5647,7 @@ public class ClickService extends AccessibilityService {
         // it walks there by itself, around walls (the user's idea, 12:45).
         lastWalkLeaderDist = 0;
         if (now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
-            mapFollow(now);
+            if (followMayMove(now)) mapFollow(now);
             return;
         }
         if (leaderSeenAt == 0) {
@@ -5631,6 +5657,7 @@ public class ClickService extends AccessibilityService {
         }
         followWaitLogged = false;
         if (followLostSteps < FOLLOW_LOST_STEPS && now - leaderSeenAt < FOLLOW_LOST_ALERT_MS) {
+            if (!followMayMove(now)) return;
             followLostSteps++;
             Log.i(TAG, "follow: " + leaderShown + " not on screen, walking where they were last seen ("
                     + followLostSteps + "/" + FOLLOW_LOST_STEPS + ")");
