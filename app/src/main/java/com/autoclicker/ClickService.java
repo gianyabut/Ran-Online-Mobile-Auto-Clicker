@@ -248,7 +248,10 @@ public class ClickService extends AccessibilityService {
     // item name - learned from the loot chat, or a typical loot word). Seen: walk to it until the hand
     // shows. None by DROP_DECIDE_MS: nothing dropped, attack at once. Attacking "right away" walked
     // off from drops whose hand hadn't shown yet (the user, 07:34).
-    private static final int DROP_DECIDE_MS = 1500, DROP_MAX_STEPS = 3;
+    // 1.5 s was too soon: drops often land ~5 s after the kill, and 9 of 19 "no drop" calls had
+    // the hand show 2.5-5.6 s later - the character ran to the next monster and back (the user,
+    // 11:09). The ground is read every scan for DROP_READ_MS after a kill.
+    private static final int DROP_DECIDE_MS = 4500, DROP_READ_MS = 5500, DROP_MAX_STEPS = 3;
     private static final float KILL_MAX_HP = 0.6f;
     private static final String KEY_LOOT_NAMES = "farm_loot_names";
     private static final String[] LOOT_WORDS = {"potion", "burr", "box", "scroll", "card", "ore", "stone",
@@ -5443,7 +5446,7 @@ public class ClickService extends AccessibilityService {
                         farmCoordRead(shot);
                     }
                     boolean nearKill = (farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP)   // to see where it dies
-                            || (now < postKillUntil && now - killAt < 2500);                  // and what it drops
+                            || (now < postKillUntil && now - killAt < DROP_READ_MS);                  // and what it drops
                     if (luring || nearKill || now - lastFarmOcrAt >= FARM_OCR_MS - 100) {   // every scan while luring
                         lastFarmOcrAt = now;
                         farmOcr(shot);
