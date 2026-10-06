@@ -2800,8 +2800,7 @@ public class ClickService extends AccessibilityService {
 
     /**
      * ⚓ opens a small menu (the user, 10:50: options instead of cycling through them): 6 / 10 / 15
-     * - with no home, sets home where the character stands with that radius; with a home, changes
-     * just the radius (the current one lit) - and OFF clears the home.
+     * sets home where the character stands with that radius (the current one lit), OFF clears it.
      */
     private void onSetLeash() {
         shake(leashButton);
@@ -2841,18 +2840,13 @@ public class ClickService extends AccessibilityService {
         showChooser(leashButton, choices.toArray(new TextView[0]));
     }
 
+    /** A radius from the ⚓ menu: home is where the character stands now, with that radius. */
     private void pickLeash(int r) {
         if (homeReading) return;
         leashR = r;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LEASH_R, leashR).apply();
-        if (homeMap != null) {
-            // Home set: just the radius, same home.
-            refreshLeashButton();
-            Log.i(TAG, "farmer: leash radius " + leashR + " (button)");
-            android.widget.Toast.makeText(this, "Leash: within " + leashR + " of " + homeMap + "[" + homeX + "," + homeY + "]",
-                    android.widget.Toast.LENGTH_SHORT).show();
-            return;
-        }
+        // Always this spot: keeping the old home and changing only the radius looked like it
+        // saved the wrong coordinates (stood at [124,129], home stayed [129,130], 11:04, the user).
         homeCandMap = null;
         if (posMap != null && SystemClock.uptimeMillis() - posAt < HOME_FRESH_MS) {
             // The farming loop confirmed the position a moment ago: home straight away.
@@ -2964,7 +2958,7 @@ public class ClickService extends AccessibilityService {
             handler.postDelayed(() -> readHomeSpot(tries - 1), 500);
             return;
         }
-        if (posMap != null && SystemClock.uptimeMillis() - posAt < 15_000) {
+        if (posMap != null && SystemClock.uptimeMillis() - posAt < 5000) {
             // The farming loop read the coordinates moments ago: use those.
             setHome(posMap, posX, posY, "button, last reading");
             return;
@@ -3140,8 +3134,8 @@ public class ClickService extends AccessibilityService {
                         int rx = Integer.parseInt(m.group(1)), ry = Integer.parseInt(m.group(2));
                         // Off by a few units ([128,130] and [129,133] for [129,130], 10:57, the user):
                         // the map is still open, so tap again where the readout says the spot is.
-                        if (onMap && (Math.abs(rx - hx) >= 2 || Math.abs(ry - hy) >= 2)
-                                && Math.abs(rx - hx) <= 15 && Math.abs(ry - hy) <= 15) {
+                        float off = (float) Math.hypot(rx - hx, ry - hy);
+                        if (onMap && hx == homeX && hy == homeY && off > leashBackR() && off <= 15) {
                             float cx = tx + (hx - rx) * k, cy = ty - (hy - ry) * k;
                             Log.i(TAG, "farmer: map tap read [" + rx + "," + ry + "], not [" + hx + "," + hy + "] - tapping "
                                     + Math.round(cx) + "," + Math.round(cy) + " instead");
@@ -4922,9 +4916,12 @@ public class ClickService extends AccessibilityService {
     private static final int HOME_MAX_DIST = 150;
     private static final int RETURN_MAX_MS = 90_000, RETURN_COORD_MS = 1500;
 
-    /** Back home when this close: 3, or 2 on the tight 6 leash. */
+    /**
+     * Back home when this close: half the leash (3 / 5 / 7). Near the spot is enough - no need to
+     * stand on it, every second walking is a second not farming (the user, 11:03).
+     */
     private int leashBackR() {
-        return leashR <= 6 ? 2 : 3;
+        return Math.max(2, leashR / 2);
     }
     private boolean returning;
     private int calSign = 1;                                   // probe E/N, or W/S after a blocked try
