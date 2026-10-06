@@ -802,7 +802,7 @@ public class ClickService extends AccessibilityService {
             sellReceiver = new android.content.BroadcastReceiver() {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
-                    if ("com.autoclicker.SELLTRIP".equals(i.getAction())) handler.post(() -> startSellTrip());
+                    if ("com.autoclicker.SELLTRIP".equals(i.getAction())) handler.post(() -> startSellTripFromAdb());
                     else handler.post(() -> sellAll("adb"));
                 }
             };
@@ -3778,12 +3778,42 @@ public class ClickService extends AccessibilityService {
 
     private void startSellTrip() {
         if (!running || !farmer || manual || sellStage != 0 || pkHold || SystemClock.uptimeMillis() < deadUntil) return;
+        returning = false;
+        if (inCampus()) {
+            // On the campus already (the card used by hand): straight to the walk.
+            Log.w(TAG, "sell trip: already in " + lastSeenMap + " - walking to the Sword Section");
+            sellStage = 2;
+            sellStageAt = SystemClock.uptimeMillis();
+            sellWalkTapAt = 0;
+            busyUntil = farmHoldUntil = Math.max(farmHoldUntil, sellStageAt + 5000);
+            handler.post(this::sellTripTick);
+            return;
+        }
         sellStage = 1;
         sellCardTries = 0;
         sellFromMap = posMap != null ? posMap : homeMap;
-        returning = false;
         Log.w(TAG, "sell trip: bag full - Campus Return card (D) to town");
         useSellCard();
+    }
+
+    /** adb: read where we are, start Farmer if it isn't running (fights are held on the campus), go. */
+    private void startSellTripFromAdb() {
+        readPosition((map, x, y) -> {
+            long now = SystemClock.uptimeMillis();
+            if (map != null) {
+                lastSeenMap = map;
+                lastSeenMapAt = now;
+            }
+            if (!running || manual || !farmer) startInMode(false, true, false);
+            if (map != null) {
+                posMap = map;
+                posX = x;
+                posY = y;
+                posAt = now;
+            }
+            busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + 5000);
+            startSellTrip();
+        });
     }
 
     private void useSellCard() {
