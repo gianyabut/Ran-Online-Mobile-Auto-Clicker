@@ -796,6 +796,22 @@ public class ClickService extends AccessibilityService {
     @Override
     protected void onServiceConnected() {
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        if (sellReceiver == null) {
+            // "adb shell am broadcast -a com.autoclicker.SELL" while the NPC's shop is open (testing the
+            // selling step by step with the user). Only senders holding DUMP - adb's shell - get through.
+            sellReceiver = new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(android.content.Context c, Intent i) {
+                    handler.post(() -> sellAll("adb"));
+                }
+            };
+            android.content.IntentFilter f = new android.content.IntentFilter("com.autoclicker.SELL");
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(sellReceiver, f, "android.permission.DUMP", null, android.content.Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(sellReceiver, f, "android.permission.DUMP", null);
+            }
+        }
 
         // Android can disconnect and reconnect this same service without destroying it.
         // Clear everything from the previous connection so bars and rings aren't duplicated.
@@ -3806,6 +3822,254 @@ public class ClickService extends AccessibilityService {
         });
     }
 
+    /*
+     * Selling at the NPC's shop (the user walked it through, 14:51-14:54): the shop's right window
+     * "Equipment's Tool" is the bag, 6 x 4 slots on screen, scrolled a row at a time by its down
+     * arrow. Tap a slot -> a details window (title = name; "Set Type:..." on equipment and rings;
+     * "Shop Trade:Possibility"; buttons ... Sell) -> Sell -> "Do you want sell [name]?" Yes / No.
+     * Stacks (a count in the slot) are never equipment and are skipped without opening.
+     */
+    private static final float BAG_X0 = 1408 / 2560f, BAG_DX = 191 / 2560f, BAG_Y0 = 371 / 1600f, BAG_DY = 203 / 1600f;
+    private static final int BAG_COLS = 6, BAG_ROWS = 4;
+    private static final float BAG_L = 1320 / 2560f, BAG_T = 200 / 1600f, BAG_W = 1180 / 2560f, BAG_H = 970 / 1600f;   // title to gold line
+    private static final float BAG_DOWN_X = 2474 / 2560f, BAG_DOWN_Y = 1050 / 1600f;
+    private static final float INFO_W = 1440 / 2560f, INFO_H = 1420 / 1600f;
+    private static final float INFO_X_X = 1371 / 2560f, INFO_X_Y = 81 / 1600f;
+    private static final float CONFIRM_L = 560 / 2560f, CONFIRM_T = 560 / 1600f, CONFIRM_W = 1420 / 2560f, CONFIRM_H = 460 / 1600f;
+    private static final String[] SELL_TYPES = {"ring", "body", "hand", "foot", "glove", "shoe", "boot", "head", "hat",
+            "helm", "neck", "ear", "belt", "wrist", "arm", "pant", "skirt", "coat", "robe", "suit", "weapon"};
+    private static final String[] NEVER_SELL = {"potion", "ticket", "card", "point", "scroll", "box", "stone", "bread",
+            "food", "pill", "elixir", "costume", "pet"};
+    private static final int SELL_MAX_ROWS = 30;
+    private boolean sellRunning;
+    private int sellSold, sellRowsSeen;
+    private final java.util.ArrayDeque<int[]> sellQueue = new java.util.ArrayDeque<>();
+    private String sellGoldBefore, sellGoldNow, sellBottomSig, sellItemName;
+    private android.content.BroadcastReceiver sellReceiver;
+
+    /** Sells every equipment piece and ring in the bag; the shop window must be open. */
+    private void sellAll(String why) {
+        if (sellRunning) return;
+        sellRunning = true;
+        sellSold = 0;
+        sellRowsSeen = 0;
+        sellQueue.clear();
+        sellGoldBefore = sellGoldNow = null;
+        sellBottomSig = null;
+        Log.i(TAG, "sell: selling equipment and rings (" + why + ")");
+        sellScanPage(true);
+    }
+
+    private void sellDone(String how) {
+        if (!sellRunning) return;
+        sellRunning = false;
+        Log.i(TAG, "sell: done (" + how + ") - " + sellSold + " sold, gold " + sellGoldBefore + " -> " + sellGoldNow);
+        Telegram.send(this, "💰 Ran Online: sold " + sellSold + " item(s) at the NPC (" + how + "). Gold "
+                + sellGoldBefore + " -> " + sellGoldNow + ".");
+    }
+
+    /** Reads the bag on screen: queues the slots worth opening (all rows, or just the new bottom one). */
+    private void sellScanPage(boolean allRows) {
+        if (!sellRunning) return;
+        captureRegionForOcr(BAG_L, BAG_T, BAG_W, BAG_H, crop -> {
+            if (crop == null) {
+                sellDone("no screenshot of the bag");
+                return;
+            }
+            int ox = Math.round(screenW * BAG_L), oy = Math.round(screenH * BAG_T);
+            String sig = bagSig(crop, ox, oy);
+            boolean[][] filled = new boolean[BAG_ROWS][BAG_COLS];
+            for (int r = 0; r < BAG_ROWS; r++) for (int c = 0; c < BAG_COLS; c++) filled[r][c] = bagSlotFilled(crop, ox, oy, r, c);
+            Ocr.read(crop, (lines, words) -> {
+                if (!sellRunning) return;
+                boolean[][] stack = new boolean[BAG_ROWS][BAG_COLS];
+                boolean shopOpen = false;
+                for (MathQuestion.Line l : lines) {
+                    if (l.text.toLowerCase(java.util.Locale.ROOT).contains("equipment")) shopOpen = true;
+                    String t = l.text.trim();
+                    float cx = l.box.exactCenterX() + ox, cy = l.box.exactCenterY() + oy;
+                    if (t.matches("[\\d,]{5,}")) {                   // the gold line under the grid
+                        if (sellGoldBefore == null) sellGoldBefore = t;
+                        sellGoldNow = t;
+                        continue;
+                    }
+                    if (!t.matches("\\d{1,4}")) continue;
+                    int c = Math.round((cx - screenW * BAG_X0) / (screenW * BAG_DX));
+                    int r = Math.round((cy - screenH * BAG_Y0) / (screenH * BAG_DY) - 0.3f);   // counts sit low in the slot
+                    if (r >= 0 && r < BAG_ROWS && c >= 0 && c < BAG_COLS) stack[r][c] = true;
+                }
+                if (!shopOpen) {
+                    sellDone("the shop isn't open");
+                    return;
+                }
+                for (int r = allRows ? 0 : BAG_ROWS - 1; r < BAG_ROWS; r++) {
+                    for (int c = 0; c < BAG_COLS; c++) if (filled[r][c] && !stack[r][c]) sellQueue.add(new int[]{r, c});
+                }
+                sellRowsSeen += allRows ? BAG_ROWS : 1;
+                sellBottomSig = sig;
+                Log.i(TAG, "sell: " + sellQueue.size() + " slot(s) to check on this " + (allRows ? "page" : "row"));
+                sellNext();
+            }, true);
+        });
+    }
+
+    private void sellNext() {
+        if (!sellRunning) return;
+        int[] slot = sellQueue.poll();
+        if (slot == null) {
+            sellScroll();
+            return;
+        }
+        float x = screenW * (BAG_X0 + slot[1] * BAG_DX), y = screenH * (BAG_Y0 + slot[0] * BAG_DY);
+        tapAt(x, y, "bag slot " + slot[0] + "," + slot[1]);
+        handler.postDelayed(this::sellReadInfo, 900);
+    }
+
+    /** The item's details window: sell it (equipment/ring the shop takes) or close it. */
+    private void sellReadInfo() {
+        if (!sellRunning) return;
+        captureRegionForOcr(0f, 0f, INFO_W, INFO_H, crop -> {
+            if (crop == null) {
+                handler.postDelayed(this::sellNext, 300);
+                return;
+            }
+            Ocr.read(crop, (lines, words) -> {
+                if (!sellRunning) return;
+                String name = null, type = null;
+                boolean shop = false;
+                Rect sell = null, close = null;
+                int nameTop = Integer.MAX_VALUE;
+                for (MathQuestion.Line l : lines) {
+                    String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+                    if (l.box.bottom < screenH * 0.12f && l.box.left > screenW * 0.05f && k.length() >= 4 && l.box.top < nameTop) {
+                        nameTop = l.box.top;
+                        name = l.text.trim();                    // the title
+                    }
+                    if (k.contains("type") && l.text.contains(":") && type == null) type = k.substring(k.indexOf("type") + 4);
+                    if (k.contains("shoptrade") && k.contains("possib")) shop = true;
+                    if (k.equals("sell")) sell = new Rect(l.box);
+                    if (k.equals("x") && l.box.top < screenH * 0.1f) close = new Rect(l.box);
+                }
+                String nk = name == null ? "" : name.toLowerCase(java.util.Locale.ROOT);
+                boolean equipment = type != null && java.util.Arrays.stream(SELL_TYPES).anyMatch(type::contains);
+                boolean keep = java.util.Arrays.stream(NEVER_SELL).anyMatch(nk::contains);
+                if (name == null && sell == null) {
+                    Log.i(TAG, "sell: no details window, next slot");
+                    handler.postDelayed(this::sellNext, 300);
+                    return;
+                }
+                if (equipment && shop && !keep && sell != null) {
+                    sellItemName = name;
+                    Log.i(TAG, "sell: \"" + name + "\" (type " + type + ") - selling");
+                    tapAt(sell.exactCenterX(), sell.exactCenterY(), "sell");
+                    handler.postDelayed(this::sellConfirm, 800);
+                    return;
+                }
+                Log.i(TAG, "sell: keeping \"" + name + "\" (type " + type + (shop ? "" : ", shop won't take it")
+                        + (keep ? ", keep-list" : "") + ")");
+                float cx = close != null ? close.exactCenterX() : screenW * INFO_X_X;
+                float cy = close != null ? close.exactCenterY() : screenH * INFO_X_Y;
+                tapAt(cx, cy, "close details");
+                handler.postDelayed(this::sellNext, 600);
+            }, true);
+        });
+    }
+
+    /** "Do you want sell [name]?" -> Yes, when it names the item we meant to sell. */
+    private void sellConfirm() {
+        if (!sellRunning) return;
+        captureRegionForOcr(CONFIRM_L, CONFIRM_T, CONFIRM_W, CONFIRM_H, crop -> {
+            if (crop == null) {
+                sellDone("no screenshot of the confirm box");
+                return;
+            }
+            int ox = Math.round(screenW * CONFIRM_L), oy = Math.round(screenH * CONFIRM_T);
+            Ocr.read(crop, (lines, words) -> {
+                if (!sellRunning) return;
+                boolean asked = false, same = false;
+                Rect yes = null, no = null;
+                String want = sellItemName == null ? "" : sellItemName.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+                for (MathQuestion.Line l : lines) {
+                    String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+                    if (k.contains("wantsell") || k.contains("doyouwant")) {
+                        asked = true;
+                        if (!want.isEmpty() && (k.contains(want) || want.length() > 8 && k.contains(want.substring(0, 8)))) same = true;
+                    }
+                    if (k.equals("yes")) yes = new Rect(l.box);
+                    if (k.equals("no")) no = new Rect(l.box);
+                }
+                if (asked && same && yes != null) {
+                    sellSold++;
+                    Log.i(TAG, "sell: sold \"" + sellItemName + "\" (" + sellSold + ")");
+                    tapAt(yes.exactCenterX() + ox, yes.exactCenterY() + oy, "sell yes");
+                    handler.postDelayed(this::sellNext, 900);
+                    return;
+                }
+                Log.w(TAG, "sell: the confirm box isn't asking about \"" + sellItemName + "\" (asked " + asked + ", same "
+                        + same + ") - No");
+                if (no != null) tapAt(no.exactCenterX() + ox, no.exactCenterY() + oy, "sell no");
+                handler.postDelayed(this::sellNext, 700);
+            }, true);
+        });
+    }
+
+    /** A row down; the end of the bag is when the bottom row looks the same after scrolling. */
+    private void sellScroll() {
+        if (!sellRunning) return;
+        if (sellRowsSeen >= SELL_MAX_ROWS) {
+            sellDone("row limit");
+            return;
+        }
+        tapAt(screenW * BAG_DOWN_X, screenH * BAG_DOWN_Y, "bag down");
+        handler.postDelayed(() -> captureRegionForOcr(BAG_L, BAG_T, BAG_W, BAG_H, crop -> {
+            if (!sellRunning) return;
+            if (crop == null) {
+                sellDone("no screenshot after scrolling");
+                return;
+            }
+            String sig = bagSig(crop, Math.round(screenW * BAG_L), Math.round(screenH * BAG_T));
+            crop.recycle();
+            if (sig.equals(sellBottomSig)) {
+                sellDone("end of the bag");
+                return;
+            }
+            sellScanPage(false);
+        }), 700);
+    }
+
+    /** Is there anything in slot (r, c)? Empty slots are flat dark grey. */
+    private boolean bagSlotFilled(Bitmap crop, int ox, int oy, int r, int c) {
+        int cx = Math.round(screenW * (BAG_X0 + c * BAG_DX)) - ox, cy = Math.round(screenH * (BAG_Y0 + r * BAG_DY)) - oy;
+        int half = Math.round(screenW * 50 / 2560f), n = 0;
+        long sum = 0, sum2 = 0;
+        for (int y = cy - half; y <= cy + half; y += 4) {
+            for (int x = cx - half; x <= cx + half; x += 4) {
+                if (x < 0 || y < 0 || x >= crop.getWidth() || y >= crop.getHeight()) continue;
+                int p = crop.getPixel(x, y);
+                int v = (Color.red(p) + Color.green(p) + Color.blue(p)) / 3;
+                sum += v;
+                sum2 += (long) v * v;
+                n++;
+            }
+        }
+        if (n == 0) return false;
+        double mean = sum / (double) n, var = sum2 / (double) n - mean * mean;
+        return var > 150;                                       // an icon has texture; an empty slot doesn't
+    }
+
+    /** Rough colours of the slots on screen, to tell whether a scroll moved anything. */
+    private String bagSig(Bitmap crop, int ox, int oy) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < BAG_ROWS * BAG_COLS; i++) {
+            int r = i / BAG_COLS, c = i % BAG_COLS;
+            int cx = Math.round(screenW * (BAG_X0 + c * BAG_DX)) - ox, cy = Math.round(screenH * (BAG_Y0 + r * BAG_DY)) - oy;
+            if (cx < 0 || cy < 0 || cx >= crop.getWidth() || cy >= crop.getHeight()) continue;
+            int p = crop.getPixel(cx, cy);
+            sb.append(Color.red(p) / 24).append('.').append(Color.green(p) / 24).append('.').append(Color.blue(p) / 24).append(';');
+        }
+        return sb.toString();
+    }
+
     /** Reads the chat box for pickups and gold; each line counted once as the chat scrolls. */
     private void farmChatRead(Bitmap shot) {
         openChatIfHidden(shot, 0, 0);
@@ -6656,6 +6920,13 @@ public class ClickService extends AccessibilityService {
         if (instance == this) instance = null;
         watchHandler.removeCallbacksAndMessages(null);
         if (wm != null) removeOverlays("destroy");
+        if (sellReceiver != null) {
+            try {
+                unregisterReceiver(sellReceiver);
+            } catch (IllegalArgumentException ignored) {
+            }
+            sellReceiver = null;
+        }
         super.onDestroy();
     }
 }
