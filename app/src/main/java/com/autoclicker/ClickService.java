@@ -733,6 +733,10 @@ public class ClickService extends AccessibilityService {
                     saveTargets();
                     return;
                 }
+                // Only a new label width (or showing again after hidden) moves the window. Layout runs
+                // on every window update too - mid-drag that snapped the circle back to its old spot,
+                // so circles were hard to place (the user, 21:53, phone).
+                if (draggingWindow == root || width == oldR - oldL) return;
                 int want = centerX - width / 2;
                 if (params.x != want) {
                     params.x = want;
@@ -7091,6 +7095,8 @@ public class ClickService extends AccessibilityService {
     }
 
     /** Drag the handle to move the window; a touch that barely moves counts as a click. */
+    private View draggingWindow;                                // the overlay being dragged right now
+
     private void makeDraggable(View handle, View window, WindowManager.LayoutParams params,
                                Runnable onClick, Runnable onMoved) {
         int slop = dp(8);
@@ -7114,12 +7120,17 @@ public class ClickService extends AccessibilityService {
                         float dy = e.getRawY() - downY;
                         if (Math.abs(dx) > slop || Math.abs(dy) > slop) dragging = true;
                         if (dragging) {
+                            draggingWindow = window;
                             params.x = startX + (int) dx;
                             params.y = startY + (int) dy;
                             safeUpdate(window, params);
                         }
                         return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        if (draggingWindow == window) draggingWindow = null;
+                        return true;
                     case MotionEvent.ACTION_UP:
+                        if (draggingWindow == window) draggingWindow = null;
                         if (dragging) {
                             if (onMoved != null) onMoved.run();
                             saveTargets();
