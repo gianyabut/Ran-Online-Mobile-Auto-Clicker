@@ -3009,10 +3009,15 @@ public class ClickService extends AccessibilityService {
     }
 
     private void mapWalkHome(long now) {
+        mapWalkTo(now, homeX, homeY);
+    }
+
+    /** Opens the big map and taps the spot [hx,hy] on it, so the game walks the character there. */
+    private void mapWalkTo(long now, int hx, int hy) {
         lastMapHomeAt = now;
         leashWalkEnd = now + 3000;                                  // next step after a fresh position
         busyUntil = farmHoldUntil = Math.max(busyUntil, now + MAP_OPEN_MS + 1500);
-        final int hx = homeX, hy = homeY, px0 = posX, py0 = posY;
+        final int px0 = posX, py0 = posY;
         final String map = posMap;
         tapAt(screenW * MINIMAP_X, screenH * MINIMAP_Y, "open map");
         handler.postDelayed(() -> captureHalfScreen(shot -> {
@@ -3042,7 +3047,8 @@ public class ClickService extends AccessibilityService {
             if (dy < 0 && a[1] + dy < minY) f = Math.min(f, (minY - a[1]) / dy);
             f = Math.max(0f, f);
             float tx = a[0] + dx * f, ty = a[1] + dy * f;
-            Log.i(TAG, "farmer: walking home by the map: [" + px0 + "," + py0 + "] -> [" + hx + "," + hy + "], tapping "
+            Log.i(TAG, "farmer: walking " + (hx == homeX && hy == homeY ? "home" : "round") + " by the map: ["
+                    + px0 + "," + py0 + "] -> [" + hx + "," + hy + "], tapping "
                     + Math.round(tx) + "," + Math.round(ty) + (f < 1f ? " (map edge)" : ""));
             tapAt(tx, ty, "map home");
             busyUntil = farmHoldUntil = Math.max(busyUntil, SystemClock.uptimeMillis() + 1500);
@@ -3149,6 +3155,8 @@ public class ClickService extends AccessibilityService {
             returnStartedAt = now;
             leashMisses = 0;
             leashLastDist = 0;
+            mapHomeLastDist = 0;
+            mapHomeStuck = 0;
             leashWalkEnd = 0;
             calStage = 0;
             Log.i(TAG, "farmer: " + Math.round(dist) + " from home " + homeMap + "[" + homeX + "," + homeY + "] at ["
@@ -3163,9 +3171,33 @@ public class ClickService extends AccessibilityService {
             schedulePump(0);
             return false;
         }
-        if (canFarmMove(now) && posAt > leashWalkEnd && now - lastMapHomeAt > MAP_HOME_GAP_MS) mapWalkHome(now);
+        if (canFarmMove(now) && posAt > leashWalkEnd && now - lastMapHomeAt > MAP_HOME_GAP_MS) {
+            if (mapHomeLastDist > 0 && dist > mapHomeLastDist - 1) mapHomeStuck++;
+            else mapHomeStuck = 0;
+            mapHomeLastDist = dist;
+            if (mapHomeStuck >= 2) {
+                // No closer after two map walks: something's in the way (stood at [119,119] for 75 s
+                // with the bus between it and home, 10:34). Go round: a spot off to one side first,
+                // the other side next time.
+                mapHomeStuck = 0;
+                mapHomeLastDist = 0;
+                float gx = homeX - posX, gy = homeY - posY;
+                int side = detourSide;
+                detourSide = -detourSide;
+                int wx = Math.round(posX + gx / dist * 3 - gy / dist * DETOUR_UNITS * side);
+                int wy = Math.round(posY + gy / dist * 3 + gx / dist * DETOUR_UNITS * side);
+                Log.i(TAG, "farmer: no closer to home after two map walks, going round via [" + wx + "," + wy + "]");
+                mapWalkTo(now, wx, wy);
+            } else {
+                mapWalkHome(now);
+            }
+        }
         return true;
     }
+
+    private static final int DETOUR_UNITS = 6;
+    private float mapHomeLastDist;
+    private int mapHomeStuck, detourSide = 1;
 
     private boolean leashStep(long now, boolean searching) {
         if (homeMap == null || posMap == null || !sameMap(posMap, homeMap) || now - posAt > 6000) return false;
