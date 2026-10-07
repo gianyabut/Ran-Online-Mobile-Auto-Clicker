@@ -3954,6 +3954,9 @@ public class ClickService extends AccessibilityService {
             java.util.regex.Pattern.compile("ended|isover|hasover|finished|closed|hasend");
     private long pkAlertAt, pkEndAlertAt, pkSince;
     private boolean pkHold;
+    private static final long PK_DEATH_WINDOW_MS = 2 * 60_000L, PK_REST_MS = 5 * 60_000L;
+    private final java.util.ArrayDeque<Long> pkDeathTimes = new java.util.ArrayDeque<>();
+    private long pkRestUntil;
 
     private boolean pkNow() {
         return pkSince != 0 && SystemClock.uptimeMillis() - pkSince < PK_MAX_MS;
@@ -4022,7 +4025,7 @@ public class ClickService extends AccessibilityService {
     private long lastSeenMapAt;
 
     private boolean inCampus() {
-        return lastSeenMap != null && SystemClock.uptimeMillis() - lastSeenMapAt < 20_000 && isTownCampus(lastSeenMap);
+        return lastSeenMap != null && SystemClock.uptimeMillis() - lastSeenMapAt < 20_000 && isTown(lastSeenMap);
     }
 
     // The schools' town campus (SG_Campus1F, read "SG_Campus", "SG_Campús1F"), not a hunting map that
@@ -4030,6 +4033,14 @@ public class ClickService extends AccessibilityService {
     // (2026-10-07 02:50).
     private static final java.util.regex.Pattern TOWN_CAMPUS =
             java.util.regex.Pattern.compile("^(sg|mp|phx?)[\\W_]*camp\\S?s");
+
+    /**
+     * A town: the campus, or MarketPlace - where a death respawns now, and no pets are allowed there
+     * either (the user, 2026-10-08 00:15). No fighting, no pet summons; not "back" after a death.
+     */
+    private static boolean isTown(String map) {
+        return isTownCampus(map) || (map != null && map.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "").startsWith("marketpl"));
+    }
 
     private static boolean isTownCampus(String map) {
         return map != null && TOWN_CAMPUS.matcher(map.toLowerCase(java.util.Locale.ROOT).trim()).find();
@@ -7060,13 +7071,25 @@ public class ClickService extends AccessibilityService {
         handler.removeCallbacks(useBackPoint);
         handler.removeCallbacks(backAtSpot);
         if (pkNow()) {
-            // PK: wait it out in town (useBackPoint holds until it's over); not a 3-deaths death.
-            deadUntil = now + PK_HOLD_CHECK_MS + BACK_POINT_LOAD_MS;
+            // PK (the user, 2026-10-08 00:15): don't wait for it to end - back at once, unless it's the
+            // second PK death within PK_DEATH_WINDOW_MS: then PK_REST_MS in town (pet away), then back.
+            // Not a 3-deaths death.
+            pkDeathTimes.addLast(now);
+            while (!pkDeathTimes.isEmpty() && now - pkDeathTimes.peekFirst() > PK_DEATH_WINDOW_MS) pkDeathTimes.removeFirst();
+            boolean pkRest = pkDeathTimes.size() >= 2;
+            if (pkRest) {
+                pkDeathTimes.clear();
+                pkRestUntil = now + PK_REST_MS;
+            }
+            long backIn = pkRest ? PK_REST_MS : BACK_POINT_AFTER_MS;
+            deadUntil = now + backIn + BACK_POINT_LOAD_MS + 5000;
             busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
-            if (backPointMode()) handler.postDelayed(useBackPoint, BACK_POINT_AFTER_MS);
-            Log.w(TAG, "died during the PK period - staying in town until it's over");
-            Telegram.send(this, "💀 Ran Online: killed during PK time - tapped Revive"
-                    + (backPointMode() ? ", staying in town until PK is over, then the Back Point." : "."));
+            if (backPointMode()) handler.postDelayed(useBackPoint, pkRest ? BACK_POINT_AFTER_MS : BACK_POINT_AFTER_MS);
+            Log.w(TAG, pkRest ? "died twice in " + PK_DEATH_WINDOW_MS / 60_000 + " min during PK - " + PK_REST_MS / 60_000
+                    + " min in town, then the Back Point" : "died during the PK period - the Back Point right away");
+            Telegram.send(this, "💀 Ran Online: killed during PK time - tapped Revive" + (!backPointMode() ? "."
+                    : pkRest ? ", killed twice in " + PK_DEATH_WINDOW_MS / 60_000 + " min: staying in town " + PK_REST_MS / 60_000
+                    + " min, then the Back Point." : ", using the Back Point right away."));
             return;
         }
         deathTimes.addLast(now);
@@ -7122,23 +7145,50 @@ public class ClickService extends AccessibilityService {
         return farmer || booster;
     }
 
+    // Farming in a town with nothing under way (restarted mid death flow - it forgets it died - or a
+    // death it missed): the farm spot is elsewhere, so the Back Point after TOWN_STUCK_MS. Restarted
+    // in MarketPlace, it would only have stood there (2026-10-08 00:15).
+    private static final int TOWN_STUCK_MS = 20_000, TOWN_BACK_GAP_MS = 60_000;
+    private long townSince, lastTownBackAt;
+
+    private void townCheck(long now) {
+        if (manual || homeMap == null || isTown(homeMap) || now < deadUntil || pkHold || now < pkRestUntil
+                || sellStage != 0 || sellRunning) {
+            townSince = 0;
+            return;
+        }
+        if (townSince == 0) townSince = now;
+        if (now - townSince < TOWN_STUCK_MS || now - lastTownBackAt < TOWN_BACK_GAP_MS) return;
+        townSince = 0;
+        lastTownBackAt = now;
+        deathMap = homeMap;
+        revivedAt = now;
+        backPointTries = 0;
+        Log.w(TAG, "farmer: in town (" + lastSeenMap + ") with nothing under way - the Back Point to " + homeMap);
+        Telegram.send(this, "\u2694 Ran Online: Farmer was standing in town (" + lastSeenMap + ") - using the Back Point to "
+                + homeMap + ".");
+        handler.removeCallbacks(useBackPoint);
+        handler.post(useBackPoint);
+    }
+
     private void useBackPoint() {
         if (!running || !backPointMode() || manual) return;
         long now = SystemClock.uptimeMillis();
-        if (pkNow()) {
-            // PK time (a PK death, or a 3-deaths rest ending in it): stay in town till it's over.
+        if (now < pkRestUntil) {
+            // Two PK deaths in a row: PK_REST_MS in town before going back.
             if (!pkHold) {
-                Log.w(TAG, "died: PK time - holding the Back Point until it's over");
-                // Away while we wait in town; arrivedAtSpot summons it again (the user, 2026-10-07).
-                handler.postDelayed(this::recallPet, 3000);
+                Log.w(TAG, "died: resting in town until " + (pkRestUntil - now) / 1000 + " s from now (PK)");
+                // The pet is gone after a death and towns allow none: no paw here (its "Summon your
+                // pet?" stayed up, tablet 00:10); arrivedAtSpot summons it again.
             }
             pkHold = true;
-            deadUntil = Math.max(deadUntil, now + PK_HOLD_CHECK_MS + BACK_POINT_LOAD_MS);
+            long wait = Math.min(PK_HOLD_CHECK_MS, pkRestUntil - now + 500);
+            deadUntil = Math.max(deadUntil, now + wait + BACK_POINT_LOAD_MS);
             busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
-            handler.postDelayed(useBackPoint, PK_HOLD_CHECK_MS);
+            handler.postDelayed(useBackPoint, wait);
             return;
         }
-        if (pkHold) Log.i(TAG, "died: PK time over - using the Back Point");
+        if (pkHold) Log.i(TAG, "died: the rest in town is over - using the Back Point");
         pkHold = false;
         deadUntil = Math.max(deadUntil, now + BACK_POINT_LOAD_MS);
         busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
@@ -7168,7 +7218,7 @@ public class ClickService extends AccessibilityService {
         readMapName(map -> {
             // Boost doesn't read positions, so no death map: off the campus is back ("back from the
             // Back Point" was said in SG_Campus, phone 20:18).
-            boolean back = deathMap == null ? map != null && !isTownCampus(map) : map != null && sameMap(map, deathMap);
+            boolean back = deathMap == null ? map != null && !isTown(map) : map != null && sameMap(map, deathMap);
             if (back || (map == null && deathMap != null)) {
                 arrivedAtSpot();
                 return;
@@ -7258,6 +7308,12 @@ public class ClickService extends AccessibilityService {
                     if (k.equals("no")) no = l.box;
                 }
                 if (petWantAway) {
+                    if (!recall && !asked && attempt < 3) {
+                        // Not up yet (right after a death the town is still loading): it came up
+                        // after the one read and stayed there (tablet 00:10:59, "stuck at summon your pet").
+                        handler.postDelayed(() -> petDialogRead(attempt + 1), 1500);
+                        return;
+                    }
                     petWantAway = false;
                     Rect pick = recall ? yes : no;
                     float x = pick != null ? pick.exactCenterX() : screenW * (recall ? PET_YES_X : PET_NO_X);
@@ -7306,14 +7362,16 @@ public class ClickService extends AccessibilityService {
         long now = SystemClock.uptimeMillis();
         if (!running || manual || userTouchAt > now - 10_000) return;      // you tapped the paw yourself
         if (now < petDialogOursUntil || petWantAway || now - strayRecallAt < 4000) return;
-        boolean recall = false;
+        boolean recall = false, summonAway = false;
         Rect no = null;
         for (MathQuestion.Line l : lines) {
             String t = l.text.toLowerCase(java.util.Locale.ROOT);
             if (t.contains("recall") && t.contains("pet")) recall = true;
+            // Resting in town after PK deaths, the pet stays away: a "Summon your pet?" gets No too.
+            if (pkHold && t.contains("summon") && t.contains("pet")) summonAway = true;
             if (t.replaceAll("[^a-z]", "").equals("no")) no = l.box;
         }
-        if (!recall) return;
+        if (!recall && !summonAway) return;
         strayRecallAt = now;
         float x = no != null ? no.exactCenterX() : screenW * PET_NO_X, y = no != null ? no.exactCenterY() : screenH * PET_NO_Y;
         Log.w(TAG, "pet: a \"Recall your pet?\" nobody asked for - No at " + Math.round(x) + "," + Math.round(y));
@@ -7648,7 +7706,9 @@ public class ClickService extends AccessibilityService {
                     if (sellTrip || inCampus()) {
                         // Town: no skills, no walking, no looting - just keep reading.
                         busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + 3000);
+                        if (!sellTrip) townCheck(now);
                     } else {
+                        townSince = 0;
                         farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH) && lootHandPicture(shot), now);
                         farmCheck(MobCounter.count(shot, screenW, screenH),
                                 MobCounter.targetHp(shot, screenW, screenH), now);
