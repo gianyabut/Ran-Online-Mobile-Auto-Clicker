@@ -6339,13 +6339,16 @@ public class ClickService extends AccessibilityService {
     private static float BAG_ICON_X = 2058 / 2560f, BAG_ICON_Y = 56 / 1600f;
     private static float INV_L = 1240 / 2560f, INV_T = 300 / 1600f, INV_R = 2470 / 2560f, INV_B = 1120 / 1600f;
     private static float INV_CLOSE_X = 2513 / 2560f, INV_CLOSE_Y = 230 / 1600f;
+    // The bag's first row (column 1 is the pet card) and an item window's X (measured 01:45).
+    private static float INV_SLOT1_X = 1342 / 2560f, INV_SLOT1_Y = 404 / 1600f, INV_SLOT_DX = 202 / 2560f;
+    private static float ITEM_CLOSE_X = 1460 / 2560f, ITEM_CLOSE_Y = 80 / 1600f;
     private boolean feedRunning;
     private long feedAt, feedBackoffUntil;
 
     private void feedPet(float level) {
         long now = SystemClock.uptimeMillis();
         if (feedRunning || !running || manual || sellStage != 0 || sellRunning || now < deadUntil || inCampus()
-                || lootStartedAt > 0) return;
+                || lootStartedAt > 0 || returning || now < farmHoldUntil) return;   // not mid walk-home (stuck, 2026-10-07)
         feedRunning = true;
         feedAt = now;
         feedHold();
@@ -6413,6 +6416,13 @@ public class ClickService extends AccessibilityService {
                     return;
                 }
                 if (can == null || can[0] < FEED_MIN) {
+                    // Other feeds look different: try the first row's columns 2-4 by the item's name
+                    // (the user, 2026-10-07: food there too). One can per feeding all the same.
+                    Log.i(TAG, "pet: no Advanced Feed by its picture - trying row 1, columns 2-4");
+                    feedTrySlot(2);
+                    return;
+                }
+                if (false) {
                     feedBackoffUntil = SystemClock.uptimeMillis() + FEED_NO_FOOD_BACKOFF_MS;
                     Log.w(TAG, "pet: no Advanced Feed in the bag (best " + (can == null ? "-" : String.format(java.util.Locale.ROOT, "%.2f", can[0])) + ")");
                     Telegram.send(this, "🐾 Ran Online: your pet is hungry but there's no Advanced Feed in the bag. Please add some - I'll look again in 30 min.");
@@ -6425,6 +6435,47 @@ public class ClickService extends AccessibilityService {
                 handler.postDelayed(() -> feedUseOn(0), FEED_STEP_MS);
             }, true);
         });
+    }
+
+    /** Taps row 1, column col of the bag; a "Feed" in the item window's name -> Use on..., else the next. */
+    private void feedTrySlot(int col) {
+        if (!feedRunning) return;
+        if (col > 4) {
+            feedBackoffUntil = SystemClock.uptimeMillis() + FEED_NO_FOOD_BACKOFF_MS;
+            Log.w(TAG, "pet: no pet food in row 1, columns 2-4");
+            Telegram.send(this, "\uD83D\uDC3E Ran Online: your pet is hungry but there's no pet food in the bag (row 1, columns 2-4). Please add some - I'll look again in 30 min.");
+            feedEnd("no food", true);
+            return;
+        }
+        feedHold();
+        float x = screenW * (INV_SLOT1_X + (col - 1) * INV_SLOT_DX), y = screenH * INV_SLOT1_Y;
+        tapAt(x, y, "bag slot " + col);
+        handler.postDelayed(() -> captureForOcr(shot -> {
+            if (!feedRunning) {
+                if (shot != null) shot.recycle();
+                return;
+            }
+            if (shot == null) {
+                feedTrySlot(col + 1);
+                return;
+            }
+            Ocr.read(shot, (lines, words) -> {
+                if (!feedRunning) return;
+                boolean feed = false;
+                for (MathQuestion.Line l : lines) {
+                    if (l.box.centerY() > screenH * 0.12f) continue;           // the item window's title row
+                    if (l.text.toLowerCase(java.util.Locale.ROOT).contains("feed")) feed = true;
+                }
+                if (feed) {
+                    Log.i(TAG, "pet: pet food in column " + col);
+                    feedUseOn(0);
+                    return;
+                }
+                // Not food (or an empty slot): close its window if one came up, then the next column.
+                tapAt(screenW * ITEM_CLOSE_X, screenH * ITEM_CLOSE_Y, "item window X");
+                handler.postDelayed(() -> feedTrySlot(col + 1), 900);
+            }, true);
+        }), FEED_STEP_MS);
     }
 
     private void feedUseOn(int attempt) {
@@ -6917,6 +6968,7 @@ public class ClickService extends AccessibilityService {
 
     /** Reads the pet dialog the paw brought up; an empty screenshot is tried again (00:59: it never answered). */
     private void petDialogRead(int attempt) {
+        petDialogOursUntil = SystemClock.uptimeMillis() + 3000;
         captureRegionForOcr(0f, 0f, 1f, 0.75f, shot -> {
             if (shot == null) {
                 if (attempt < 3) handler.postDelayed(() -> petDialogRead(attempt + 1), 1000);
@@ -6973,8 +7025,33 @@ public class ClickService extends AccessibilityService {
         });
     }
 
+    private long petDialogOursUntil, strayRecallAt;
+
+    /**
+     * "Recall your pet?" that the bot didn't ask for (a stray tap on the paw while feeding / walking
+     * home): answer No, or it stays up and everything waits behind it (the user, 2026-10-07).
+     */
+    private void checkStrayPetDialog(List<MathQuestion.Line> lines) {
+        long now = SystemClock.uptimeMillis();
+        if (!running || manual || userTouchAt > now - 10_000) return;      // you tapped the paw yourself
+        if (now < petDialogOursUntil || petWantAway || now - strayRecallAt < 4000) return;
+        boolean recall = false;
+        Rect no = null;
+        for (MathQuestion.Line l : lines) {
+            String t = l.text.toLowerCase(java.util.Locale.ROOT);
+            if (t.contains("recall") && t.contains("pet")) recall = true;
+            if (t.replaceAll("[^a-z]", "").equals("no")) no = l.box;
+        }
+        if (!recall) return;
+        strayRecallAt = now;
+        float x = no != null ? no.exactCenterX() : screenW * PET_NO_X, y = no != null ? no.exactCenterY() : screenH * PET_NO_Y;
+        Log.w(TAG, "pet: a \"Recall your pet?\" nobody asked for - No at " + Math.round(x) + "," + Math.round(y));
+        tapAt(x, y, "pet no (stray)");
+    }
+
     private void checkForQuestion(String game, List<MathQuestion.Line> lines) {
         checkRevive(lines);
+        checkStrayPetDialog(lines);
         noteExp(lines);
         List<MathQuestion.Line> hits = new ArrayList<>();
         for (MathQuestion.Line line : lines) {
@@ -8121,6 +8198,11 @@ public class ClickService extends AccessibilityService {
         INV_R = Layout.fx("center", 2470, 1120);
         INV_B = Layout.fy("center", 2470, 1120);
         INV_CLOSE_X = Layout.fx("center", 2513, 230);
+        INV_SLOT1_X = Layout.fx("center", 1342, 404);
+        INV_SLOT1_Y = Layout.fy("center", 1342, 404);
+        INV_SLOT_DX = Layout.fx("center", 1544, 404) - INV_SLOT1_X;
+        ITEM_CLOSE_X = Layout.fx("center", 1460, 80);
+        ITEM_CLOSE_Y = Layout.fy("center", 1460, 80);
         INV_CLOSE_Y = Layout.fy("center", 2513, 230);
         SELL_MAP_Y = Layout.fy("center", 1089, 1027);
         MAP_RO_L = Layout.fx("center", 2201.6f, 1256);
