@@ -147,7 +147,7 @@ public class ClickService extends AccessibilityService {
     private static final float FOLLOW_READ_H = 0.74f;          // the Team list reads well at this size
     private static final float FOLLOW_NEAR_W = 0.08f;          // "close": ~2-3 character widths (0.12 trailed behind, 10:20)
     private static final float FOLLOW_FAR_X = 1.5f;           // "far": 1.5x the close distance
-    private static final float FOLLOW_MAP_FAR = 0.22f;        // farther than this on screen: walk by the map
+    private static final float FOLLOW_MAP_FAR = 0.30f;        // near the screen's edge: walk by the map (closer, the M hides under our arrow)
     private static final float FOLLOW_MAP_NEAR = 0.012f;      // M this close to our arrow on the map = together          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
     private String leaderKey, leaderShown;
@@ -5741,7 +5741,7 @@ public class ClickService extends AccessibilityService {
             if (tagDist <= screenW * FOLLOW_NEAR_W) return;            // close enough (or it's us)
             // Far: the map's tap walks the whole way around walls; the joystick is for near (the
             // user, 10:27: "if it is near use the simple nav, if not use the mini map").
-            if (tagDist > screenW * FOLLOW_MAP_FAR && now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
+            if (tagDist > screenW * FOLLOW_MAP_FAR && now - lastMapOpenAt >= MAP_FOLLOW_GAP_MS) {
                 if (followMayMove(now)) {
                     Log.i(TAG, "follow: " + leaderShown + " is " + Math.round(tagDist) + " px away - by the map");
                     mapFollow(now);
@@ -5815,8 +5815,11 @@ public class ClickService extends AccessibilityService {
     private long lastMapMAt;
     private int portalPushes;
 
+    private long lastMapOpenAt;
+
     private void mapFollow(long now) {
         lastMapFollowAt = now;
+        lastMapOpenAt = now;
         followHoldUntil = now + MAP_OPEN_MS + 3500;             // room for a refused screenshot's retry
         followMapUntil = followHoldUntil;                       // FS+follow: skills wait off the map
         openMapTap();
