@@ -150,6 +150,7 @@ public class ClickService extends AccessibilityService {
     private static final float FOLLOW_MAP_FAR = 0.30f;        // near the screen's edge: walk by the map (closer, the M hides under our arrow)
     private static final float FOLLOW_MAP_NEAR = 0.012f;
     private static final int FOLLOW_NEAR_GRACE_MS = 6000;
+    private static final int FOLLOW_SKILL_STARVE_MS = 4000;
     private long lastLeaderNearAt;      // M this close to our arrow on the map = together          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
     private String leaderKey, leaderShown;
@@ -5552,6 +5553,14 @@ public class ClickService extends AccessibilityService {
      * hold off until the current cast's lock is over, and the next follow tick moves.
      */
     private boolean followMayMove(long now) {
+        // Skills first once one has waited a while: map looks every 3 s and far walks held every
+        // skill back, and the healer didn't heal for minutes (phone 10:35-10:42).
+        if (!booster && !pending.isEmpty() && now - lastAnyTapAt > FOLLOW_SKILL_STARVE_MS
+                && now >= followMapUntil) {
+            followClaimUntil = 0;
+            schedulePump(0);
+            return false;
+        }
         if (!followCastBusy) {
             followClaimUntil = 0;                                   // moving now: skills go on after it
             return true;
