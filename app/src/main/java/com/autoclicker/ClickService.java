@@ -250,7 +250,8 @@ public class ClickService extends AccessibilityService {
     // 6 s / 4.5 s stood idle ~5 s after every kill that dropped nothing (tablet 20:40-20:45, the user:
     // "it waits for something before it kills the monsters"). A later drop still gets picked up:
     // the hand pauses attacks whenever it shows, and tapping it walks the character to the item.
-    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 3000;     // a cap; the drop labels decide earlier
+    // Back to ~5 s (2026-10-07 21:27): with 2 s "a lot of items on the ground were not looted".
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 5500;     // a cap; the drop labels decide earlier
     private long postKillUntil;
     // The drop lands where the monster died, sometimes just outside the hand's reach: the hand only
     // showed ~2.5 s after attacks resumed, as the character ran past it (07:01-07:07). So the
@@ -267,7 +268,7 @@ public class ClickService extends AccessibilityService {
     // 1.5 s was too soon: drops often land ~5 s after the kill, and 9 of 19 "no drop" calls had
     // the hand show 2.5-5.6 s later - the character ran to the next monster and back (the user,
     // 11:09). The ground is read every scan for DROP_READ_MS after a kill.
-    private static final int DROP_DECIDE_MS = 2000, DROP_READ_MS = 3000, DROP_MAX_STEPS = 3;
+    private static final int DROP_DECIDE_MS = 4500, DROP_READ_MS = 5500, DROP_MAX_STEPS = 3;
     private static final float KILL_MAX_HP = 0.6f;
     private static final String KEY_LOOT_NAMES = "farm_loot_names";
     private static final String[] LOOT_WORDS = {"potion", "burr", "box", "scroll", "card", "ore", "stone",
@@ -2484,6 +2485,10 @@ public class ClickService extends AccessibilityService {
             repKills++;
             Log.i(TAG, "farmer: kill (" + Math.round(farmTargetHp * 100) + "%, the next target took over at "
                     + Math.round(targetHp * 100) + "%)");
+            if (lootStartedAt == 0 && now >= lootIgnoreUntil) {
+                startKillHold(now);
+                holdNextTarget(now);
+            }
         }
         if (!target && farmTargetHp > KILL_MAX_HP && lootStartedAt == 0) {
             // Our own X (going home, unsticking) and a bar never hit (99%: the game switched targets)
@@ -2494,14 +2499,7 @@ public class ClickService extends AccessibilityService {
         }
         boolean killed = !target && farmTargetHp >= 0 && farmTargetHp <= KILL_MAX_HP;
         if (killed) repKills++;                               // counted during a loot pause too
-        if (killed && lootStartedAt == 0 && now >= lootIgnoreUntil) {
-            postKillUntil = now + POST_KILL_HOLD_MS;
-            busyUntil = Math.max(busyUntil, postKillUntil);
-            killAt = now;
-            killStepDone = false;
-            dropSeenAt = 0;
-            dropSteps = 0;
-        }
+        if (killed && lootStartedAt == 0 && now >= lootIgnoreUntil) startKillHold(now);
         if (!target && now < postKillUntil && lootStartedAt == 0) {
             if (dropSeenAt > killAt) {
                 // A drop lies there but the hand isn't up: walk to it (short steps).
@@ -2574,12 +2572,18 @@ public class ClickService extends AccessibilityService {
             farmProgressAt = now;
             return;
         }
-        // The game locked the next monster by itself during the pause: the character is off to it
-        // already, so waiting for the drop gains nothing.
-        if (target && farmTargetHp < 0 && now < postKillUntil && lootStartedAt == 0) {
-            postKillUntil = now;
-            busyUntil = now;
-            schedulePump(0);
+        // The next monster got locked during the pause - mostly by our last attack landing just after
+        // the kill - and the character runs to it, past the drop that lands ~5 s after the kill (with
+        // speed-ups / crazy time even farther: "a lot of items on the ground were not looted", 21:27).
+        // Drop it once and keep waiting for the loot; back again (it's attacking us): fight it.
+        if (target && now < postKillUntil && lootStartedAt == 0 && now - lastHoldDropAt > 1500) {
+            if (killHoldDrops == 0 && now - killAt < DROP_DECIDE_MS) {
+                holdNextTarget(now);
+            } else {
+                postKillUntil = now;
+                busyUntil = now;
+                schedulePump(0);
+            }
         }
         // Stuck: the game keeps going for a monster it can't reach (behind a wall: "no clear line
         // ... walking in", 2026-10-04 11:29), so its HP never drops. Any HP change, a new target or
@@ -4776,13 +4780,7 @@ public class ClickService extends AccessibilityService {
             boolean chatSeen = !sorted.isEmpty();
             if (!chatSeen) return;                           // chat hidden
             // New ones come after the longest overlap with the last read (old ones scroll off the top).
-            int overlap = 0;
-            for (int k = Math.min(lastChatLines.size(), curKeys.size()); k > 0; k--) {
-                if (lastChatLines.subList(lastChatLines.size() - k, lastChatLines.size()).equals(curKeys.subList(0, k))) {
-                    overlap = k;
-                    break;
-                }
-            }
+            int overlap = chatOverlap(lastChatLines, curKeys);
             boolean firstRead = !chatPrimed;
             chatPrimed = true;
             // Nothing in common although both reads had loot: the chat scrolled a lot; only count
@@ -4843,6 +4841,40 @@ public class ClickService extends AccessibilityService {
         return s;
     }
 
+    /**
+     * How many of this read's first loot lines were in the last read (old lines scroll up). One
+     * misread or a line missing from one read broke the exact match and the whole chat was counted
+     * again: "+252 gold" six times in 16 s (tablet 21:24).
+     */
+    private static int chatOverlap(List<String> prev, List<String> cur) {
+        for (int k = Math.min(prev.size(), cur.size()); k > 0; k--) {
+            int miss = 0;
+            for (int i = 0; i < k; i++) if (!prev.get(prev.size() - k + i).equals(cur.get(i))) miss++;
+            if (miss == 0 || (k >= 3 && miss * 3 <= k)) return k;
+        }
+        // A line missing from one read shifts the rest: new ones come after the last line matched in order.
+        int n = prev.size(), m = cur.size();
+        int[][] f = new int[n + 1][m + 1];
+        for (int i = n - 1; i >= 0; i--) {
+            for (int j = m - 1; j >= 0; j--) {
+                f[i][j] = prev.get(i).equals(cur.get(j)) ? f[i + 1][j + 1] + 1 : Math.max(f[i + 1][j], f[i][j + 1]);
+            }
+        }
+        int i = 0, j = 0, last = 0;
+        while (i < n && j < m) {
+            if (prev.get(i).equals(cur.get(j)) && f[i][j] == f[i + 1][j + 1] + 1) {
+                last = j + 1;
+                i++;
+                j++;
+            } else if (f[i + 1][j] >= f[i][j + 1]) {
+                i++;
+            } else {
+                j++;
+            }
+        }
+        return last;
+    }
+
     private static String lootEntry(String line) {
         java.util.regex.Matcher g = GOLD_LINE.matcher(line);
         if (g.find()) {
@@ -4880,6 +4912,8 @@ public class ClickService extends AccessibilityService {
     // The 5-minute farm report (the user, 2026-10-07: kills too, to make farming more efficient).
     private int repKills, repLost, repPickups, repLootLeft, repHomeTrips, repSearchWalks, repDeaths, repGoldDrops;
     private long ownDropAt;                                   // our own X on the target bar
+    private int killHoldDrops;
+    private long lastHoldDropAt;
     private long repDeathAt, sessKills, sessGold, sessStart;
     private float repPetLevel = -1;
 
@@ -5031,6 +5065,25 @@ public class ClickService extends AccessibilityService {
         lootItems.clear();
         repReset();
         lootReportFrom = now;
+    }
+
+    /** After a kill: no attacks for a moment, so the drop is looted before the next fight. */
+    private void startKillHold(long now) {
+        postKillUntil = now + POST_KILL_HOLD_MS;
+        busyUntil = Math.max(busyUntil, postKillUntil);
+        killAt = now;
+        killStepDone = false;
+        dropSeenAt = 0;
+        dropSteps = 0;
+        killHoldDrops = 0;
+    }
+
+    /** The next target, locked before the drop landed: X it, so the character stays by the drop. */
+    private void holdNextTarget(long now) {
+        killHoldDrops++;
+        lastHoldDropAt = ownDropAt = now;
+        Log.i(TAG, "farmer: next monster locked right after the kill - dropping it, loot first");
+        tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "drop next target (loot first)");
     }
 
     private boolean canFarmMove(long now) {
