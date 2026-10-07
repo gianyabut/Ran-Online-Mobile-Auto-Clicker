@@ -144,6 +144,7 @@ public class ClickService extends AccessibilityService {
     private static final String KEY_FOLLOW = "follow";
     private boolean follow;
     private static final int FOLLOW_TICK_MS = 2000, FOLLOW_LOST_ALERT_MS = 60_000, FOLLOW_LOST_STEPS = 4;
+    private static final float FOLLOW_READ_H = 0.95f;
     private static final float FOLLOW_NEAR_W = 0.12f;          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
     private String leaderKey, leaderShown;
@@ -5497,10 +5498,12 @@ public class ClickService extends AccessibilityService {
         followCastBusy = !booster && now - lastAnyTapAt < FOLLOW_AFTER_CAST_MS;
         String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
         // One region from the top-left corner (OCR boxes are screen pixels): Team list + play area.
-        captureRegionForOcr(0f, 0f, 0.92f, 0.74f, shot -> {
+        // Nearly the whole screen: the master below us (the bottom quarter) was taken for gone and
+        // the bot walked off (phone 09:51, the user: look hard whether they're near first).
+        captureRegionForOcr(0f, 0f, 0.92f, FOLLOW_READ_H, shot -> {
             if (shot == null) return;
             // A big map left open hides the Team list (and nothing else would close it, 13:00).
-            if (mapIsOpen(shot, 0.74f)) {
+            if (mapIsOpen(shot, FOLLOW_READ_H)) {
                 shot.recycle();
                 // X doesn't close it while a portal's "Move to the area" is up (13:04, 10 tries).
                 // Then tap the map a little off our arrow: walking off the portal drops the popup
@@ -5558,16 +5561,16 @@ public class ClickService extends AccessibilityService {
     }
 
     private void addLeaderAlias(String key) {
-        if (key == null || key.length() < 4 || leaderAliases.contains(key)) return;
+        // Only spellings close to the master's own: aliases of aliases drifted to "ibee6-" and
+        // matched other players, and follow walked after them (phone 09:50).
+        if (key == null || key.length() < 5 || leaderAliases.contains(key) || !looseName(key, leaderKey)) return;
         leaderAliases.add(key);
         while (leaderAliases.size() > 16) leaderAliases.remove(leaderAliases.iterator().next());
     }
 
     private boolean isLeader(String key) {
         if (key == null || leaderKey == null) return false;
-        if (looseName(key, leaderKey)) return true;
-        for (String a : leaderAliases) if (looseName(key, a)) return true;
-        return false;
+        return looseName(key, leaderKey) || leaderAliases.contains(key);
     }
 
     private void followStep(List<MathQuestion.Line> lines) {
@@ -5627,11 +5630,16 @@ public class ClickService extends AccessibilityService {
             String name = stripRowMark(first.text);
             String key = nameKey(name);
             if (leaderKey == null) {
-                setLeader(key, name);
+                if (key.length() >= 5) setLeader(key, name);
             } else if (isLeader(key)) {
                 addLeaderAlias(key);
                 pendingLeaderKey = null;
-            } else if (key.length() >= 4 && pendingLeaderKey != null && looseName(key, pendingLeaderKey)) {
+                // A fuller read of the same name is the better spelling ("yihee6" -> "kyjhele26").
+                if (key.length() > leaderKey.length() && key.length() <= 16) {
+                    leaderKey = key;
+                    leaderShown = name;
+                }
+            } else if (key.length() >= 5 && pendingLeaderKey != null && looseName(key, pendingLeaderKey)) {
                 setLeader(key, name);                           // a new master, read twice in a row
             } else {
                 pendingLeaderKey = key;                         // one odd read ("Khe") isn't a new master
@@ -5660,6 +5668,8 @@ public class ClickService extends AccessibilityService {
         for (MathQuestion.Line l : lines) {
             if (inTeamList(l.box) || l.box.bottom <= screenH * HUD_TOP_H
                     || (l.box.right > screenW * 0.76f && l.box.top < screenH * 0.32f)) continue;
+            if (l.box.centerX() > screenW * CHAT_L && l.box.centerX() < screenW * (CHAT_L + CHAT_W)
+                    && l.box.centerY() > screenH * CHAT_T) continue;     // a chat line naming them
             String k = nameKey(l.text);
             if (!isLeader(k) || !looksLikePlayerName(l.text)) continue;
             float d = fromCharacter(l.box);
@@ -5699,10 +5709,9 @@ public class ClickService extends AccessibilityService {
         // Not on screen: the big map shows the party master as an "M" icon, and tapping a spot on
         // it walks there by itself, around walls (the user's idea, 12:45).
         lastWalkLeaderDist = 0;
-        // The map only once their name has been off the screen a while: one missed read opened it,
-        // and an M it then missed sent us to a stale spot (phone 09:44).
-        boolean longGone = leaderSeenAt == 0 || now - leaderSeenAt > FOLLOW_MAP_AFTER_MS;
-        if (longGone && now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
+        // Not on screen: the big map says how far they are - M by us = stay, far = tap it. No blind
+        // walking where they were last seen: that wandered off (phone 09:51, "drifting away").
+        if (now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
             if (followMayMove(now)) mapFollow(now);
             return;
         }
@@ -5712,13 +5721,7 @@ public class ClickService extends AccessibilityService {
             return;
         }
         followWaitLogged = false;
-        if (followLostSteps < FOLLOW_LOST_STEPS && now - leaderSeenAt < FOLLOW_LOST_ALERT_MS) {
-            if (!followMayMove(now)) return;
-            followLostSteps++;
-            Log.i(TAG, "follow: " + leaderShown + " not on screen, walking where they were last seen ("
-                    + followLostSteps + "/" + FOLLOW_LOST_STEPS + ")");
-            followWalk(leaderDirX * push, leaderDirY * push, 1500, now);
-        } else if (now - leaderSeenAt >= FOLLOW_LOST_ALERT_MS && !followLostAlerted) {
+        if (now - leaderSeenAt >= FOLLOW_LOST_ALERT_MS && !followLostAlerted && now - lastMapFollowAt > MAP_NEAR_BACKOFF_MS) {
             followLostAlerted = true;
             Log.w(TAG, "follow: lost " + leaderShown + " for " + (now - leaderSeenAt) / 1000 + " s");
             Telegram.send(this, "\uD83E\uDDED Ran Online: lost the party master (" + leaderShown
