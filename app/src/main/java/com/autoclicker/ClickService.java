@@ -144,7 +144,7 @@ public class ClickService extends AccessibilityService {
     private static final String KEY_FOLLOW = "follow";
     private boolean follow;
     private static final int FOLLOW_TICK_MS = 2000, FOLLOW_LOST_ALERT_MS = 60_000, FOLLOW_LOST_STEPS = 4;
-    private static final float FOLLOW_READ_H = 0.95f;
+    private static final float FOLLOW_READ_H = 0.74f;          // the Team list reads well at this size
     private static final float FOLLOW_NEAR_W = 0.12f;          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
     private String leaderKey, leaderShown;
@@ -5662,23 +5662,61 @@ public class ClickService extends AccessibilityService {
             return;
         }
         // Their name tag in the world (not the Team list, the top strip or the minimap).
+        String[] tagKeyOut = new String[1];
+        Rect tag = findLeaderTag(lines, 0, tagKeyOut);
+        if (tag == null && leaderKey != null) {
+            // Not in the top three quarters: look at the bottom strip too before calling them gone
+            // (the master below us was taken for gone and the bot walked off, phone 09:51 - the
+            // user: "check if the party leader is really near"). A taller single read shrank the
+            // Team list's text past reading.
+            long t0 = now;
+            captureRegionForOcr(0f, FOLLOW_LOW_T, 0.92f, 0.97f - FOLLOW_LOW_T, low -> {
+                if (low == null) {
+                    if (running && follow) followDecide(null, null, t0);
+                    return;
+                }
+                int oy = Math.round(screenH * FOLLOW_LOW_T);
+                Ocr.read(low, (l2, w2) -> {
+                    if (!running || !follow) return;
+                    String[] k2 = new String[1];
+                    Rect t2 = findLeaderTag(l2, oy, k2);
+                    followDecide(t2, k2[0], SystemClock.uptimeMillis());
+                });
+            });
+            return;
+        }
+        followDecide(tag, tagKeyOut[0], now);
+    }
+
+    private static final float FOLLOW_LOW_T = 0.70f;
+
+    /** The master's name tag in the world among lines read from a crop whose top is at oy (screen px). */
+    private Rect findLeaderTag(List<MathQuestion.Line> lines, int oy, String[] keyOut) {
         Rect tag = null;
-        String tagKey = null;
         float tagDist = Float.MAX_VALUE;
         for (MathQuestion.Line l : lines) {
-            if (inTeamList(l.box) || l.box.bottom <= screenH * HUD_TOP_H
-                    || (l.box.right > screenW * 0.76f && l.box.top < screenH * 0.32f)) continue;
-            if (l.box.centerX() > screenW * CHAT_L && l.box.centerX() < screenW * (CHAT_L + CHAT_W)
-                    && l.box.centerY() > screenH * CHAT_T) continue;     // a chat line naming them
+            Rect b = new Rect(l.box);
+            b.offset(0, oy);
+            if (inTeamList(b) || b.bottom <= screenH * HUD_TOP_H
+                    || (b.right > screenW * 0.76f && b.top < screenH * 0.32f)) continue;
+            if (b.centerX() > screenW * CHAT_L && b.centerX() < screenW * (CHAT_L + CHAT_W)
+                    && b.centerY() > screenH * CHAT_T) continue;         // a chat line naming them
             String k = nameKey(l.text);
             if (!isLeader(k) || !looksLikePlayerName(l.text)) continue;
-            float d = fromCharacter(l.box);
+            float d = fromCharacter(b);
             if (d < tagDist) {
-                tag = l.box;
+                tag = b;
                 tagDist = d;
-                tagKey = k;
+                keyOut[0] = k;
             }
         }
+        return tag;
+    }
+
+    /** Seen: stay if close, walk to them if not. Not seen: the big map decides. */
+    private void followDecide(Rect tag, String tagKey, long now) {
+        if (!running || !follow || manual) return;
+        float tagDist = tag != null ? fromCharacter(tag) : Float.MAX_VALUE;
         if (tag != null) addLeaderAlias(tagKey);
         float push = screenW * FARM_PUSH;
         if (tag != null) {
@@ -5821,6 +5859,8 @@ public class ClickService extends AccessibilityService {
             if (arrow == null || m == null) {
                 Log.i(TAG, "follow: map open" + (map != null ? " (" + map + ")" : "") + ", "
                         + (m == null ? "no M on it (another map, or right under our arrow)" : "can't find our arrow"));
+                // Most often right under our arrow, i.e. together: don't reopen the map every 6 s.
+                if (m == null) lastMapFollowAt = SystemClock.uptimeMillis() + MAP_NEAR_BACKOFF_MS;
                 closeMap();
                 return;
             }
