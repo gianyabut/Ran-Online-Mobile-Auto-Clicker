@@ -130,7 +130,7 @@ public class ClickService extends AccessibilityService {
     // In booster there's no tap loop to notice the keyboard, so a light tick watches for it; and the
     // presence check (reused from cooldownCheck) runs slower since nothing else needs a screenshot.
     private static final int KEYBOARD_WATCH_MS = 800;
-    private static final int BOOSTER_PRESENCE_MS = 3000;
+    private static final int BOOSTER_PRESENCE_MS = 1500;      // also the death dialog (10 s countdown)
     private final Runnable keyboardWatchTick = this::keyboardWatchTick;
     // Farmer mode (FARM on the start chooser, 2026-10-04): attacks monsters with rings you place for
     // it, kept as their own layout so the FS heal/buff rings stay put. Each ring taps on its own
@@ -7543,13 +7543,25 @@ public class ClickService extends AccessibilityService {
             return;
         }
         if (booster) {
-            // Booster does no buff/cooldown work; the only screenshot it needs is the presence check
-            // (the "are you there? / Move" panel), and it can be slow.
+            // Booster does no buff/cooldown work: one screenshot for the presence check (the "are you
+            // there? / Move" panel) and, from the same one, the text: the death dialog counts down
+            // from 10 s, and the question watch's own screenshot every 3.2 s (refused when it came
+            // right after this one) tapped Used 3-6 s late (phone 22:45, the user: "slow").
             if (canReadScreen()) {
                 captureScreen(shot -> {
                     if (!running || !booster) return;
                     if (keyboardShowing() || (gamePackage != null && !gamePackage.equals(foregroundPackage()))) return;
                     updatePresenceCheck(Prompts.presenceCheck(shot, screenW, screenH));
+                    if (follow) return;                              // follow reads the text itself
+                    lastScanShotAt = SystemClock.uptimeMillis();     // the question watch stands down
+                    Bitmap top = null;
+                    try {
+                        top = Bitmap.createBitmap(shot, 0, 0, shot.getWidth(),
+                                Math.min(shot.getHeight(), Math.round(screenH * QUESTION_SCAN_H)));
+                    } catch (RuntimeException | OutOfMemoryError ignored) {
+                    }
+                    String game = gamePackage != null ? gamePackage : DEFAULT_GAME;
+                    if (top != null) Ocr.read(top, (lines, words) -> checkForQuestion(game, lines));
                 });
             }
             handler.postDelayed(this::cooldownCheck, BOOSTER_PRESENCE_MS);
