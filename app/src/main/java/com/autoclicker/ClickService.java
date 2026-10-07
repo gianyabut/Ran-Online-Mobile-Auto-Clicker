@@ -4960,7 +4960,6 @@ public class ClickService extends AccessibilityService {
 
     private void repReset() {
         repKills = repLost = repPickups = repLootLeft = repHomeTrips = repSearchWalks = repDeaths = repLevelUps = repGoldDrops = 0;
-        repProtects = repMateHits = repMateDeaths = 0;
         repMobSum = repMobScans = repLootMs = repHomeMs = 0;
         expAtStart = expNow;
     }
@@ -5065,10 +5064,6 @@ public class ClickService extends AccessibilityService {
         if (repHomeTrips > 0 || repSearchWalks > 0) {
             sb.append("\n\uD83D\uDEB6 Back to the anchor: ").append(repHomeTrips).append(" \u00B7 searching walks: ").append(repSearchWalks);
         }
-        if (repMateHits > 0 || repProtects > 0 || repMateDeaths > 0) {
-            sb.append("\n🛡 Party: mates hit ").append(repMateHits).append(" times \u00B7 protected ").append(repProtects)
-                    .append(" \u00B7 mates down ").append(repMateDeaths);
-        }
         if (repDeaths > 0) sb.append("\n\uD83D\uDC80 Deaths: ").append(repDeaths);
         if (repPetLevel >= 0) sb.append("\n\uD83D\uDC3E Pet food: ").append(Math.round(repPetLevel * 100)).append("%");
         if (sessStart > 0 && now - sessStart > LOOT_REPORT_MS + 60_000) {
@@ -5101,144 +5096,6 @@ public class ClickService extends AccessibilityService {
         lastHoldDropAt = ownDropAt = now;
         Log.i(TAG, "farmer: next monster locked right after the kill - dropping it, loot first");
         tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "drop next target (loot first)");
-    }
-
-    // ---------- protecting party mates (the user, 2026-10-07 23:40) ----------
-    // Boosting: the low-level mates stand still by the anchor, and aggressive monsters killed one
-    // about once a minute while the Brawler fought whatever was nearest to itself (6 deaths in
-    // 8.5 min, tablet 23:21-23:31). As soon as a mate loses HP: find the monster by that mate's
-    // name tag, select it and punch it once - the fist taunts it - and the attack rings go on at it.
-    // The loot hand still comes first (the user's call).
-    private static final int MAX_ROWS = 6, PROTECT_GAP_MS = 4000, MATE_HURT_FRESH_MS = 3000, MATE_LOG_GAP_MS = 3000;
-    private static final float MATE_HP_DROP = 0.03f, PROTECT_NEAR_W = 0.2f;
-    private final float[] mateHp = {-1, -1, -1, -1, -1, -1};
-    private final String[] mateNames = new String[MAX_ROWS];
-    private final long[] mateLogAt = new long[MAX_ROWS];
-    private int mateHurtRow = -1, repProtects, repMateHits, repMateDeaths;
-    private long mateHurtAt, lastProtectAt, lastProtectMissLogAt;
-    private boolean protectWanted;
-
-    /** Every farm scan: the mates' HP bars in the Team list (row 0 is us, the party master). */
-    private void partyWatch(Bitmap shot, long now) {
-        int n = Math.min(MAX_ROWS, MobCounter.partySize(shot, screenW, screenH));
-        for (int k = 1; k < MAX_ROWS; k++) {
-            float hp = k < n ? MobCounter.memberHp(shot, screenW, screenH, k) : -1f;
-            float prev = mateHp[k];
-            mateHp[k] = hp;
-            if (hp < 0 || prev < 0) continue;
-            if (prev > 0.02f && hp <= 0.02f) {
-                repMateDeaths++;
-                Log.i(TAG, "party: " + mateLabel(k) + " is down");
-            } else if (hp > 0.02f && hp < prev - MATE_HP_DROP) {
-                repMateHits++;
-                mateHurtRow = k;
-                mateHurtAt = now;
-                if (now - mateLogAt[k] >= MATE_LOG_GAP_MS) {
-                    mateLogAt[k] = now;
-                    Log.i(TAG, "party: " + mateLabel(k) + " losing HP (" + Math.round(prev * 100) + "% -> "
-                            + Math.round(hp * 100) + "%)");
-                }
-            }
-        }
-        if (mateHurtRow > 0 && now - mateHurtAt < MATE_HURT_FRESH_MS && now - lastProtectAt >= PROTECT_GAP_MS
-                && !protectWanted && protectAllowed(now)) {
-            protectWanted = true;
-            lastFarmOcrAt = 0;                                   // read the name tags on this scan
-        }
-    }
-
-    /** Loot first; and not mid walk-home, feeding, selling or luring. */
-    private boolean protectAllowed(long now) {
-        return lootStartedAt == 0 && !handUpAtRead && !returning && !feedRunning && sellStage == 0 && !sellRunning
-                && !luring && now >= deadUntil && canFarmMove(now);
-    }
-
-    private String mateLabel(int k) {
-        return mateNames[k] != null ? mateNames[k] : "party row " + (k + 1);
-    }
-
-    private boolean inTeamRows(Rect b) {
-        float x = b.exactCenterX() / screenW, y = b.exactCenterY() / screenH;
-        return x < 0.19f && y > 0.20f && y < 0.2456f + MAX_ROWS * 0.02906f;
-    }
-
-    /** The mates' names, from the Team list rows. */
-    private void noteMateNames(List<MathQuestion.Line> lines) {
-        for (MathQuestion.Line l : lines) {
-            if (!inTeamRows(l.box)) continue;
-            float row = (l.box.exactCenterY() / screenH - 0.2456f) / 0.02906f;
-            int k = Math.round(row);
-            if (k < 1 || k >= MAX_ROWS || Math.abs(row - k) > 0.35f) continue;
-            String name = l.text.replaceAll("^[^A-Za-z0-9]+|[^A-Za-z0-9_]+$", "").trim();
-            if (name.replaceAll("[^A-Za-z0-9]", "").length() >= 3) mateNames[k] = name;
-        }
-    }
-
-    /** The monster by the hurt mate's name tag: select it, then the fist (it taunts it). */
-    private void protectStep(List<MathQuestion.Line> lines) {
-        long now = SystemClock.uptimeMillis();
-        int k = mateHurtRow;
-        String name = k > 0 ? mateNames[k] : null;
-        if (name == null) {
-            protectMiss(now, "the hurt mate's name isn't read yet");
-            return;
-        }
-        String key = name.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
-        Rect mate = null;
-        for (MathQuestion.Line l : lines) {
-            if (inTeamRows(l.box) || onGameControls(l.box)) continue;
-            String lk = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
-            if (lk.contains(key) && lk.length() <= key.length() + 4) {
-                mate = l.box;
-                break;
-            }
-        }
-        if (mate == null) {
-            protectMiss(now, name + "'s name tag isn't on screen");
-            return;
-        }
-        MathQuestion.Line best = null;
-        float bestD = screenW * PROTECT_NEAR_W;
-        for (MathQuestion.Line l : lines) {
-            if (!isKnownMonster(l.text) || inTeamRows(l.box) || onGameControls(l.box)) continue;
-            if (l.box.bottom <= screenH * 0.06f) continue;                 // the target bar's title
-            float d = (float) Math.hypot(l.box.exactCenterX() - mate.exactCenterX(), l.box.exactCenterY() - mate.exactCenterY());
-            if (d < bestD) {
-                bestD = d;
-                best = l;
-            }
-        }
-        if (best == null) {
-            protectMiss(now, "no monster's name by " + name);
-            return;
-        }
-        float tx = best.box.exactCenterX(), ty = best.box.bottom + best.box.height() * LURE_BODY_BELOW;
-        Rect spot = new Rect(Math.round(tx) - 1, Math.round(ty) - 1, Math.round(tx) + 1, Math.round(ty) + 1);
-        // Never on the HUD: the game's controls, the Team list, our own buttons on the left, the top panel.
-        if (onGameControls(spot) || inTeamRows(spot) || ty > screenH * 0.93f || (tx < screenW * 0.07f && ty > screenH * 0.2f)
-                || (tx < screenW * 0.32f && ty < screenH * 0.11f)) {
-            protectMiss(now, "the monster by " + name + " is under the controls");
-            return;
-        }
-        if (!protectAllowed(now)) return;                                  // things moved on while reading
-        lastProtectAt = now;
-        repProtects++;
-        postKillUntil = Math.min(postKillUntil, now);    // a mate under attack beats waiting for a drop (a hand still wins)
-        busyUntil = Math.max(busyUntil, now + TAP_MS * 2 + LURE_SELECT_SETTLE_MS + 300);
-        Log.i(TAG, "farmer: protecting " + name + " (HP " + Math.round(Math.max(0f, mateHp[k]) * 100) + "%) - \""
-                + best.text.trim() + "\" by it at " + Math.round(tx) + "," + Math.round(ty) + ": selecting it, fist to taunt");
-        tapAt(tx, ty, "protect select");
-        handler.postDelayed(() -> {
-            if (!running || !farmer) return;
-            lastAnyTapAt = SystemClock.uptimeMillis();
-            tapAt(screenW * FIST_X, screenH * FIST_Y, "protect taunt");
-        }, TAP_MS + LURE_SELECT_SETTLE_MS);
-    }
-
-    private void protectMiss(long now, String why) {
-        if (now - lastProtectMissLogAt < 10_000) return;
-        lastProtectMissLogAt = now;
-        Log.i(TAG, "party: can't protect - " + why);
     }
 
     private boolean canFarmMove(long now) {
@@ -5422,11 +5279,6 @@ public class ClickService extends AccessibilityService {
                 noteMonstersSeen(tags, seen);
                 for (Rect tag : tags) if (fromCharacter(tag) <= screenW * MONSTER_NEAR_W) farmMobsSeenAt = nearTagAt = seen;
                 lureStep(tags, seen);
-                noteMateNames(lines);
-                if (protectWanted) {
-                    protectWanted = false;
-                    protectStep(lines);
-                }
             } finally {
                 crop.recycle();
             }
@@ -7800,7 +7652,6 @@ public class ClickService extends AccessibilityService {
                         farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH) && lootHandPicture(shot), now);
                         farmCheck(MobCounter.count(shot, screenW, screenH),
                                 MobCounter.targetHp(shot, screenW, screenH), now);
-                        partyWatch(shot, now);
                     }
                     // Each text read costs memory and CPU on the Pad 5 (system froze again 07:49 with
                     // reads every scan): chat every CHAT_READ_MS, coordinates every COORD_EVERY_MS.
