@@ -5797,6 +5797,7 @@ public class ClickService extends AccessibilityService {
                     Log.i(TAG, "follow: no M on this map - walking to where it was last seen " + lastMapM[0] + "," + lastMapM[1]
                             + " (a portal?)");
                     tapAt(lastMapM[0], lastMapM[1], "map last M");
+                    followMapUntil = Math.max(followMapUntil, SystemClock.uptimeMillis() + MAP_WALK_MS);
                 } else if (portalPushes < PORTAL_PUSHES) {
                     // There already: a bit further the way we came, to step into the portal.
                     float dx = lastMapM[0] - lastMapArrow[0], dy = lastMapM[1] - lastMapArrow[1];
@@ -5839,6 +5840,9 @@ public class ClickService extends AccessibilityService {
                     + " (" + Math.round(d) + " px), tapping it");
             tapAt(m[0], m[1], "map M");
             followHoldUntil = t + MAP_WALK_MS;
+            // No heal or buff during the walk: a cast stops the game's walk to the tapped spot, and
+            // the map taps went nowhere (phone 09:46, the user: "it doesnt work").
+            followMapUntil = Math.max(followMapUntil, followHoldUntil);
             handler.postDelayed(this::closeMap, 600);
         }
     }
