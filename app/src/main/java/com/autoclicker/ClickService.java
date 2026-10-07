@@ -227,6 +227,8 @@ public class ClickService extends AccessibilityService {
     // around (08:25:19-30, "stuck and didn't loot"). Give up LOOT_STALL_MS after the last pickup
     // (the chat says "Pick up item"/"Gained gold"; read every LOOT_CHAT_MS while looting).
     private int lootGiveUps;
+    private static final int LOOT_RETRY_MS = 2000, HAND_STUCK_MS = 30_000, HAND_FREE_MS = 60_000;
+    private long handUpSince, handFreeUntil;
     private long lootGiveUpAt;
     private static final int LOOT_STALL_MS = 3500, LOOT_CHAT_MS = 1500;   // 5 s per unpickable item added up (81 s in 17 min)
     private long lastPickupAt;
@@ -1152,7 +1154,7 @@ public class ClickService extends AccessibilityService {
         sellStage = 0;                                          // a sell trip's checks too
         returning = false;
         returnGiveUpUntil = 0;
-        lootIgnoreUntil = 0;                                    // a start always loots again
+        lootIgnoreUntil = handFreeUntil = handUpSince = 0;      // a start always loots again
         lootFailStreak = 0;
         if (run) {
             // The ⚓ spot stays until you clear it on the button (the user, 10:47: a stop and start
@@ -5340,20 +5342,15 @@ public class ClickService extends AccessibilityService {
             // failure. Counted as one, the hand was ignored up to 60 s and our own drops were left
             // behind (tablet 20:57-21:02, the user: "it skips the loots").
             boolean gotSome = lastPickupAt >= lootStartedAt;
-            if (handShowing && !gotSome) repLootLeft++;
-            else repPickups++;
+            if (!handShowing || gotSome) repPickups++;
             repLootMs += now - lootStartedAt;
-            Log.i(TAG, "farmer: " + (!handShowing ? "picked up" : gotSome ? "picked up some, the rest isn't ours ("
-                    + (now - lootStartedAt) / 1000 + " s)" : "couldn't pick it up in " + (now - lootStartedAt) / 1000
-                    + " s, leaving it") + ", attacking again");
+            Log.i(TAG, "farmer: " + (!handShowing ? "picked up, attacking again" : gotSome ? "picked up some ("
+                    + (now - lootStartedAt) / 1000 + " s), the hand still shows" : "no pickup in " + (now - lootStartedAt) / 1000
+                    + " s, the hand still shows - trying again shortly"));
             if (handShowing) {
-                // The same item it can't take (someone else's drop?) brought the pause back every
-                // ~15 s (tablet 20:36-20:38): each give-up in a row ignores the hand twice as long.
-                // A pickup, or a minute without a give-up, starts over at LOOT_IGNORE_MS.
-                if (gotSome || now - lootGiveUpAt > 60_000) lootGiveUps = 0;
-                lootGiveUpAt = now;
-                lootGiveUps++;
-                lootIgnoreUntil = now + Math.min(60_000L, (long) LOOT_IGNORE_MS << Math.min(3, lootGiveUps - 1));
+                // Attacks stay held while the hand shows (the user's rule, 22:20); it tries again
+                // after LOOT_RETRY_MS. Only HAND_STUCK_MS with nothing picked up lets the fight go on.
+                lootIgnoreUntil = Math.max(lootIgnoreUntil, now + LOOT_RETRY_MS);
                 if (gotSome) lootFailStreak = 0;
                 // A few failures in a row with nothing picked up: the bag is full (12:55, the user).
                 // Stop pausing the fight for loot for a while, and say so. Only full-length tries
@@ -5361,7 +5358,7 @@ public class ClickService extends AccessibilityService {
                 // 5 min (08:49), and the user saw "not looting".
                 if (!gotSome && now - lootStartedAt >= LOOT_MAX_PAUSE_MS && ++lootFailStreak >= LOOT_FAILS_TO_PAUSE) {
                     lootFailStreak = 0;
-                    lootIgnoreUntil = now + LOOT_FULL_PAUSE_MS;
+                    lootIgnoreUntil = handFreeUntil = now + LOOT_FULL_PAUSE_MS;
                     Log.w(TAG, "farmer: " + LOOT_FAILS_TO_PAUSE + " pickups failed in a row, inventory full?"
                             + " Not looting for " + LOOT_FULL_PAUSE_MS / 60_000 + " min");
                     Telegram.send(this, "🎒 Ran Online: looting paused for " + LOOT_FULL_PAUSE_MS / 60_000
@@ -5378,7 +5375,19 @@ public class ClickService extends AccessibilityService {
             schedulePump(0);
             return;
         }
-        if (handShowing && now >= lootIgnoreUntil && !returning) {
+        // While the hand shows, nothing but the hand: no skill, no buff - after a failed pickup too
+        // (it attacked on for 8-60 s with the hand up; the user, 2026-10-07 22:20). Only an item it
+        // can't have - the hand up HAND_STUCK_MS with nothing picked up - or a full bag lets the
+        // fight go on with the hand showing.
+        if (!handShowing) handUpSince = 0;
+        else if (handUpSince == 0 || lastPickupAt > handUpSince) handUpSince = now;
+        if (handShowing && now - handUpSince >= HAND_STUCK_MS && now >= handFreeUntil) {
+            handFreeUntil = lootIgnoreUntil = now + HAND_FREE_MS;
+            repLootLeft++;
+            Log.i(TAG, "farmer: the hand has shown " + (now - handUpSince) / 1000 + " s with nothing picked up - leaving"
+                    + " that item, fighting on (hand ignored " + HAND_FREE_MS / 1000 + " s)");
+        }
+        if (handShowing && now >= handFreeUntil && !returning) {
             lastHandSeenAt = now;
             // No skill while the hand shows, even if the pickup must wait for a cast to end: a full
             // buff (Power Kick, Blood Lust) and an attack went out with the hand up (07:13:57).
