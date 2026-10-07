@@ -4772,7 +4772,7 @@ public class ClickService extends AccessibilityService {
     private static final java.util.regex.Pattern EXP_TEXT = java.util.regex.Pattern.compile("(\\d{1,3})[.,](\\d{2,4})\\s*%");
 
     // Selling prices for the estimate (the user, 2026-10-07): gear costume pieces 35k, Protection
-    // and Luxury Protection Potion 55k, Burr and Fine Burr 195k. Anything else counts 0.
+    // and Luxury Protection Potion 55k, Burr and Fine Burr 195k, Empty Bottle 11k. Anything else counts 0.
     private static final String[] GEAR_WORDS = {"gloves", "shoes", "pants", "cloth", "suit", "coat", "robe", "legging",
             "boots", "helmet", "jacket", "armor", "vest", "skirt"};
 
@@ -4780,6 +4780,7 @@ public class ClickService extends AccessibilityService {
         String k = item.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
         if (k.contains("burr")) return 195_000;
         if (k.contains("protectionpotion")) return 55_000;
+        if (k.contains("emptybottle")) return 11_000;           // the user, 2026-10-07
         for (String w : GEAR_WORDS) if (k.contains(w)) return 35_000;
         return 0;
     }
@@ -4788,6 +4789,7 @@ public class ClickService extends AccessibilityService {
         String k = item.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
         if (k.contains("burr")) return "Burr";
         if (k.contains("protectionpotion")) return "Protection Potion";
+        if (k.contains("emptybottle")) return "Empty Bottle";
         return "gear";
     }
 
