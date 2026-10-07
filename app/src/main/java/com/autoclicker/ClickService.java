@@ -145,7 +145,8 @@ public class ClickService extends AccessibilityService {
     private boolean follow;
     private static final int FOLLOW_TICK_MS = 1200, FOLLOW_LOST_ALERT_MS = 60_000, FOLLOW_LOST_STEPS = 4;
     private static final float FOLLOW_READ_H = 0.74f;          // the Team list reads well at this size
-    private static final float FOLLOW_NEAR_W = 0.12f;          // "close": ~3-4 character widths
+    private static final float FOLLOW_NEAR_W = 0.12f;
+    private static final float FOLLOW_FAR_X = 1.5f;           // "far": 1.5x the close distance          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
     private String leaderKey, leaderShown;
     private long followHoldUntil, leaderSeenAt, lastFollowWalkAt;
@@ -5749,9 +5750,18 @@ public class ClickService extends AccessibilityService {
             }
             if (!followMayMove(now)) return;
             lastWalkLeaderDist = blocked ? 0 : tagDist;
+            boolean far = tagDist > screenW * FOLLOW_NEAR_W * FOLLOW_FAR_X;
             Log.i(TAG, "follow: " + leaderShown + " is " + Math.round(tagDist) + " px away, "
-                    + (blocked ? "blocked, stepping aside" : "walking " + ms + " ms toward them"));
+                    + (blocked ? "blocked, stepping aside" : "walking " + ms + " ms toward them")
+                    + (far && !blocked ? " (heals wait)" : ""));
             followWalk(dx * push, dy * push, ms, now);
+            if (far && !blocked) {
+                // Far behind: no heal/buff cuts this walk short (the user, 10:16: yes, only when far).
+                followMapUntil = Math.max(followMapUntil, now + FARM_PUSH_MS + ms + 100);
+            }
+            // Look again the moment the walk ends, not on the next tick (follow was slow, 10:16).
+            handler.removeCallbacks(followNow);
+            handler.postDelayed(followNow, FARM_PUSH_MS + ms + 350);
             return;
         }
         // Not on screen: the big map shows the party master as an "M" icon, and tapping a spot on
