@@ -857,6 +857,12 @@ public class ClickService extends AccessibilityService {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
                     if ("com.autoclicker.FEED".equals(i.getAction())) handler.post(() -> feedPet(-0.01f));   // test the feeding
+                    else if ("com.autoclicker.BACKPOINT".equals(i.getAction())) handler.post(() -> {
+                        // adb: the Back Point now (after a death that left us in town)
+                        revivedAt = SystemClock.uptimeMillis() - BACK_POINT_MAX_WAIT_MS;
+                        backPointTries = 0;
+                        useBackPoint();
+                    });
                     else if ("com.autoclicker.JIGGLE".equals(i.getAction())) {
                         // Test pushes: start dy px from the joystick spot, ms long, dx share of the width.
                         int dy = i.getIntExtra("dy", 0), ms = i.getIntExtra("ms", MOVE_MS);
@@ -871,6 +877,7 @@ public class ClickService extends AccessibilityService {
             android.content.IntentFilter f = new android.content.IntentFilter("com.autoclicker.SELL");
             f.addAction("com.autoclicker.SELLTRIP");
             f.addAction("com.autoclicker.FEED");
+            f.addAction("com.autoclicker.BACKPOINT");
             f.addAction("com.autoclicker.JIGGLE");
             f.addAction("com.autoclicker.LAYOUT");
             if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -1645,7 +1652,7 @@ public class ClickService extends AccessibilityService {
 
     private void onCardPage(Runnable then, String what, int tries) {
         captureRegionForOcr(BAR_LBL_L, BAR_LBL_T, BAR_LBL_W, BAR_LBL_H, crop -> {
-            char page = crop != null ? barPage(crop) : '?';
+            char page = crop != null ? barPage(atTabletScale(crop)) : '?';
             if (crop != null) crop.recycle();
             if (page == 'D') {
                 then.run();
@@ -1676,6 +1683,21 @@ public class ClickService extends AccessibilityService {
         ownTapUntil = Math.max(ownTapUntil, SystemClock.uptimeMillis() + 300 + OWN_TAP_SLACK_MS);
         dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, 300)).build(), null, null);
+    }
+
+    /**
+     * A crop enlarged to the tablet's scale, for the pictures measured there (the quick bar's D/E
+     * label never matched on the phone: "couldn't get the A/S/D page", 20:17).
+     */
+    private Bitmap atTabletScale(Bitmap crop) {
+        if (!Layout.active()) return crop;
+        float sx = Layout.sx(Layout.RIGHT), sy = Layout.sy();
+        if (sx <= 0.3f || sy <= 0.3f || (sx > 0.97f && sy > 0.97f)) return crop;
+        try {
+            return Bitmap.createScaledBitmap(crop, Math.round(crop.getWidth() / sx), Math.round(crop.getHeight() / sy), true);
+        } catch (RuntimeException | OutOfMemoryError e) {
+            return crop;
+        }
     }
 
     /** 'D' (A/S/D page), 'E' (Q/W/E) or '?' (covered, unclear). */
@@ -6768,7 +6790,9 @@ public class ClickService extends AccessibilityService {
         }
         // "Use" first (the user, 21:44): the revive item brings the character back on the spot. A
         // dialog still up after USE_REVIVE_TRIES Use taps (no item left?) gets Revive instead.
-        if (now - lastReviveAt > 30_000) reviveUseTries = 0;
+        // Only a dialog still up right after the Use tap means Use failed: dying again 25 s later
+        // (killed over and over, phone 20:13-20:17) counted too, and it fell back to Revive -> campus.
+        if (now - lastReviveAt > 9_000) reviveUseTries = 0;
         boolean inPlace = use != null && reviveUseTries < USE_REVIVE_TRIES;
         Rect pick = inPlace ? use : button;
         float x = pick != null ? pick.exactCenterX() : ask.box.exactCenterX();
@@ -6908,8 +6932,10 @@ public class ClickService extends AccessibilityService {
     private void backAtSpot() {
         if (!running || !backPointMode()) return;
         readMapName(map -> {
-            boolean back = deathMap == null || (map != null && sameMap(map, deathMap));
-            if (back || map == null) {
+            // Boost doesn't read positions, so no death map: off the campus is back ("back from the
+            // Back Point" was said in SG_Campus, phone 20:18).
+            boolean back = deathMap == null ? map != null && !isTownCampus(map) : map != null && sameMap(map, deathMap);
+            if (back || (map == null && deathMap != null)) {
                 arrivedAtSpot();
                 return;
             }
