@@ -143,7 +143,7 @@ public class ClickService extends AccessibilityService {
     // on screen and walking toward it. Rides on BOOST mode (no rings, math answered, jiggle).
     private static final String KEY_FOLLOW = "follow";
     private boolean follow;
-    private static final int FOLLOW_TICK_MS = 2000, FOLLOW_LOST_ALERT_MS = 60_000, FOLLOW_LOST_STEPS = 4;
+    private static final int FOLLOW_TICK_MS = 1200, FOLLOW_LOST_ALERT_MS = 60_000, FOLLOW_LOST_STEPS = 4;
     private static final float FOLLOW_READ_H = 0.74f;          // the Team list reads well at this size
     private static final float FOLLOW_NEAR_W = 0.12f;          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
@@ -5730,7 +5730,7 @@ public class ClickService extends AccessibilityService {
             boolean blocked = lastWalkLeaderDist > 0 && tagDist > lastWalkLeaderDist * 0.85f
                     && now - lastFollowWalkAt < FOLLOW_TICK_MS * 3;
             float dx = leaderDirX, dy = leaderDirY;
-            int ms = (int) Math.max(400, Math.min(2000, tagDist * 1000f / LURE_RUN_PX_PER_S * 0.8f));
+            int ms = (int) Math.max(400, Math.min(2500, tagDist * 1000f / LURE_RUN_PX_PER_S));   // the whole way, not 80% (too slow, 10:07)
             if (blocked) {
                 followSideSign = -followSideSign;
                 dx = -leaderDirY * followSideSign;
@@ -5769,7 +5769,7 @@ public class ClickService extends AccessibilityService {
 
     // The minimap (top right) opens the big map; X (top right) closes it.
     private static float MINIMAP_X = 2300 / 2560f, MINIMAP_Y = 270 / 1600f;
-    private static final int MAP_OPEN_MS = 1200, MAP_FOLLOW_GAP_MS = 5000, MAP_WALK_MS = 4000;
+    private static final int MAP_OPEN_MS = 1200, MAP_FOLLOW_GAP_MS = 3000, MAP_WALK_MS = 2500;   // follow: 5 s / 4 s was too slow (the user, 10:07)
     private long lastMapFollowAt, teamExpandAt;
     private static final int MAP_NEAR_BACKOFF_MS = 15_000, TEAM_EXPAND_GAP_MS = 60_000;
     private static final int FOLLOW_MAP_AFTER_MS = 8000;
