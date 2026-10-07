@@ -130,7 +130,8 @@ public class ClickService extends AccessibilityService {
     // In booster there's no tap loop to notice the keyboard, so a light tick watches for it; and the
     // presence check (reused from cooldownCheck) runs slower since nothing else needs a screenshot.
     private static final int KEYBOARD_WATCH_MS = 800;
-    private static final int BOOSTER_PRESENCE_MS = 1500;      // also the death dialog (10 s countdown)
+    private static final int BOOSTER_PRESENCE_MS = 1500, BOOST_BLIND_MS = 15_000;
+    private long lastBoostShotAt, lastBoostBlindAt;      // also the death dialog (10 s countdown)
     private final Runnable keyboardWatchTick = this::keyboardWatchTick;
     // Farmer mode (FARM on the start chooser, 2026-10-04): attacks monsters with rings you place for
     // it, kept as their own layout so the FS heal/buff rings stay put. Each ring taps on its own
@@ -4039,7 +4040,9 @@ public class ClickService extends AccessibilityService {
      * either (the user, 2026-10-08 00:15). No fighting, no pet summons; not "back" after a death.
      */
     private static boolean isTown(String map) {
-        return isTownCampus(map) || (map != null && map.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "").startsWith("marketpl"));
+        String k = map == null ? "" : map.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+        // Read cut off as "Place[31,17]" too (tablet 00:17) - it summoned the pet and walked there.
+        return isTownCampus(map) || k.startsWith("marketpl") || k.equals("place") || k.equals("etplace");
     }
 
     private static boolean isTownCampus(String map) {
@@ -6553,7 +6556,9 @@ public class ClickService extends AccessibilityService {
 
     private long lastReviveAt;
     private int reviveUseTries;
-    private static final int USE_REVIVE_TRIES = 2;
+    private static final int USE_REVIVE_TRIES = 2, REVIVE_RETAP_MS = 2500;
+    private static final String KEY_USE_X = "revive_use_x", KEY_USE_Y = "revive_use_y";
+    private float useSpotX, useSpotY;
     // After a death (the user, 07:38): no attacks in town; once revived, use the Back Point card in
     // quick slot S to return to the farming spot, then farm on. S = the middle of A/S/D (07:39).
     private static float BACK_POINT_X = 2317 / 2560f, BACK_POINT_Y = 755 / 1600f;
@@ -7015,11 +7020,15 @@ public class ClickService extends AccessibilityService {
     private void checkRevive(List<MathQuestion.Line> lines) {
         // Any mode, even manual or stopped (the user, 21:40: "whenever the char died use revive").
         long now = SystemClock.uptimeMillis();
-        if (now - lastReviveAt < 5000) return;
+        // Again after REVIVE_RETAP_MS if it's still up: the countdown is 10 s, and 5 s left one retry.
+        if (now - lastReviveAt < REVIVE_RETAP_MS) return;
         MathQuestion.Line ask = null;
         for (MathQuestion.Line l : lines) {
             String t = l.text.toLowerCase(java.util.Locale.ROOT);
-            if (t.contains("to be revived") || t.contains("wish to be reviv")) {
+            // Read loosely: "Do yoû wish to be revived?", "VANGYOu Wish to be revived?" (phone 2026-10-08).
+            String tk = t.replaceAll("[^a-z]", "");
+            if (t.contains("to be revived") || t.contains("wish to be reviv") || tk.contains("toberevived")
+                    || (tk.contains("wish") && tk.contains("reviv"))) {
                 ask = l;
                 break;
             }
@@ -7038,10 +7047,25 @@ public class ClickService extends AccessibilityService {
         // Only a dialog still up right after the Use tap means Use failed: dying again 25 s later
         // (killed over and over, phone 20:13-20:17) counted too, and it fell back to Revive -> campus.
         if (now - lastReviveAt > 9_000) reviveUseTries = 0;
-        boolean inPlace = use != null && reviveUseTries < USE_REVIVE_TRIES;
+        // Where Used was last time: when its word isn't read, tap there rather than Revive (that sent
+        // the character to town) or the dialog's middle (between the buttons: no click) - "sometimes
+        // it clicks on the used, sometimes not" (the user, 2026-10-08).
+        if (useSpotX == 0) {
+            android.content.SharedPreferences pr = getSharedPreferences(PREFS, MODE_PRIVATE);
+            useSpotX = pr.getFloat(KEY_USE_X, -1f);
+            useSpotY = pr.getFloat(KEY_USE_Y, -1f);
+        }
+        if (use != null) {
+            useSpotX = use.exactCenterX() / screenW;
+            useSpotY = use.exactCenterY() / screenH;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putFloat(KEY_USE_X, useSpotX).putFloat(KEY_USE_Y, useSpotY).apply();
+        }
+        boolean inPlace = (use != null || useSpotX > 0) && reviveUseTries < USE_REVIVE_TRIES;
         Rect pick = inPlace ? use : button;
-        float x = pick != null ? pick.exactCenterX() : ask.box.exactCenterX();
-        float y = pick != null ? pick.exactCenterY() : ask.box.bottom + ask.box.height() * 2.6f;   // measured 07:37
+        float x = pick != null ? pick.exactCenterX() : inPlace ? screenW * useSpotX : ask.box.exactCenterX();
+        float y = pick != null ? pick.exactCenterY() : inPlace ? screenH * useSpotY
+                : ask.box.bottom + ask.box.height() * 2.6f;   // measured 07:37
+        if (inPlace && use == null) Log.i(TAG, "died: \"Used\" not read - its spot from last time");
         lastReviveAt = now;
         if (inPlace) reviveUseTries++;
         String what = inPlace ? "Use" : "Revive";
@@ -7609,7 +7633,15 @@ public class ClickService extends AccessibilityService {
             // from 10 s, and the question watch's own screenshot every 3.2 s (refused when it came
             // right after this one) tapped Used 3-6 s late (phone 22:45, the user: "slow").
             if (canReadScreen()) {
+                long bnow = SystemClock.uptimeMillis();
+                if (lastBoostShotAt > 0 && bnow - lastBoostShotAt > BOOST_BLIND_MS && bnow - lastBoostBlindAt > 10 * 60_000L) {
+                    lastBoostBlindAt = bnow;
+                    Log.w(TAG, "boost: no screenshot for " + (bnow - lastBoostShotAt) / 1000 + " s - can't see deaths");
+                    Telegram.send(this, "\u26A0 Ran Online: the bot hasn't been able to see the screen for "
+                            + (bnow - lastBoostShotAt) / 1000 + " s - it can't tap Used if the character dies.");
+                }
                 captureScreen(shot -> {
+                    lastBoostShotAt = SystemClock.uptimeMillis();
                     if (!running || !booster) return;
                     if (keyboardShowing() || (gamePackage != null && !gamePackage.equals(foregroundPackage()))) return;
                     updatePresenceCheck(Prompts.presenceCheck(shot, screenW, screenH));
