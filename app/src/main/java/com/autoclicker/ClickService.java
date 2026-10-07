@@ -1156,6 +1156,7 @@ public class ClickService extends AccessibilityService {
         returning = false;
         returnGiveUpUntil = 0;
         lootIgnoreUntil = handFreeUntil = handUpSince = 0;      // a start always loots again
+        feedTripStage = 0;
         lootFailStreak = 0;
         if (run) {
             // The ⚓ spot stays until you clear it on the button (the user, 10:47: a stop and start
@@ -6622,7 +6623,12 @@ public class ClickService extends AccessibilityService {
             if (now - feedWaitSince < FEED_WAIT_MAX_MS || farmTargetHp >= 0 || now < postKillUntil) return;
         }
         feedWaitSince = 0;
+        if (farmer && feedTripStage == 0) {
+            startFeedTrip(level, now);
+            return;
+        }
         feedRunning = true;
+        feedStartedAt = now;
         feedAt = now;
         feedHold();
         Log.i(TAG, "pet: food at " + Math.round(level * 100) + "%, feeding it - opening the bag");
@@ -6633,6 +6639,82 @@ public class ClickService extends AccessibilityService {
 
     private static final int FEED_WAIT_MAX_MS = 120_000;
     private long feedWaitSince;
+
+    /*
+     * Feeding away from the fight (the user, 2026-10-08 06:10): it got stuck feeding, likely killed
+     * with the bag open. So: Start Point card (quick slot A) to the save point, feed there (the can is
+     * used on the pet card in the bag, so the pet needn't be out), then the Back Point card (S) back.
+     * Stages: 1 on the way, 2 feeding there, 3 on the way back.
+     */
+    private static final float START_POINT_X = 2164 / 2560f, START_POINT_Y = 756 / 1600f;
+    private static final int FEED_MAX_MS = 60_000, FEED_TRIP_MOVED = 8;
+    private int feedTripStage, feedTripTries, feedTripFromX, feedTripFromY;
+    private String feedTripFromMap;
+    private long feedTripAt, feedStartedAt;
+
+    private void startFeedTrip(float level, long now) {
+        feedTripStage = 1;
+        feedTripFromMap = posMap != null ? posMap : lastSeenMap;
+        feedTripFromX = posX;
+        feedTripFromY = posY;
+        feedTripTries = 1;
+        feedTripAt = now;
+        feedAt = now;
+        lootStartedAt = 0;
+        handler.removeCallbacks(lootTapTick);
+        deadUntil = now + SELL_LOAD_MS + 60_000;                   // no skills, no walking on the way
+        busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+        Log.i(TAG, "pet: food at " + Math.round(level * 100) + "%, Start Point (A) to the save point to feed it");
+        onCardPage(() -> tapAt(screenW * START_POINT_X, screenH * START_POINT_Y, "start point (feeding)"), "Start Point");
+        handler.postDelayed(this::feedTripArrived, SELL_LOAD_MS);
+    }
+
+    private void feedTripArrived() {
+        if (!running || feedTripStage != 1) return;
+        readPosition((read, x, y) -> {
+            if (!running || feedTripStage != 1) return;
+            long t = SystemClock.uptimeMillis();
+            String map = read;
+            if (map == null && lastSeenMap != null && lastSeenMapAt > feedTripAt + 1000 && t - lastSeenMapAt < 8000) map = lastSeenMap;
+            if (map == null && t - feedTripAt < 60_000) {
+                handler.postDelayed(this::feedTripArrived, 2000);
+                return;
+            }
+            boolean moved = map != null && (feedTripFromMap == null || !sameMap(map, feedTripFromMap)
+                    || (read != null && Math.hypot(x - feedTripFromX, y - feedTripFromY) > FEED_TRIP_MOVED));
+            if (!moved && map != null && feedTripTries < 2) {
+                feedTripTries++;
+                feedTripAt = t;
+                Log.w(TAG, "pet: still in " + map + " after the Start Point - trying it again");
+                onCardPage(() -> tapAt(screenW * START_POINT_X, screenH * START_POINT_Y, "start point (feeding)"), "Start Point");
+                handler.postDelayed(this::feedTripArrived, SELL_LOAD_MS);
+                return;
+            }
+            if (moved) Log.i(TAG, "pet: at the save point (" + map + "), feeding it there");
+            else Log.w(TAG, "pet: the Start Point didn't take me anywhere (" + map + ") - feeding here");
+            feedTripStage = moved ? 2 : 0;
+            deadUntil = 0;
+            busyUntil = farmHoldUntil = t;
+            feedRunning = true;
+            feedStartedAt = t;
+            feedHold();
+            handler.postDelayed(this::feedTapBag, FEED_SETTLE_MS);
+        });
+    }
+
+    /** Fed (or not) at the save point: the Back Point (S) to where it was farming. */
+    private void feedTripBack() {
+        long now = SystemClock.uptimeMillis();
+        feedTripStage = 3;
+        deathMap = feedTripFromMap;
+        revivedAt = now - DEATH_REST_MS;                          // no "still loading" wait: tap S now
+        backPointTries = 0;
+        deadUntil = now + BACK_POINT_LOAD_MS + 30_000;
+        busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+        Log.i(TAG, "pet: Back Point (S) to " + feedTripFromMap);
+        handler.removeCallbacks(useBackPoint);
+        handler.post(useBackPoint);
+    }
 
     private void feedTapBag() {
         if (!feedRunning) return;
@@ -6843,6 +6925,10 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(() -> {
             // Carry on with whatever it was doing (the user, 01:52).
             feedRunning = false;
+            if (feedTripStage == 2) {
+                feedTripBack();
+                return;
+            }
             long now = SystemClock.uptimeMillis();
             busyUntil = farmHoldUntil = now;
             panelQuietUntil = now;
@@ -6930,7 +7016,8 @@ public class ClickService extends AccessibilityService {
     private void petBarCheck(float level, long now) {
         // No pets on the campus, and none during a sell trip: right after the card the pet bar was
         // gone ("Pets are not allowed") before the campus was read, and it summoned (15:20).
-        if (!running || manual || now < deadUntil || pkHold || inCampus() || sellStage != 0 || sellRunning) return;
+        if (!running || manual || now < deadUntil || pkHold || inCampus() || sellStage != 0 || sellRunning
+                || feedTripStage != 0) return;
         // Only where the map is known: started on the campus with the map unread, it summoned (15:45).
         if (lastSeenMap == null || now - lastSeenMapAt > 20_000) return;
         if (level >= 0) {
@@ -7190,7 +7277,7 @@ public class ClickService extends AccessibilityService {
 
     private void townCheck(long now) {
         if (manual || homeMap == null || isTown(homeMap) || now < deadUntil || pkHold || now < pkRestUntil
-                || sellStage != 0 || sellRunning) {
+                || sellStage != 0 || sellRunning || feedTripStage != 0 || feedRunning) {
             townSince = 0;
             return;
         }
@@ -7268,6 +7355,7 @@ public class ClickService extends AccessibilityService {
             }
             // Out of tries: don't farm in town. Hold everything and say so.
             deadUntil = busyUntil = farmHoldUntil = t + 10 * 60_000;
+            feedTripStage = 0;
             Log.w(TAG, "died: still in " + map + " after " + backPointTries + " Back Point taps, holding");
             Telegram.send(this, "\u26A0 Ran Online: revived but still in " + map + " after " + backPointTries
                     + " Back Point taps (no card left?). Farming is on hold.");
@@ -7285,6 +7373,8 @@ public class ClickService extends AccessibilityService {
             return;
         }
         farmMobsSeenAt = farmProgressAt = lastTargetBarAt = now;
+        if (feedTripStage != 0) Log.i(TAG, "pet: back from feeding at the save point");
+        feedTripStage = 0;
         Log.i(TAG, "died: back from the Back Point, summoning the pet, then farming again");
         summonPet();
         Telegram.send(this, "\u2705 Ran Online: Back Point used, back in " + posMap + ", farming again. Check how many Back Point cards are left.");
@@ -7633,6 +7723,12 @@ public class ClickService extends AccessibilityService {
             // in a row, then the panel check X'd the open map (tablet 20:42:31-20:42:43, 20:45:19-31).
             handler.postDelayed(this::cooldownCheck, 300);
             return;
+        }
+        if (feedRunning && SystemClock.uptimeMillis() - feedStartedAt > FEED_MAX_MS) {
+            // Stuck (the user, 06:05: stuck feeding, maybe killed with the bag open): let it go, so
+            // the scans - and the death dialog check - run again.
+            Log.w(TAG, "pet: feeding took over " + FEED_MAX_MS / 1000 + " s - giving up on it");
+            feedEnd("took too long", true);
         }
         if (feedRunning) {
             // Feeding owns the screenshots: these scans took every slot and feeding's own were
