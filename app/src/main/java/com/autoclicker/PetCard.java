@@ -107,7 +107,8 @@ final class PetCard {
         if (b != src) b.recycle();
         src.recycle();
         int step = Math.max(1, Math.round(STEP * s)), n = 0;
-        for (int y = 0; y < h; y += step) for (int x = 0; x < w; x += step) n++;
+        // Transparent pixels aren't part of the picture (the loot hand: the ground shows around it).
+        for (int y = 0; y < h; y += step) for (int x = 0; x < w; x += step) if (Color.alpha(px[y * w + x]) >= 128) n++;
         int[] dx = new int[n], dy = new int[n];
         float[] v = new float[n];
         float mean = 0;
@@ -115,6 +116,7 @@ final class PetCard {
         for (int y = 0; y < h; y += step) {
             for (int x = 0; x < w; x += step) {
                 int col = px[y * w + x];
+                if (Color.alpha(col) < 128) continue;
                 dx[i] = x;
                 dy[i] = y;
                 v[i] = (Color.red(col) * 299 + Color.green(col) * 587 + Color.blue(col) * 114) / 1000f;

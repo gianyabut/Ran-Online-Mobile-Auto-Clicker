@@ -5289,6 +5289,27 @@ public class ClickService extends AccessibilityService {
      * every skill, let the last one finish animating, tap the hand, re-tap while it still shows,
      * and attack again once it's gone - or after LOOT_MAX_PAUSE_MS, then leave that item a while.
      */
+    /**
+     * The tan pixels say "maybe"; the glove's picture decides. The tan test alone took TradingHole's
+     * graffiti floor for the hand (scores 29-49 against 14), and the bot stood tapping nothing:
+     * those were the report's "left behind" (tablet 21:39-21:46). With the picture: 0.95-1.0 with
+     * the hand, 0.2 for those two.
+     */
+    private boolean lootHandPicture(Bitmap shot) {
+        if (screenW != 2560 || screenH != 1600) return true;      // measured on the tablet only
+        int x = 1665, y = 1360, r = 30;
+        float[] m = PetCard.find(this, new String[]{"loot/hand.png"}, shot, x - r, y - r, x + r, y + r, 1f);
+        boolean yes = m != null && m[0] >= LOOT_HAND_MIN;
+        if (!yes && SystemClock.uptimeMillis() - lastFakeHandLogAt > 30_000) {
+            lastFakeHandLogAt = SystemClock.uptimeMillis();
+            Log.d(TAG, "loot hand: tan pixels but not the glove (" + (m == null ? "-" : Math.round(m[0] * 100) / 100f) + "), ignoring");
+        }
+        return yes;
+    }
+
+    private static final float LOOT_HAND_MIN = 0.7f;
+    private long lastFakeHandLogAt;
+
     private void farmLootCheck(boolean handShowing, long now) {
         handReadAt = now;
         handUpAtRead = handShowing;
@@ -7592,7 +7613,7 @@ public class ClickService extends AccessibilityService {
                         // Town: no skills, no walking, no looting - just keep reading.
                         busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + 3000);
                     } else {
-                        farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH), now);
+                        farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH) && lootHandPicture(shot), now);
                         farmCheck(MobCounter.count(shot, screenW, screenH),
                                 MobCounter.targetHp(shot, screenW, screenH), now);
                     }
