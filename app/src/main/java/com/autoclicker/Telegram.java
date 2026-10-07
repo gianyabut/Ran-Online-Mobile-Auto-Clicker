@@ -45,7 +45,7 @@ final class Telegram {
 
     /** Sends text in the background; does nothing if no bot is set up. */
     static void send(Context context, String text) {
-        text = "[" + botName(context) + "] " + text;
+        final String msg = "[" + botName(context) + "] " + text;
         SharedPreferences p = context.getSharedPreferences(ClickService.PREFS, Context.MODE_PRIVATE);
         String token = p.getString(KEY_TOKEN, "").trim();
         String chat = p.getString(KEY_CHAT, "").trim();
@@ -60,7 +60,7 @@ final class Telegram {
                 c.setRequestMethod("POST");
                 c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
                 byte[] body = ("chat_id=" + URLEncoder.encode(chat, "UTF-8")
-                        + "&text=" + URLEncoder.encode(text, "UTF-8")).getBytes(StandardCharsets.UTF_8);
+                        + "&text=" + URLEncoder.encode(msg, "UTF-8")).getBytes(StandardCharsets.UTF_8);
                 try (OutputStream out = c.getOutputStream()) {
                     out.write(body);
                 }
