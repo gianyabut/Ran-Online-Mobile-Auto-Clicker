@@ -226,7 +226,8 @@ public class ClickService extends AccessibilityService {
     // Pickups take 3-4 s; an item the game won't hand over kept it tapping for 10 s with monsters
     // around (08:25:19-30, "stuck and didn't loot"). Give up LOOT_STALL_MS after the last pickup
     // (the chat says "Pick up item"/"Gained gold"; read every LOOT_CHAT_MS while looting).
-    private static final int LOOT_STALL_MS = 5000, LOOT_CHAT_MS = 1500;
+    private int lootGiveUps;
+    private static final int LOOT_STALL_MS = 3500, LOOT_CHAT_MS = 1500;   // 5 s per unpickable item added up (81 s in 17 min)
     private long lastPickupAt;
     // Not faster while looting: 1 s screenshots under memory pressure preceded Android's own
     // system process hanging and restarting (12:35-12:37, watchdog kill), as at 11:43.
@@ -5180,7 +5181,10 @@ public class ClickService extends AccessibilityService {
             Log.i(TAG, "farmer: " + (handShowing ? "couldn't pick it up in " + (now - lootStartedAt) / 1000
                     + " s, leaving it" : "picked up") + ", attacking again");
             if (handShowing) {
-                lootIgnoreUntil = now + LOOT_IGNORE_MS;
+                // The same item it can't take (someone else's drop?) brought the pause back every
+                // ~15 s (tablet 20:36-20:38): each give-up in a row ignores the hand twice as long.
+                lootGiveUps++;
+                lootIgnoreUntil = now + Math.min(60_000L, (long) LOOT_IGNORE_MS << Math.min(3, lootGiveUps - 1));
                 // A few failures in a row with nothing picked up: the bag is full (12:55, the user).
                 // Stop pausing the fight for loot for a while, and say so. Only full-length tries
                 // count: three quick 5 s give-ups while the leash pulled it about paused looting for
@@ -5195,6 +5199,7 @@ public class ClickService extends AccessibilityService {
                 }
             } else {
                 lootFailStreak = 0;
+                lootGiveUps = 0;
             }
             lootStartedAt = 0;
             handler.removeCallbacks(lootTapTick);
