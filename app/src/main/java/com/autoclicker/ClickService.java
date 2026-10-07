@@ -145,7 +145,7 @@ public class ClickService extends AccessibilityService {
     private boolean follow;
     private static final int FOLLOW_TICK_MS = 1200, FOLLOW_LOST_ALERT_MS = 60_000, FOLLOW_LOST_STEPS = 4;
     private static final float FOLLOW_READ_H = 0.74f;          // the Team list reads well at this size
-    private static final float FOLLOW_NEAR_W = 0.12f;
+    private static final float FOLLOW_NEAR_W = 0.08f;          // "close": ~2-3 character widths (0.12 trailed behind, 10:20)
     private static final float FOLLOW_FAR_X = 1.5f;           // "far": 1.5x the close distance          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
     private String leaderKey, leaderShown;
