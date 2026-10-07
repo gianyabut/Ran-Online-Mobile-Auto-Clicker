@@ -19,6 +19,7 @@ final class Telegram {
 
     static final String KEY_TOKEN = "tg_token";
     static final String KEY_CHAT = "tg_chat";
+    static final String KEY_NAME = "bot_name";
     private static final String TAG = "AutoClicker";
 
     private Telegram() {
@@ -29,8 +30,22 @@ final class Telegram {
         return !p.getString(KEY_TOKEN, "").isEmpty() && !p.getString(KEY_CHAT, "").isEmpty();
     }
 
+    /**
+     * This bot's name, shown first in every message: with two or more bots in one channel nobody
+     * could tell whose log it was (the user, 2026-10-07). Set on the app screen; by default the
+     * device kind (Tablet / Phone).
+     */
+    static String botName(Context context) {
+        String n = context.getSharedPreferences(ClickService.PREFS, Context.MODE_PRIVATE).getString(KEY_NAME, "").trim();
+        if (!n.isEmpty()) return n;
+        android.util.DisplayMetrics m = context.getResources().getDisplayMetrics();
+        float shortDp = Math.min(m.widthPixels, m.heightPixels) / m.density;
+        return shortDp >= 600 ? "Tablet" : "Phone";
+    }
+
     /** Sends text in the background; does nothing if no bot is set up. */
     static void send(Context context, String text) {
+        text = "[" + botName(context) + "] " + text;
         SharedPreferences p = context.getSharedPreferences(ClickService.PREFS, Context.MODE_PRIVATE);
         String token = p.getString(KEY_TOKEN, "").trim();
         String chat = p.getString(KEY_CHAT, "").trim();

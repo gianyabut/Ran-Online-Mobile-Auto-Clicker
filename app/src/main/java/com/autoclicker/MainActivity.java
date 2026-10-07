@@ -104,6 +104,11 @@ public class MainActivity extends Activity {
                 + "When the game asks if you're there, the alert also goes to Telegram. "
                 + "Bot token from @BotFather, and your chat id.");
         root.addView(tgLabel);
+        EditText botName = new EditText(this);
+        botName.setHint("Bot name (shown first in its messages), e.g. " + Telegram.botName(this));
+        botName.setSingleLine(true);
+        botName.setText(prefs.getString(Telegram.KEY_NAME, ""));
+        root.addView(botName, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         EditText tgToken = new EditText(this);
         tgToken.setHint("Bot token");
         tgToken.setSingleLine(true);
@@ -118,7 +123,8 @@ public class MainActivity extends Activity {
         tgSave.setText("Save and send a test");
         tgSave.setOnClickListener(v -> {
             prefs.edit().putString(Telegram.KEY_TOKEN, tgToken.getText().toString().trim())
-                    .putString(Telegram.KEY_CHAT, tgChat.getText().toString().trim()).apply();
+                    .putString(Telegram.KEY_CHAT, tgChat.getText().toString().trim())
+                    .putString(Telegram.KEY_NAME, botName.getText().toString().trim()).apply();
             Telegram.send(this, "✅ Auto Clicker: Telegram alerts are on.");
             Toast.makeText(this, "Saved. A test message is on its way.", Toast.LENGTH_SHORT).show();
         });

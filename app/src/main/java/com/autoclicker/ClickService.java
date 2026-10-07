@@ -5800,7 +5800,7 @@ public class ClickService extends AccessibilityService {
             boolean far = tagDist > screenW * FOLLOW_NEAR_W * FOLLOW_FAR_X;
             Log.i(TAG, "follow: " + leaderShown + " is " + Math.round(tagDist) + " px away, "
                     + (blocked ? "blocked, stepping aside" : "walking " + ms + " ms toward them")
-                    + (far && !blocked ? " (heals wait)" : ""));
+                    + (far && !blocked && !booster ? " (heals wait)" : ""));
             followWalk(dx * push, dy * push, ms, now);
             if (far && !blocked) {
                 // Far behind: no heal/buff cuts this walk short (the user, 10:16: yes, only when far).
