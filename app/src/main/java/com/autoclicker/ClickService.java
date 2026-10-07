@@ -4887,10 +4887,20 @@ public class ClickService extends AccessibilityService {
         return item.length() < 3 ? null : "item " + item;
     }
 
+    private static final int GOLD_REPEAT_MS = 10_000;
+    private final java.util.HashMap<Long, Long> recentGold = new java.util.HashMap<>();
+
     private void countLootEntry(String entry) {
         if (entry.startsWith("gold ")) {
             try {
                 long n = Long.parseLong(entry.substring(5));
+                // The same amount again within GOLD_REPEAT_MS is the same line read twice (the chat
+                // match still slipped now and then: "+316 / +294 gold" twice, 6 s apart, 21:33).
+                long t = SystemClock.uptimeMillis();
+                Long seen = recentGold.get(n);
+                if (seen != null && t - seen < GOLD_REPEAT_MS) return;
+                recentGold.put(n, t);
+                if (recentGold.size() > 40) recentGold.clear();
                 if (n > 0 && n < 10_000_000) {
                     lootGold += n;
                     repGoldDrops++;
