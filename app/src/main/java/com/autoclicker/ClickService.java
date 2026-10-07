@@ -7262,6 +7262,12 @@ public class ClickService extends AccessibilityService {
     /** Repeats while running: one screenshot updates the ready state of every watching target. */
     private void cooldownCheck() {
         if (!running) return;
+        if (feedRunning) {
+            // Feeding owns the screenshots: these scans took every slot and feeding's own were
+            // refused three times ("no screenshot", tablet 17:57).
+            handler.postDelayed(this::cooldownCheck, 1500);
+            return;
+        }
         if (booster) {
             // Booster does no buff/cooldown work; the only screenshot it needs is the presence check
             // (the "are you there? / Move" panel), and it can be slow.
