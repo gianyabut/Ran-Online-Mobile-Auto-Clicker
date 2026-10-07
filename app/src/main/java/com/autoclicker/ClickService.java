@@ -5831,7 +5831,10 @@ public class ClickService extends AccessibilityService {
             }
             // The last M spot only means something on the map it was seen on (not after a portal).
             boolean sameMapAsLastM = lastMapMMap == null || map == null || sameMap(map, lastMapMMap);
-            if (m == null && arrow != null && lastMapM != null && t - lastMapMAt < LAST_M_KEEP_MS && sameMapAsLastM) {
+            // A portal only if they've been off our screen a while: an M hidden under our arrow
+            // (beside us) sent us walking to a stale spot (phone 09:57).
+            if (m == null && arrow != null && lastMapM != null && t - lastMapMAt < LAST_M_KEEP_MS && sameMapAsLastM
+                    && (leaderSeenAt == 0 || t - leaderSeenAt > 15_000)) {
                 portalChase = true;
                 float away = (float) Math.hypot(lastMapM[0] - arrow[0], lastMapM[1] - arrow[1]);
                 if (away > screenW * 0.025f) {
