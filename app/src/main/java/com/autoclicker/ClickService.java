@@ -227,7 +227,7 @@ public class ClickService extends AccessibilityService {
     // around (08:25:19-30, "stuck and didn't loot"). Give up LOOT_STALL_MS after the last pickup
     // (the chat says "Pick up item"/"Gained gold"; read every LOOT_CHAT_MS while looting).
     private int lootGiveUps;
-    private long lootGiveUpAt;
+    private long lootGiveUpAt;
     private static final int LOOT_STALL_MS = 3500, LOOT_CHAT_MS = 1500;   // 5 s per unpickable item added up (81 s in 17 min)
     private long lastPickupAt;
     // Not faster while looting: 1 s screenshots under memory pressure preceded Android's own
@@ -2478,16 +2478,26 @@ public class ClickService extends AccessibilityService {
         // Only a bar that went away reading low is a kill: skating monsters slide out of the selection
         // with HP left, and holding for their "drop" walked away from a live monster (the user, 08:05).
         // One punch takes ~40% (kills from 37-40% dropped loot, 08:07), so "low" is up to KILL_MAX_HP.
+        // A kill the bar never showed going away: the game targets the next monster at once, so the
+        // bar just refills (39% -> 99%). The report had 3 kills for 23 pickups (21:05-21:10).
+        if (target && farmTargetHp >= 0 && farmTargetHp <= KILL_MAX_HP && targetHp >= farmTargetHp + 0.35f) {
+            repKills++;
+            Log.i(TAG, "farmer: kill (" + Math.round(farmTargetHp * 100) + "%, the next target took over at "
+                    + Math.round(targetHp * 100) + "%)");
+        }
         if (!target && farmTargetHp > KILL_MAX_HP && lootStartedAt == 0) {
-            repLost++;
+            // Our own X (going home, unsticking) and a bar never hit (99%: the game switched targets)
+            // didn't get away.
+            if (farmTargetHp < 0.95f && now - ownDropAt > 3000) repLost++;
             Log.i(TAG, "farmer: target lost at " + Math.round(farmTargetHp * 100) + "%, not a kill - attacking on");
             schedulePump(0);
         }
-        if (!target && farmTargetHp >= 0 && farmTargetHp <= KILL_MAX_HP && lootStartedAt == 0 && now >= lootIgnoreUntil) {
+        boolean killed = !target && farmTargetHp >= 0 && farmTargetHp <= KILL_MAX_HP;
+        if (killed) repKills++;                               // counted during a loot pause too
+        if (killed && lootStartedAt == 0 && now >= lootIgnoreUntil) {
             postKillUntil = now + POST_KILL_HOLD_MS;
             busyUntil = Math.max(busyUntil, postKillUntil);
             killAt = now;
-            repKills++;
             killStepDone = false;
             dropSeenAt = 0;
             dropSteps = 0;
@@ -2820,6 +2830,7 @@ public class ClickService extends AccessibilityService {
     /** Drop the selected target (its bar's ✕) and walk a step, so the game picks another monster. */
     private void dropTargetAndStep(long now) {
         farmProgressAt = now;
+        ownDropAt = SystemClock.uptimeMillis();
         tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "drop target");
         busyUntil = farmHoldUntil = now + TAP_MS + DESELECT_SETTLE_MS + FARM_PUSH_MS + FARM_WALK_MS
                 + FARM_WALK_SETTLE_MS;
@@ -3559,7 +3570,10 @@ public class ClickService extends AccessibilityService {
             Log.i(TAG, "farmer: " + Math.round(dist) + " from home " + homeMap + "[" + homeX + "," + homeY + "] at ["
                     + posX + "," + posY + "], no attacks until back");
             repHomeTrips++;
-            if (targetHp >= 0) tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "deselect (going home)");
+            if (targetHp >= 0) {
+                ownDropAt = SystemClock.uptimeMillis();
+                tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "deselect (going home)");
+            }
             return true;
         }
         if (dist <= leashBackR()) {
@@ -4753,6 +4767,9 @@ public class ClickService extends AccessibilityService {
                 checkInventoryLine(l.text);
                 String entry = lootEntry(l.text);
                 if (entry == null) continue;
+                // One spelling per item, so a misread line still matches the last read (they were
+                // counted twice) and the report lists each item once.
+                if (entry.startsWith("item ")) entry = "item " + canonicalItem(entry.substring(5));
                 cur.add(entry);
                 curKeys.add(entry.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", ""));   // OCR slips
             }
@@ -4778,6 +4795,54 @@ public class ClickService extends AccessibilityService {
     }
 
     /** "gold 367" or "item <name>" for a loot line, else null. */
+    // The loot seen here so far, for the chat's misreads ("Medigm HP Recovery Potion", "Big MP
+    // Recovery Potioin'] VANGIELYNROSE", "Empty Bottla": tablet reports 20:44-20:59).
+    private static final String[] ITEM_NAMES = {"Big HP Recovery Potion", "Big MP Recovery Potion",
+            "Big SP Recovery Potion", "Medium HP Recovery Potion", "Medium MP Recovery Potion",
+            "Medium SP Recovery Potion", "Small HP Recovery Potion", "Small MP Recovery Potion",
+            "Small SP Recovery Potion", "Empty Bottle", "Bread", "Destiny Box", "Burr", "Fine Burr",
+            "Protection Potion", "Luxury Protection Potion"};
+    // The name ends at its closing quote; after it comes another line's text.
+    private static final String ITEM_END = "['\"\\[\\]|" + (char) 0x2018 + (char) 0x2019 + "]";
+    private final List<String> seenItemNames = new ArrayList<>();
+
+    private static String itemKey(String s) {
+        return java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+                .toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]", "");
+    }
+
+    /** The item's usual spelling: cut at its closing quote, and a near miss is the same item. */
+    private String canonicalItem(String raw) {
+        String s = raw.split(ITEM_END, 2)[0].replaceAll("\\s+", " ").trim();
+        if (s.length() < 3) s = raw.trim();
+        String k = itemKey(s);
+        if (k.isEmpty()) return s;
+        String best = null;
+        float bestSim = 0;
+        List<String> names = new ArrayList<>(java.util.Arrays.asList(ITEM_NAMES));
+        names.addAll(seenItemNames);
+        for (String n : names) {
+            String nk = itemKey(n);
+            float sim = 1f - editDistance(k, nk) / (float) Math.max(k.length(), nk.length());
+            // Cut short ("Big SP Recovery"): compare with as much of the name.
+            if (k.length() >= 10 && k.length() < nk.length()) {
+                String part = nk.substring(0, k.length());
+                sim = Math.max(sim, 1f - editDistance(k, part) / (float) k.length() - 0.05f);
+            }
+            // Another line's text run on ("Big SP Recovery PotionVANGIELYNROSE"): just the start.
+            if (nk.length() >= 8 && k.length() > nk.length()) {
+                sim = Math.max(sim, 1f - editDistance(k.substring(0, nk.length()), nk) / (float) nk.length() - 0.05f);
+            }
+            if (sim > bestSim) {
+                bestSim = sim;
+                best = n;
+            }
+        }
+        if (best != null && bestSim >= 0.8f) return best;
+        if (seenItemNames.size() < 200) seenItemNames.add(s);
+        return s;
+    }
+
     private static String lootEntry(String line) {
         java.util.regex.Matcher g = GOLD_LINE.matcher(line);
         if (g.find()) {
@@ -4794,7 +4859,10 @@ public class ClickService extends AccessibilityService {
         if (entry.startsWith("gold ")) {
             try {
                 long n = Long.parseLong(entry.substring(5));
-                if (n > 0 && n < 10_000_000) lootGold += n;
+                if (n > 0 && n < 10_000_000) {
+                    lootGold += n;
+                    repGoldDrops++;
+                }
                 Log.i(TAG, "loot: +" + n + " gold");
             } catch (NumberFormatException ignored) {
             }
@@ -4810,7 +4878,8 @@ public class ClickService extends AccessibilityService {
     }
 
     // The 5-minute farm report (the user, 2026-10-07: kills too, to make farming more efficient).
-    private int repKills, repLost, repPickups, repLootLeft, repHomeTrips, repSearchWalks, repDeaths;
+    private int repKills, repLost, repPickups, repLootLeft, repHomeTrips, repSearchWalks, repDeaths, repGoldDrops;
+    private long ownDropAt;                                   // our own X on the target bar
     private long repDeathAt, sessKills, sessGold, sessStart;
     private float repPetLevel = -1;
 
@@ -4844,7 +4913,7 @@ public class ClickService extends AccessibilityService {
     private long sessEstimate;
 
     private void repReset() {
-        repKills = repLost = repPickups = repLootLeft = repHomeTrips = repSearchWalks = repDeaths = repLevelUps = 0;
+        repKills = repLost = repPickups = repLootLeft = repHomeTrips = repSearchWalks = repDeaths = repLevelUps = repGoldDrops = 0;
         repMobSum = repMobScans = repLootMs = repHomeMs = 0;
         expAtStart = expNow;
     }
@@ -4916,6 +4985,8 @@ public class ClickService extends AccessibilityService {
             kinds.merge(itemKind(e.getKey()), e.getValue(), Integer::sum);
         }
         long estimate = lootGold + itemsWorth;
+        int itemCount = 0;
+        for (int c : lootItems.values()) itemCount += c;
         sessEstimate += estimate;
         sb.append("\n\uD83D\uDC8E Estimate: ").append(String.format(L, "%,d", estimate));
         if (itemsWorth > 0) {
@@ -4929,7 +5000,8 @@ public class ClickService extends AccessibilityService {
             sb.append(String.format(L, " = %,d)", itemsWorth));
         }
         sb.append(String.format(L, " \u00B7 ~%,d/h", Math.round(estimate * 60 / mins)));
-        sb.append("\n\uD83C\uDF92 Picked up: ").append(repPickups);
+        sb.append("\n\uD83C\uDF92 Picked up: ").append(itemCount).append(itemCount == 1 ? " item" : " items");
+        if (repGoldDrops > 0) sb.append(" + ").append(repGoldDrops).append(" gold");
         if (repLootLeft > 0) sb.append(" \u00B7 left behind: ").append(repLootLeft);
         for (java.util.Map.Entry<String, Integer> e : lootItems.entrySet()) {
             sb.append("\n   ").append(e.getValue()).append(" x ").append(e.getKey());
