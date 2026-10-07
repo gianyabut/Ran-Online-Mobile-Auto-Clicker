@@ -5396,11 +5396,14 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(lootTapTick, wait);
     }
 
-    /** Every 2 s; every second near a kill (low target HP, or just after one) to catch the loot. */
+    /**
+     * Every 2 s; every second in a fight or just after a kill, to catch the loot hand: at 2 s (p90
+     * 3.9 s) the hand sat there unseen and the user saw the loot "delaying" (tablet 21:55-22:00).
+     */
     private int farmScanMs() {
         if (lootStartedAt > 0) return LOOT_SCAN_MS;
         long now = SystemClock.uptimeMillis();
-        boolean nearKill = now < postKillUntil || (farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP);
+        boolean nearKill = now < postKillUntil || farmTargetHp >= 0;
         return nearKill ? KILL_SCAN_MS : FARM_SCAN_MS;
     }
 
@@ -6650,8 +6653,12 @@ public class ClickService extends AccessibilityService {
                 if (can == null || can[0] < FEED_MIN) {
                     // Other feeds look different: try the first row's columns 2-4 by the item's name
                     // (the user, 2026-10-07: food there too). One can per feeding all the same.
-                    Log.i(TAG, "pet: no Advanced Feed by its picture - trying row 1, columns 2-4");
-                    feedTrySlot(2);
+                    // Where the food was last time first: trying 2, 3, 4 in turn held the skills ~20 s
+                    // (tablet 22:00:48-22:01:09, the user: "it isnt tapping on the skills button").
+                    int last = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_FEED_COL, 0);
+                    feedOrder = last >= 2 && last <= 4 ? new int[]{last, last == 2 ? 3 : 2, last == 4 ? 3 : 4} : new int[]{2, 3, 4};
+                    Log.i(TAG, "pet: no Advanced Feed by its picture - trying row 1, column " + feedOrder[0] + " first");
+                    feedTrySlot(0);
                     return;
                 }
                 if (false) {
@@ -6669,10 +6676,13 @@ public class ClickService extends AccessibilityService {
         });
     }
 
-    /** Taps row 1, column col of the bag; a "Feed" in the item window's name -> Use on..., else the next. */
-    private void feedTrySlot(int col) {
+    private static final String KEY_FEED_COL = "feed_col";
+    private int[] feedOrder = {2, 3, 4};
+
+    /** Taps row 1, column feedOrder[i] of the bag; a "Feed" in the item window's name -> Use on..., else the next. */
+    private void feedTrySlot(int i) {
         if (!feedRunning) return;
-        if (col > 4) {
+        if (i >= feedOrder.length) {
             feedBackoffUntil = SystemClock.uptimeMillis() + FEED_NO_FOOD_BACKOFF_MS;
             Log.w(TAG, "pet: no pet food in row 1, columns 2-4");
             Telegram.send(this, "\uD83D\uDC3E Ran Online: your pet is hungry but there's no pet food in the bag (row 1, columns 2-4). Please add some - I'll look again in 30 min.");
@@ -6680,6 +6690,7 @@ public class ClickService extends AccessibilityService {
             return;
         }
         feedHold();
+        int col = feedOrder[i];
         float x = screenW * (INV_SLOT1_X + (col - 1) * INV_SLOT_DX), y = screenH * INV_SLOT1_Y;
         tapAt(x, y, "bag slot " + col);
         handler.postDelayed(() -> captureForOcr(shot -> {
@@ -6688,7 +6699,7 @@ public class ClickService extends AccessibilityService {
                 return;
             }
             if (shot == null) {
-                feedTrySlot(col + 1);
+                feedTrySlot(i + 1);
                 return;
             }
             Ocr.read(shot, (lines, words) -> {
@@ -6700,12 +6711,13 @@ public class ClickService extends AccessibilityService {
                 }
                 if (feed) {
                     Log.i(TAG, "pet: pet food in column " + col);
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_FEED_COL, col).apply();
                     feedUseOn(0);
                     return;
                 }
                 // Not food (or an empty slot): close its window if one came up, then the next column.
                 tapAt(screenW * ITEM_CLOSE_X, screenH * ITEM_CLOSE_Y, "item window X");
-                handler.postDelayed(() -> feedTrySlot(col + 1), 900);
+                handler.postDelayed(() -> feedTrySlot(i + 1), 900);
             }, true);
         }), FEED_STEP_MS);
     }
