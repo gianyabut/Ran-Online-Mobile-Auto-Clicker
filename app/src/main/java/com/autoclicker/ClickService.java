@@ -6805,10 +6805,10 @@ public class ClickService extends AccessibilityService {
             // PK: wait it out in town (useBackPoint holds until it's over); not a 3-deaths death.
             deadUntil = now + PK_HOLD_CHECK_MS + BACK_POINT_LOAD_MS;
             busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
-            if (farmer) handler.postDelayed(useBackPoint, BACK_POINT_AFTER_MS);
+            if (backPointMode()) handler.postDelayed(useBackPoint, BACK_POINT_AFTER_MS);
             Log.w(TAG, "died during the PK period - staying in town until it's over");
             Telegram.send(this, "💀 Ran Online: killed during PK time - tapped Revive"
-                    + (farmer ? ", staying in town until PK is over, then the Back Point." : "."));
+                    + (backPointMode() ? ", staying in town until PK is over, then the Back Point." : "."));
             return;
         }
         deathTimes.addLast(now);
@@ -6831,10 +6831,11 @@ public class ClickService extends AccessibilityService {
                     + " min, then the Back Point and farming again.");
             return;
         }
-        if (farmer) handler.postDelayed(useBackPoint, BACK_POINT_AFTER_MS);
+        if (backPointMode()) handler.postDelayed(useBackPoint, BACK_POINT_AFTER_MS);
         Telegram.send(this, "\uD83D\uDC80 Ran Online: your character died - tapped Revive"
                 + (farmer ? ", using the Back Point card (slot S) next (death " + deathTimes.size() + " of "
-                + DEATHS_TO_REST + " before a " + DEATH_REST_MS / 60_000 + " min rest)." : "."));
+                + DEATHS_TO_REST + " before a " + DEATH_REST_MS / 60_000 + " min rest)."
+                : booster ? ", using the Back Point card (slot S) next." : "."));
     }
 
     /** Revived in town: the Back Point card (slot S) takes the character back to where it died. */
@@ -6858,8 +6859,13 @@ public class ClickService extends AccessibilityService {
         });
     }
 
+    /** Modes that go back with the Back Point after a Revive: Farmer, and boost (the user, 2026-10-07). */
+    private boolean backPointMode() {
+        return farmer || booster;
+    }
+
     private void useBackPoint() {
-        if (!running || !farmer || manual) return;
+        if (!running || !backPointMode() || manual) return;
         long now = SystemClock.uptimeMillis();
         if (pkNow()) {
             // PK time (a PK death, or a 3-deaths rest ending in it): stay in town till it's over.
@@ -6900,7 +6906,7 @@ public class ClickService extends AccessibilityService {
     }
 
     private void backAtSpot() {
-        if (!running || !farmer) return;
+        if (!running || !backPointMode()) return;
         readMapName(map -> {
             boolean back = deathMap == null || (map != null && sameMap(map, deathMap));
             if (back || map == null) {
@@ -6922,10 +6928,15 @@ public class ClickService extends AccessibilityService {
     }
 
     private void arrivedAtSpot() {
-        if (!running || !farmer) return;
+        if (!running || !backPointMode()) return;
         long now = SystemClock.uptimeMillis();
         deadUntil = 0;
         busyUntil = farmHoldUntil = now;
+        if (!farmer) {
+            Log.i(TAG, "died: back from the Back Point (boost), carrying on");
+            Telegram.send(this, "\u2705 Ran Online: Back Point used after the Revive, back where it died. Check how many Back Point cards are left.");
+            return;
+        }
         farmMobsSeenAt = farmProgressAt = lastTargetBarAt = now;
         Log.i(TAG, "died: back from the Back Point, summoning the pet, then farming again");
         summonPet();
