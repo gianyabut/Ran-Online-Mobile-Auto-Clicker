@@ -5638,6 +5638,14 @@ public class ClickService extends AccessibilityService {
             }
             followNoPartyLogged = false;
         } else if (leaderKey == null) {
+            // Collapsed to its "Team" button (phone 09:42): open it once in a while - the names
+            // let follow go by the master's name tag instead of opening the big map all the time.
+            if (header != null && now - teamExpandAt > TEAM_EXPAND_GAP_MS) {
+                teamExpandAt = now;
+                Log.i(TAG, "follow: the Team list is collapsed - tapping Team to open it");
+                tapAt(header.exactCenterX(), header.exactCenterY(), "team list");
+                return;
+            }
             // Team list collapsed (13:19): no name to look for on screen, but the big map's M is
             // the party master all the same.
             if (!followNoPartyLogged) Log.i(TAG, "follow: no Team list on screen - following the M on the map");
@@ -5718,7 +5726,8 @@ public class ClickService extends AccessibilityService {
     // The minimap (top right) opens the big map; X (top right) closes it.
     private static float MINIMAP_X = 2300 / 2560f, MINIMAP_Y = 270 / 1600f;
     private static final int MAP_OPEN_MS = 1200, MAP_FOLLOW_GAP_MS = 5000, MAP_WALK_MS = 4000;
-    private long lastMapFollowAt;
+    private long lastMapFollowAt, teamExpandAt;
+    private static final int MAP_NEAR_BACKOFF_MS = 15_000, TEAM_EXPAND_GAP_MS = 60_000;
     // Through portals (the user, 12:53: "the bot has to follow it after the portal"): the M leaves
     // the map where the master stepped through, so walk to where it was last seen, then a little
     // past it the same way to step in. The new map shows the M again.
@@ -5817,6 +5826,8 @@ public class ClickService extends AccessibilityService {
             float d = (float) Math.hypot(m[0] - arrow[0], m[1] - arrow[1]);
             if (d < screenW * 0.03f) {
                 Log.i(TAG, "follow: map: the M is right by us");
+                // Together: no need to look again in 5 s (it reopened the map every 6 s, phone 09:42).
+                lastMapFollowAt = SystemClock.uptimeMillis() + MAP_NEAR_BACKOFF_MS;
                 closeMap();
                 return;
             }
