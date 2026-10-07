@@ -228,8 +228,8 @@ public class ClickService extends AccessibilityService {
     // around (08:25:19-30, "stuck and didn't loot"). Give up LOOT_STALL_MS after the last pickup
     // (the chat says "Pick up item"/"Gained gold"; read every LOOT_CHAT_MS while looting).
     private int lootGiveUps;
-    private static final int LOOT_RETRY_MS = 2000, HAND_STUCK_MS = 30_000, HAND_FREE_MS = 60_000;
-    private long handUpSince, handFreeUntil;
+    private static final int LOOT_RETRY_MS = 2000, HAND_STUCK_MS = 30_000, HAND_FREE_MS = 60_000, HAND_RETRY_STUCK_MS = 6000;
+    private long handUpSince, handFreeUntil, bagFullUntil;
     private long lootGiveUpAt;
     private static final int LOOT_STALL_MS = 3500, LOOT_CHAT_MS = 1500;   // 5 s per unpickable item added up (81 s in 17 min)
     private long lastPickupAt;
@@ -2487,6 +2487,7 @@ public class ClickService extends AccessibilityService {
         // bar just refills (39% -> 99%). The report had 3 kills for 23 pickups (21:05-21:10).
         if (target && farmTargetHp >= 0 && farmTargetHp <= KILL_MAX_HP && targetHp >= farmTargetHp + 0.35f) {
             repKills++;
+            retryStuckHand(now);
             Log.i(TAG, "farmer: kill (" + Math.round(farmTargetHp * 100) + "%, the next target took over at "
                     + Math.round(targetHp * 100) + "%)");
             if (lootStartedAt == 0 && now >= lootIgnoreUntil) {
@@ -2502,7 +2503,10 @@ public class ClickService extends AccessibilityService {
             schedulePump(0);
         }
         boolean killed = !target && farmTargetHp >= 0 && farmTargetHp <= KILL_MAX_HP;
-        if (killed) repKills++;                               // counted during a loot pause too
+        if (killed) {
+            repKills++;                                       // counted during a loot pause too
+            retryStuckHand(now);
+        }
         if (killed && lootStartedAt == 0 && now >= lootIgnoreUntil) startKillHold(now);
         if (!target && now < postKillUntil && lootStartedAt == 0) {
             if (dropSeenAt > killAt) {
@@ -5108,6 +5112,17 @@ public class ClickService extends AccessibilityService {
         killHoldDrops = 0;
     }
 
+    /**
+     * An item it can't reach keeps the one loot hand up, and ignoring it covered every new drop too:
+     * no looting for minutes (tablet 07:13-07:17, behind the crates). After each kill, one more try
+     * at the hand; nothing picked up within HAND_RETRY_STUCK_MS -> ignored again.
+     */
+    private void retryStuckHand(long now) {
+        if (now >= handFreeUntil || now < bagFullUntil) return;
+        handFreeUntil = lootIgnoreUntil = now;
+        handUpSince = now - HAND_STUCK_MS + HAND_RETRY_STUCK_MS;
+    }
+
     /** The next target, locked before the drop landed: X it, so the character stays by the drop. */
     private void holdNextTarget(long now) {
         killHoldDrops++;
@@ -5379,7 +5394,7 @@ public class ClickService extends AccessibilityService {
                 // 5 min (08:49), and the user saw "not looting".
                 if (!gotSome && now - lootStartedAt >= LOOT_MAX_PAUSE_MS && ++lootFailStreak >= LOOT_FAILS_TO_PAUSE) {
                     lootFailStreak = 0;
-                    lootIgnoreUntil = handFreeUntil = now + LOOT_FULL_PAUSE_MS;
+                    lootIgnoreUntil = handFreeUntil = bagFullUntil = now + LOOT_FULL_PAUSE_MS;
                     Log.w(TAG, "farmer: " + LOOT_FAILS_TO_PAUSE + " pickups failed in a row, inventory full?"
                             + " Not looting for " + LOOT_FULL_PAUSE_MS / 60_000 + " min");
                     Telegram.send(this, "🎒 Ran Online: looting paused for " + LOOT_FULL_PAUSE_MS / 60_000
