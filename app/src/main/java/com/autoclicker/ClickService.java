@@ -146,7 +146,9 @@ public class ClickService extends AccessibilityService {
     private static final int FOLLOW_TICK_MS = 1200, FOLLOW_LOST_ALERT_MS = 60_000, FOLLOW_LOST_STEPS = 4;
     private static final float FOLLOW_READ_H = 0.74f;          // the Team list reads well at this size
     private static final float FOLLOW_NEAR_W = 0.08f;          // "close": ~2-3 character widths (0.12 trailed behind, 10:20)
-    private static final float FOLLOW_FAR_X = 1.5f;           // "far": 1.5x the close distance          // "close": ~3-4 character widths
+    private static final float FOLLOW_FAR_X = 1.5f;           // "far": 1.5x the close distance
+    private static final float FOLLOW_MAP_FAR = 0.22f;        // farther than this on screen: walk by the map
+    private static final float FOLLOW_MAP_NEAR = 0.012f;      // M this close to our arrow on the map = together          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
     private String leaderKey, leaderShown;
     private long followHoldUntil, leaderSeenAt, lastFollowWalkAt;
@@ -5737,6 +5739,15 @@ public class ClickService extends AccessibilityService {
             leaderDirX = (tag.exactCenterX() - screenW * 0.5f) / Math.max(1f, tagDist);
             leaderDirY = (tag.exactCenterY() - screenH * 0.53f) / Math.max(1f, tagDist);
             if (tagDist <= screenW * FOLLOW_NEAR_W) return;            // close enough (or it's us)
+            // Far: the map's tap walks the whole way around walls; the joystick is for near (the
+            // user, 10:27: "if it is near use the simple nav, if not use the mini map").
+            if (tagDist > screenW * FOLLOW_MAP_FAR && now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
+                if (followMayMove(now)) {
+                    Log.i(TAG, "follow: " + leaderShown + " is " + Math.round(tagDist) + " px away - by the map");
+                    mapFollow(now);
+                }
+                return;
+            }
             // Didn't get closer on the last walk: something's in the way, step sideways a moment.
             boolean blocked = lastWalkLeaderDist > 0 && tagDist > lastWalkLeaderDist * 0.85f
                     && now - lastFollowWalkAt < FOLLOW_TICK_MS * 3;
@@ -5897,7 +5908,9 @@ public class ClickService extends AccessibilityService {
             portalPushes = 0;
             portalChase = false;
             float d = (float) Math.hypot(m[0] - arrow[0], m[1] - arrow[1]);
-            if (d < screenW * 0.03f) {
+            // "By us" only when it really touches our arrow: 3% of the width on the map called a
+            // master 700-900 px away on screen "right by us" and never tapped (phone 10:27).
+            if (d < screenW * FOLLOW_MAP_NEAR) {
                 Log.i(TAG, "follow: map: the M is right by us");
                 // Together: no need to look again in 5 s (it reopened the map every 6 s, phone 09:42).
                 lastMapFollowAt = SystemClock.uptimeMillis() + MAP_NEAR_BACKOFF_MS;
