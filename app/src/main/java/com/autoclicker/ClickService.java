@@ -5790,7 +5790,7 @@ public class ClickService extends AccessibilityService {
     // The minimap (top right) opens the big map; X (top right) closes it.
     private static float MINIMAP_X = 2300 / 2560f, MINIMAP_Y = 270 / 1600f;
     private static final int MAP_OPEN_MS = 1200, MAP_FOLLOW_GAP_MS = 3000, MAP_WALK_MS = 2500;   // follow: 5 s / 4 s was too slow (the user, 10:07)
-    private long lastMapFollowAt, teamExpandAt;
+    private long lastMapFollowAt, teamExpandAt, lastMapMTapAt;
     private static final int MAP_NEAR_BACKOFF_MS = 15_000, TEAM_EXPAND_GAP_MS = 60_000;
     private static final int FOLLOW_MAP_AFTER_MS = 8000;
     // Through portals (the user, 12:53: "the bot has to follow it after the portal"): the M leaves
@@ -5854,7 +5854,9 @@ public class ClickService extends AccessibilityService {
             // A portal only if they've been off our screen a while: an M hidden under our arrow
             // (beside us) sent us walking to a stale spot (phone 09:57).
             if (m == null && arrow != null && lastMapM != null && t - lastMapMAt < LAST_M_KEEP_MS && sameMapAsLastM
-                    && (leaderSeenAt == 0 || t - leaderSeenAt > 15_000)) {
+                    && (leaderSeenAt == 0 || t - leaderSeenAt > 15_000)
+                    // Just walked to the M we tapped: now it's under our arrow, not through a portal.
+                    && t - lastMapMTapAt > 8000) {
                 portalChase = true;
                 float away = (float) Math.hypot(lastMapM[0] - arrow[0], lastMapM[1] - arrow[1]);
                 if (away > screenW * 0.025f) {
@@ -5905,6 +5907,7 @@ public class ClickService extends AccessibilityService {
             Log.i(TAG, "follow: map: M at " + m[0] + "," + m[1] + ", us at " + arrow[0] + "," + arrow[1]
                     + " (" + Math.round(d) + " px), tapping it");
             tapAt(m[0], m[1], "map M");
+            lastMapMTapAt = t;
             followHoldUntil = t + MAP_WALK_MS;
             // No heal or buff during the walk: a cast stops the game's walk to the tapped spot, and
             // the map taps went nowhere (phone 09:46, the user: "it doesnt work").
