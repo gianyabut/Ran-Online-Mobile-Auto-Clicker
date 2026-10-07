@@ -226,7 +226,8 @@ public class ClickService extends AccessibilityService {
     // Pickups take 3-4 s; an item the game won't hand over kept it tapping for 10 s with monsters
     // around (08:25:19-30, "stuck and didn't loot"). Give up LOOT_STALL_MS after the last pickup
     // (the chat says "Pick up item"/"Gained gold"; read every LOOT_CHAT_MS while looting).
-    private int lootGiveUps;
+    private int lootGiveUps;
+    private long lootGiveUpAt;
     private static final int LOOT_STALL_MS = 3500, LOOT_CHAT_MS = 1500;   // 5 s per unpickable item added up (81 s in 17 min)
     private long lastPickupAt;
     // Not faster while looting: 1 s screenshots under memory pressure preceded Android's own
@@ -5179,21 +5180,30 @@ public class ClickService extends AccessibilityService {
                 }
                 return;
             }
-            if (handShowing) repLootLeft++;
+            // Took some of a pile and the hand still shows (a party member's drop left in it): not a
+            // failure. Counted as one, the hand was ignored up to 60 s and our own drops were left
+            // behind (tablet 20:57-21:02, the user: "it skips the loots").
+            boolean gotSome = lastPickupAt >= lootStartedAt;
+            if (handShowing && !gotSome) repLootLeft++;
             else repPickups++;
             repLootMs += now - lootStartedAt;
-            Log.i(TAG, "farmer: " + (handShowing ? "couldn't pick it up in " + (now - lootStartedAt) / 1000
-                    + " s, leaving it" : "picked up") + ", attacking again");
+            Log.i(TAG, "farmer: " + (!handShowing ? "picked up" : gotSome ? "picked up some, the rest isn't ours ("
+                    + (now - lootStartedAt) / 1000 + " s)" : "couldn't pick it up in " + (now - lootStartedAt) / 1000
+                    + " s, leaving it") + ", attacking again");
             if (handShowing) {
                 // The same item it can't take (someone else's drop?) brought the pause back every
                 // ~15 s (tablet 20:36-20:38): each give-up in a row ignores the hand twice as long.
+                // A pickup, or a minute without a give-up, starts over at LOOT_IGNORE_MS.
+                if (gotSome || now - lootGiveUpAt > 60_000) lootGiveUps = 0;
+                lootGiveUpAt = now;
                 lootGiveUps++;
                 lootIgnoreUntil = now + Math.min(60_000L, (long) LOOT_IGNORE_MS << Math.min(3, lootGiveUps - 1));
+                if (gotSome) lootFailStreak = 0;
                 // A few failures in a row with nothing picked up: the bag is full (12:55, the user).
                 // Stop pausing the fight for loot for a while, and say so. Only full-length tries
                 // count: three quick 5 s give-ups while the leash pulled it about paused looting for
                 // 5 min (08:49), and the user saw "not looting".
-                if (now - lootStartedAt >= LOOT_MAX_PAUSE_MS && ++lootFailStreak >= LOOT_FAILS_TO_PAUSE) {
+                if (!gotSome && now - lootStartedAt >= LOOT_MAX_PAUSE_MS && ++lootFailStreak >= LOOT_FAILS_TO_PAUSE) {
                     lootFailStreak = 0;
                     lootIgnoreUntil = now + LOOT_FULL_PAUSE_MS;
                     Log.w(TAG, "farmer: " + LOOT_FAILS_TO_PAUSE + " pickups failed in a row, inventory full?"
