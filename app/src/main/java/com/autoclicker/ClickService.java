@@ -246,7 +246,10 @@ public class ClickService extends AccessibilityService {
     // Near a kill: check every KILL_SCAN_MS once the target is at KILL_SOON_HP or below, and hold
     // attacks POST_KILL_HOLD_MS after it dies so the drop is looted before the next fight.
     private static final float KILL_SOON_HP = 0.4f;
-    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 6000;     // a cap; the drop labels decide earlier
+    // 6 s / 4.5 s stood idle ~5 s after every kill that dropped nothing (tablet 20:40-20:45, the user:
+    // "it waits for something before it kills the monsters"). A later drop still gets picked up:
+    // the hand pauses attacks whenever it shows, and tapping it walks the character to the item.
+    private static final int KILL_SCAN_MS = 1000, POST_KILL_HOLD_MS = 3000;     // a cap; the drop labels decide earlier
     private long postKillUntil;
     // The drop lands where the monster died, sometimes just outside the hand's reach: the hand only
     // showed ~2.5 s after attacks resumed, as the character ran past it (07:01-07:07). So the
@@ -263,7 +266,7 @@ public class ClickService extends AccessibilityService {
     // 1.5 s was too soon: drops often land ~5 s after the kill, and 9 of 19 "no drop" calls had
     // the hand show 2.5-5.6 s later - the character ran to the next monster and back (the user,
     // 11:09). The ground is read every scan for DROP_READ_MS after a kill.
-    private static final int DROP_DECIDE_MS = 4500, DROP_READ_MS = 5500, DROP_MAX_STEPS = 3;
+    private static final int DROP_DECIDE_MS = 2000, DROP_READ_MS = 3000, DROP_MAX_STEPS = 3;
     private static final float KILL_MAX_HP = 0.6f;
     private static final String KEY_LOOT_NAMES = "farm_loot_names";
     private static final String[] LOOT_WORDS = {"potion", "burr", "box", "scroll", "card", "ore", "stone",
@@ -3377,6 +3380,7 @@ public class ClickService extends AccessibilityService {
         busyUntil = farmHoldUntil = Math.max(busyUntil, now + MAP_OPEN_MS + 1500);
         final int px0 = posX, py0 = posY;
         final String map = posMap;
+        mapShotUntil = now + MAP_OPEN_MS + 4000;
         openMapTap();
         // A refused screenshot (taken too soon after the last) is tried again before giving up: the
         // walk home gave up on it and the character stayed out (tablet 10:33-10:36, anchor 3).
@@ -6175,6 +6179,7 @@ public class ClickService extends AccessibilityService {
     }
 
     private void closeMap() {
+        mapShotUntil = 0;
         tapAt(screenW * PANEL_X_X, screenH * PANEL_X_Y, "close map");
     }
 
@@ -6390,6 +6395,7 @@ public class ClickService extends AccessibilityService {
     private static float INV_SLOT1_X = 1342 / 2560f, INV_SLOT1_Y = 404 / 1600f, INV_SLOT_DX = 202 / 2560f;
     private static float ITEM_CLOSE_X = 1460 / 2560f, ITEM_CLOSE_Y = 80 / 1600f;
     private boolean feedRunning;
+    private long mapShotUntil;          // the walk home's map read is under way: no scan screenshots
     private long feedAt, feedBackoffUntil;
 
     private void feedPet(float level) {
@@ -7324,6 +7330,12 @@ public class ClickService extends AccessibilityService {
     /** Repeats while running: one screenshot updates the ready state of every watching target. */
     private void cooldownCheck() {
         if (!running) return;
+        if (SystemClock.uptimeMillis() < mapShotUntil) {
+            // The walk home's map screenshot: these scans got it refused as too soon, three tries
+            // in a row, then the panel check X'd the open map (tablet 20:42:31-20:42:43, 20:45:19-31).
+            handler.postDelayed(this::cooldownCheck, 300);
+            return;
+        }
         if (feedRunning) {
             // Feeding owns the screenshots: these scans took every slot and feeding's own were
             // refused three times ("no screenshot", tablet 17:57).
