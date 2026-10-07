@@ -6333,7 +6333,7 @@ public class ClickService extends AccessibilityService {
      * when the food bar is down to 2% (the user's threshold); then carry on as before.
      */
     private static final float PET_FEED = 0.03f;                 // 2%: one bar sample in ~46
-    private static final int FEED_GAP_MS = 10 * 60_000, FEED_STEP_MS = 1400;
+    private static final int FEED_GAP_MS = 10 * 60_000, FEED_STEP_MS = 1400, FEED_SETTLE_MS = 700;
     private static final long FEED_NO_FOOD_BACKOFF_MS = 30 * 60_000L;
     private static final float FEED_MIN = 0.75f;                   // can / card: 0.9+ there, at most 0.55 not
     private static float BAG_ICON_X = 2058 / 2560f, BAG_ICON_Y = 56 / 1600f;
@@ -6350,6 +6350,14 @@ public class ClickService extends AccessibilityService {
         feedAt = now;
         feedHold();
         Log.i(TAG, "pet: food at " + Math.round(level * 100) + "%, feeding it - opening the bag");
+        // A skill tap already on its way went out 40 ms after the bag tap and cancelled it ("the bag
+        // didn't open", tablet 13:37): let the taps in flight finish first.
+        handler.postDelayed(this::feedTapBag, FEED_SETTLE_MS);
+    }
+
+    private void feedTapBag() {
+        if (!feedRunning) return;
+        feedHold();
         tapAt(screenW * BAG_ICON_X, screenH * BAG_ICON_Y, "bag");
         handler.postDelayed(() -> feedFindCan(0), FEED_STEP_MS);
     }
@@ -6393,8 +6401,15 @@ public class ClickService extends AccessibilityService {
             Ocr.read(shot, (lines, words) -> {
                 if (!feedRunning) return;
                 if (!bagOpenIn(lines)) {
-                    if (attempt < 2) handler.postDelayed(() -> feedFindCan(attempt + 1), 800);
-                    else feedEnd("the bag didn't open", false);
+                    if (attempt == 0) {
+                        Log.i(TAG, "pet: the bag isn't open - tapping it again");
+                        tapAt(screenW * BAG_ICON_X, screenH * BAG_ICON_Y, "bag");
+                        handler.postDelayed(() -> feedFindCan(1), FEED_STEP_MS);
+                    } else if (attempt < 2) {
+                        handler.postDelayed(() -> feedFindCan(attempt + 1), 800);
+                    } else {
+                        feedEnd("the bag didn't open", false);
+                    }
                     return;
                 }
                 if (can == null || can[0] < FEED_MIN) {
