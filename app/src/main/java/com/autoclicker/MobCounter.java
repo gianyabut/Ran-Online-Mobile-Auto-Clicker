@@ -80,6 +80,29 @@ final class MobCounter {
         return n;
     }
 
+    /**
+     * Party row k's HP (0-1) from the Team list bar (row 0 is the top one). Read from the right,
+     * and only right of our own stop button, which covers the left end of row 3 (red too).
+     * Measured on the tablet 2026-10-07: 0.99 / 0.66 / 0 for full / ian_ / a dead mate.
+     */
+    static float memberHp(Bitmap shot, int screenW, int screenH, int k) {
+        int c = (int) (screenH * (0.2456f + k * 0.02906f));
+        int x0 = Math.round(screenW * (62 / 2560f)), x1 = Math.round(screenW * (452 / 2560f));
+        int xMin = Math.round(screenW * (130 / 2560f));
+        int y0 = c - Math.round(screenH * 0.005f), y1 = c - Math.round(screenH * 0.0025f);
+        if (y0 < 0 || x1 >= shot.getWidth() || y1 >= shot.getHeight()) return -1f;
+        for (int x = x1; x >= xMin; x -= 2) {
+            if (hpRed(shot.getPixel(x, y0)) || hpRed(shot.getPixel(x, y1))) {
+                return Math.min(1f, (x - x0) / (float) (x1 - x0));
+            }
+        }
+        return 0f;
+    }
+
+    private static boolean hpRed(int p) {
+        return Color.red(p) > 140 && Color.green(p) < 90 && Color.blue(p) < 90;
+    }
+
     /** The darkest pixel's brightest channel in a column stretch. */
     private static int darkest(Bitmap shot, int x, int y0, int y1) {
         int best = 255;
