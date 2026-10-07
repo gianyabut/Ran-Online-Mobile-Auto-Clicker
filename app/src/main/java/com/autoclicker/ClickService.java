@@ -5299,8 +5299,11 @@ public class ClickService extends AccessibilityService {
      */
     private boolean lootHandPicture(Bitmap shot) {
         if (screenW != 2560 || screenH != 1600) return true;      // measured on the tablet only
-        int x = 1665, y = 1360, r = 30;
-        float[] m = PetCard.find(this, new String[]{"loot/hand.png"}, shot, x - r, y - r, x + r, y + r, 1f);
+        // The hand is animated: an open glove (hand.png) and a fist (hand_fist.png). With the glove
+        // only, every fist frame scored 0.43-0.56 and real hands went untapped (the user, 22:52: "the
+        // hand is showing but the bot didnt clicked it"). Both: 0.98-1.0 real, at most 0.27 not.
+        int x = 1670, y = 1358, r = 35;
+        float[] m = PetCard.find(this, new String[]{"loot/hand.png", "loot/hand_fist.png"}, shot, x - r, y - r, x + r, y + r, 1f);
         boolean yes = m != null && m[0] >= LOOT_HAND_MIN;
         if (!yes && SystemClock.uptimeMillis() - lastFakeHandLogAt > 30_000) {
             lastFakeHandLogAt = SystemClock.uptimeMillis();
