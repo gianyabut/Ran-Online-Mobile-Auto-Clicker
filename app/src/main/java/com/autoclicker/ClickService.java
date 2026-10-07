@@ -933,6 +933,12 @@ public class ClickService extends AccessibilityService {
         barParams = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
         barParams.x = dp(8);
         barParams.y = dp(200);
+        if (uiScale() < BAR_MIN_SCALE) {
+            // Small screens: right of the Team list (the bar on top of its names spoiled the
+            // party master's name for follow, phone 09:38), still clear of the buff row and joystick.
+            DisplayMetrics dm = getResources().getDisplayMetrics();
+            barParams.x = Math.round(Math.max(dm.widthPixels, dm.heightPixels) * 0.145f);
+        }
         makeDraggable(toggle, bar, barParams, this::onToggle, null);
         makeDraggable(add, bar, barParams, this::addTargetFromBar, null);
         makeDraggable(fullBuffButton, bar, barParams, this::onFullBuffButton, null);
