@@ -2992,7 +2992,7 @@ public class ClickService extends AccessibilityService {
     private void loadHome() {
         homeMap = null;
         int r = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_LEASH_R, 10);
-        leashR = r == 6 || r == 10 || r == 15 ? r : 10;
+        leashR = r == 3 || r == 6 || r == 10 || r == 15 ? r : 10;
         refreshLeashButton();                                   // grey unless a home loads below
         String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_HOME, null);
         if (saved == null) return;
@@ -6550,7 +6550,7 @@ public class ClickService extends AccessibilityService {
     // 10 since walking home by the map works well (the user, 19:24).
     // The leash radius is the user's pick on the anchor button: 6, 10 or 15 (the user, 22:40).
     private static final int COORD_EVERY_MS = 6000, LEASH_PROBE_MS = 2500;
-    private static final int[] LEASH_RADII = {6, 10, 15};
+    private static final int[] LEASH_RADII = {3, 6, 10, 15};   // 3 added (the user, 2026-10-07)
     private static final String KEY_LEASH_R = "farm_leash_r";
     private int leashR = 10;
     private static final java.util.regex.Pattern COORD_TEXT =
