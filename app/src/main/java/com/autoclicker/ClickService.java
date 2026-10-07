@@ -6537,6 +6537,16 @@ public class ClickService extends AccessibilityService {
         long now = SystemClock.uptimeMillis();
         if (feedRunning || !running || manual || sellStage != 0 || sellRunning || now < deadUntil || inCampus()
                 || lootStartedAt > 0 || returning || now < farmHoldUntil) return;   // not mid walk-home (stuck, 2026-10-07)
+        // Kill whatever is attacking first, then feed (the user, 2026-10-07 21:35). Nonstop fights:
+        // after FEED_WAIT_MAX_MS, the first moment with no monster selected.
+        if (farmer && farmFighting(now)) {
+            if (feedWaitSince == 0) {
+                feedWaitSince = now;
+                Log.i(TAG, "pet: food at " + Math.round(level * 100) + "%, feeding once the fight is over");
+            }
+            if (now - feedWaitSince < FEED_WAIT_MAX_MS || farmTargetHp >= 0 || now < postKillUntil) return;
+        }
+        feedWaitSince = 0;
         feedRunning = true;
         feedAt = now;
         feedHold();
@@ -6545,6 +6555,9 @@ public class ClickService extends AccessibilityService {
         // didn't open", tablet 13:37): let the taps in flight finish first.
         handler.postDelayed(this::feedTapBag, FEED_SETTLE_MS);
     }
+
+    private static final int FEED_WAIT_MAX_MS = 120_000;
+    private long feedWaitSince;
 
     private void feedTapBag() {
         if (!feedRunning) return;
