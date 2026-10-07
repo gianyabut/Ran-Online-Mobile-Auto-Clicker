@@ -1651,8 +1651,13 @@ public class ClickService extends AccessibilityService {
     }
 
     private void onCardPage(Runnable then, String what, int tries) {
-        captureRegionForOcr(BAR_LBL_L, BAR_LBL_T, BAR_LBL_W, BAR_LBL_H, crop -> {
-            char page = crop != null ? barPage(atTabletScale(crop)) : '?';
+        // Phone: the Back Point card's own blue in slot S tells the page (37% of that spot on the
+        // A/S/D page, 0 on Q/W/E) - the D label's picture never matched with an empty D slot (20:21).
+        boolean byCard = Layout.active();
+        float l = byCard ? BACK_POINT_X - 0.0126f : BAR_LBL_L, t = byCard ? BACK_POINT_Y - 0.0273f : BAR_LBL_T;
+        float w = byCard ? 0.0253f : BAR_LBL_W, h = byCard ? 0.0547f : BAR_LBL_H;
+        captureRegionForOcr(l, t, w, h, crop -> {
+            char page = crop == null ? '?' : byCard ? (blueShare(crop) >= 0.15f ? 'D' : 'E') : barPage(atTabletScale(crop));
             if (crop != null) crop.recycle();
             if (page == 'D') {
                 then.run();
@@ -1698,6 +1703,21 @@ public class ClickService extends AccessibilityService {
         } catch (RuntimeException | OutOfMemoryError e) {
             return crop;
         }
+    }
+
+    /** Share of the Back Point card's blue in a crop. */
+    private static float blueShare(Bitmap crop) {
+        int w = crop.getWidth(), h = crop.getHeight(), n = 0, blue = 0;
+        int[] row = new int[w];
+        for (int y = 0; y < h; y += 2) {
+            crop.getPixels(row, 0, w, 0, y, w, 1);
+            for (int x = 0; x < w; x += 2) {
+                int c = row[x], r = (c >> 16) & 0xff, b = c & 0xff;
+                n++;
+                if (b > 180 && r < 90 && b - r > 110) blue++;
+            }
+        }
+        return n == 0 ? 0f : blue / (float) n;
     }
 
     /** 'D' (A/S/D page), 'E' (Q/W/E) or '?' (covered, unclear). */
