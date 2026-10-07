@@ -5699,7 +5699,10 @@ public class ClickService extends AccessibilityService {
         // Not on screen: the big map shows the party master as an "M" icon, and tapping a spot on
         // it walks there by itself, around walls (the user's idea, 12:45).
         lastWalkLeaderDist = 0;
-        if (now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
+        // The map only once their name has been off the screen a while: one missed read opened it,
+        // and an M it then missed sent us to a stale spot (phone 09:44).
+        boolean longGone = leaderSeenAt == 0 || now - leaderSeenAt > FOLLOW_MAP_AFTER_MS;
+        if (longGone && now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
             if (followMayMove(now)) mapFollow(now);
             return;
         }
@@ -5728,6 +5731,7 @@ public class ClickService extends AccessibilityService {
     private static final int MAP_OPEN_MS = 1200, MAP_FOLLOW_GAP_MS = 5000, MAP_WALK_MS = 4000;
     private long lastMapFollowAt, teamExpandAt;
     private static final int MAP_NEAR_BACKOFF_MS = 15_000, TEAM_EXPAND_GAP_MS = 60_000;
+    private static final int FOLLOW_MAP_AFTER_MS = 8000;
     // Through portals (the user, 12:53: "the bot has to follow it after the portal"): the M leaves
     // the map where the master stepped through, so walk to where it was last seen, then a little
     // past it the same way to step in. The new map shows the M again.
