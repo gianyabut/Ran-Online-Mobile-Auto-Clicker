@@ -5505,6 +5505,9 @@ public class ClickService extends AccessibilityService {
             // A big map left open hides the Team list (and nothing else would close it, 13:00).
             if (mapIsOpen(shot, FOLLOW_READ_H)) {
                 shot.recycle();
+                // Our own map (mapFollow) - a read started just before it opened came back late and
+                // closed it mid-look ("the map didn't open", phone 10:09).
+                if (SystemClock.uptimeMillis() < followMapUntil) return;
                 // X doesn't close it while a portal's "Move to the area" is up (13:04, 10 tries).
                 // Then tap the map a little off our arrow: walking off the portal drops the popup
                 // (the user, 13:05), and X works again.
@@ -5550,10 +5553,11 @@ public class ClickService extends AccessibilityService {
     private final java.util.LinkedHashSet<String> leaderAliases = new java.util.LinkedHashSet<>();
     private String pendingLeaderKey;
 
+    private int pendingLeaderReads;
+
     private void setLeader(String key, String shown) {
         leaderKey = key;
         leaderShown = shown;
-        leaderSeenAt = 0;
         leaderAliases.clear();
         leaderAliases.add(key);
         pendingLeaderKey = null;
@@ -5640,9 +5644,12 @@ public class ClickService extends AccessibilityService {
                     leaderShown = name;
                 }
             } else if (key.length() >= 5 && pendingLeaderKey != null && looseName(key, pendingLeaderKey)) {
-                setLeader(key, name);                           // a new master, read twice in a row
+                // A new master only after three reads in a row: the HP bar behind the Team row garbles
+                // single reads ("KYihee6-" -> "Yhele26" flipped it, 10:09).
+                if (++pendingLeaderReads >= 3) setLeader(key, name);
             } else {
                 pendingLeaderKey = key;                         // one odd read ("Khe") isn't a new master
+                pendingLeaderReads = 1;
             }
             followNoPartyLogged = false;
         } else if (leaderKey == null) {
@@ -5717,7 +5724,10 @@ public class ClickService extends AccessibilityService {
     private void followDecide(Rect tag, String tagKey, long now) {
         if (!running || !follow || manual) return;
         float tagDist = tag != null ? fromCharacter(tag) : Float.MAX_VALUE;
-        if (tag != null) addLeaderAlias(tagKey);
+        if (tag != null) {
+            addLeaderAlias(tagKey);
+            if (tagKey != null && tagKey.length() > leaderKey.length() && tagKey.length() <= 16) leaderKey = tagKey;
+        }
         float push = screenW * FARM_PUSH;
         if (tag != null) {
             leaderSeenAt = now;
