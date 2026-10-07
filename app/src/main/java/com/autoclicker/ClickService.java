@@ -3334,7 +3334,16 @@ public class ClickService extends AccessibilityService {
         final int px0 = posX, py0 = posY;
         final String map = posMap;
         openMapTap();
-        handler.postDelayed(() -> captureHalfScreen(shot -> {
+        // A refused screenshot (taken too soon after the last) is tried again before giving up: the
+        // walk home gave up on it and the character stayed out (tablet 10:33-10:36, anchor 3).
+        @SuppressWarnings("unchecked")
+        final Consumer<Bitmap>[] homeShot = new Consumer[1];
+        final int[] shotTries = {0};
+        homeShot[0] = shot -> {
+            if (shot == null && ++shotTries[0] <= 2) {
+                handler.postDelayed(() -> captureHalfScreen(homeShot[0]), 450);
+                return;
+            }
             if (shot == null) {
                 Log.w(TAG, "farmer: couldn't take the map screenshot (walking home)");
                 // It may be open (the next "open" tap would walk), or not: a blind X on the bare
@@ -3432,7 +3441,8 @@ public class ClickService extends AccessibilityService {
                     closeMap();                                     // no readout
                 });
             }), 500);
-        }), MAP_OPEN_MS);
+        };
+        handler.postDelayed(() -> captureHalfScreen(homeShot[0]), MAP_OPEN_MS);
     }
 
     /** The return-home state: true while it owns the character (walking home, nothing else). */
@@ -3740,6 +3750,8 @@ public class ClickService extends AccessibilityService {
         // Not on the phone: the user keeps the chat closed there while boosting (23:45).
         if (Layout.active()) return;
         long now = SystemClock.uptimeMillis();
+        // Never in the middle of something: its tap cancelled the walk home's "open map" (tablet 10:36).
+        if (returning || now < farmHoldUntil || lootStartedAt > 0 || sellStage != 0) return;
         if (now - chatOpenTapAt < (chatOpenTries >= CHAT_OPEN_TRIES ? CHAT_OPEN_BACKOFF_MS : CHAT_OPEN_GAP_MS)) return;
         float[] c;
         try {
