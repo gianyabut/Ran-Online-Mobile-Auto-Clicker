@@ -4132,8 +4132,11 @@ public class ClickService extends AccessibilityService {
     private void sellArrivedCheck() {
         if (!running || sellStage != 1) return;
         busyUntil = farmHoldUntil = Math.max(busyUntil, SystemClock.uptimeMillis() + 5000);
-        readMapName(map -> {
+        readMapName(read -> {
             if (!running || sellStage != 1) return;
+            // Its own read failed: the scan loop's, if fresh and taken after the card.
+            String map = read != null ? read : lastSeenMap != null && lastSeenMapAt > sellCardAt + 1000
+                    && SystemClock.uptimeMillis() - lastSeenMapAt < 8000 ? lastSeenMap : null;
             // Nothing readable: still loading (14:44 - taken for "didn't go", so the card was used
             // twice). Look again every 2 s for up to SELL_ARRIVE_MAX_MS before deciding.
             if (map == null && SystemClock.uptimeMillis() - sellCardAt < SELL_ARRIVE_MAX_MS) {
@@ -6593,6 +6596,16 @@ public class ClickService extends AccessibilityService {
     private static float ITEM_CLOSE_X = 1460 / 2560f, ITEM_CLOSE_Y = 80 / 1600f;
     private boolean feedRunning;
     private long mapShotUntil;          // the walk home's map read is under way: no scan screenshots
+    // Any one-off screenshot (sell trip, deaths, pet dialog, ...): the scan loop stands down a moment.
+    // With scans every second its own screenshot was refused as too soon for a whole minute, and
+    // the sell trip stopped: "couldn't read where I am after 60 s" (tablet 05:53, in SG_Campus1F).
+    private long oneShotUntil;
+    private static final int ONE_SHOT_PAUSE_MS = 2500;
+
+    private void oneShotPause() {
+        if (!farmer) return;                                    // Farmer's scan loop only (FS, follow: untouched)
+        oneShotUntil = Math.max(oneShotUntil, SystemClock.uptimeMillis() + ONE_SHOT_PAUSE_MS);
+    }
     private long feedAt, feedBackoffUntil;
 
     private void feedPet(float level) {
@@ -7615,7 +7628,7 @@ public class ClickService extends AccessibilityService {
     /** Repeats while running: one screenshot updates the ready state of every watching target. */
     private void cooldownCheck() {
         if (!running) return;
-        if (SystemClock.uptimeMillis() < mapShotUntil) {
+        if (SystemClock.uptimeMillis() < Math.max(mapShotUntil, oneShotUntil)) {
             // The walk home's map screenshot: these scans got it refused as too soon, three tries
             // in a row, then the panel check X'd the open map (tablet 20:42:31-20:42:43, 20:45:19-31).
             handler.postDelayed(this::cooldownCheck, 300);
@@ -7739,6 +7752,7 @@ public class ClickService extends AccessibilityService {
                         // Town: no skills, no walking, no looting - just keep reading.
                         busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + 3000);
                         if (!sellTrip) townCheck(now);
+                        farmTargetHp = -1;                      // no fight here: 2 s scans
                     } else {
                         townSince = 0;
                         farmLootCheck(MobCounter.lootHandShowing(shot, screenW, screenH) && lootHandPicture(shot), now);
@@ -7980,6 +7994,7 @@ public class ClickService extends AccessibilityService {
             onShot.accept(null);
             return;
         }
+        oneShotPause();
         shoot(new TakeScreenshotCallback() {
             @Override
             public void onSuccess(ScreenshotResult result) {
@@ -8018,6 +8033,7 @@ public class ClickService extends AccessibilityService {
             onShot.accept(null);
             return;
         }
+        oneShotPause();
         shoot(new TakeScreenshotCallback() {
             @Override
             public void onSuccess(ScreenshotResult result) {
@@ -8054,6 +8070,7 @@ public class ClickService extends AccessibilityService {
             onShot.accept(null);
             return;
         }
+        oneShotPause();
         shoot(new TakeScreenshotCallback() {
             @Override
             public void onSuccess(ScreenshotResult result) {
