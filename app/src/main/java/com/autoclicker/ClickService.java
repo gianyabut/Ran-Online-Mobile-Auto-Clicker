@@ -6594,7 +6594,7 @@ public class ClickService extends AccessibilityService {
     private void petBarCheck(float level, long now) {
         // No pets on the campus, and none during a sell trip: right after the card the pet bar was
         // gone ("Pets are not allowed") before the campus was read, and it summoned (15:20).
-        if (!running || manual || now < deadUntil || inCampus() || sellStage != 0 || sellRunning) return;
+        if (!running || manual || now < deadUntil || pkHold || inCampus() || sellStage != 0 || sellRunning) return;
         // Only where the map is known: started on the campus with the map unread, it summoned (15:45).
         if (lastSeenMap == null || now - lastSeenMapAt > 20_000) return;
         if (level >= 0) {
@@ -6812,7 +6812,11 @@ public class ClickService extends AccessibilityService {
         long now = SystemClock.uptimeMillis();
         if (pkNow()) {
             // PK time (a PK death, or a 3-deaths rest ending in it): stay in town till it's over.
-            if (!pkHold) Log.w(TAG, "died: PK time - holding the Back Point until it's over");
+            if (!pkHold) {
+                Log.w(TAG, "died: PK time - holding the Back Point until it's over");
+                // Away while we wait in town; arrivedAtSpot summons it again (the user, 2026-10-07).
+                handler.postDelayed(this::recallPet, 3000);
+            }
             pkHold = true;
             deadUntil = Math.max(deadUntil, now + PK_HOLD_CHECK_MS + BACK_POINT_LOAD_MS);
             busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
@@ -6889,6 +6893,17 @@ public class ClickService extends AccessibilityService {
 
     private void summonPet() {
         petPawTries = 0;
+        petWantAway = false;
+        summonPetTap();
+    }
+
+    private boolean petWantAway;
+
+    /** Paw -> "Recall your pet?" -> Yes: the pet waits out a PK hold in town (the user, 2026-10-07). */
+    private void recallPet() {
+        if (!running || !farmer || !pkHold) return;
+        petWantAway = true;
+        petPawTries = 0;
         summonPetTap();
     }
 
@@ -6918,6 +6933,19 @@ public class ClickService extends AccessibilityService {
                     String k = t.replaceAll("[^a-z]", "");
                     if (k.equals("yes")) yes = l.box;
                     if (k.equals("no")) no = l.box;
+                }
+                if (petWantAway) {
+                    petWantAway = false;
+                    Rect pick = recall ? yes : no;
+                    float x = pick != null ? pick.exactCenterX() : screenW * (recall ? PET_YES_X : PET_NO_X);
+                    float y = pick != null ? pick.exactCenterY() : screenH * (recall ? PET_YES_Y : PET_NO_Y);
+                    if (recall || asked) {
+                        Log.i(TAG, "pet: waiting out PK in town - " + (recall ? "\"Recall your pet?\" -> Yes" : "it's away already, No"));
+                        tapAt(x, y, recall ? "pet recall yes" : "pet no");
+                    } else {
+                        Log.i(TAG, "pet: no pet dialog after the paw (PK wait)");
+                    }
+                    return;
                 }
                 if (recall) {
                     // The pet is out already (Back Point brings it): never send it away.
