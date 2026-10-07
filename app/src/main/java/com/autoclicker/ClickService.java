@@ -148,7 +148,9 @@ public class ClickService extends AccessibilityService {
     private static final float FOLLOW_NEAR_W = 0.08f;          // "close": ~2-3 character widths (0.12 trailed behind, 10:20)
     private static final float FOLLOW_FAR_X = 1.5f;           // "far": 1.5x the close distance
     private static final float FOLLOW_MAP_FAR = 0.30f;        // near the screen's edge: walk by the map (closer, the M hides under our arrow)
-    private static final float FOLLOW_MAP_NEAR = 0.012f;      // M this close to our arrow on the map = together          // "close": ~3-4 character widths
+    private static final float FOLLOW_MAP_NEAR = 0.012f;
+    private static final int FOLLOW_NEAR_GRACE_MS = 6000;
+    private long lastLeaderNearAt;      // M this close to our arrow on the map = together          // "close": ~3-4 character widths
     private final Runnable followTick = this::followTick;
     private String leaderKey, leaderShown;
     private long followHoldUntil, leaderSeenAt, lastFollowWalkAt;
@@ -5712,7 +5714,17 @@ public class ClickService extends AccessibilityService {
             if (b.centerX() > screenW * CHAT_L && b.centerX() < screenW * (CHAT_L + CHAT_W)
                     && b.centerY() > screenH * CHAT_T) continue;         // a chat line naming them
             String k = nameKey(l.text);
-            if (!isLeader(k) || !looksLikePlayerName(l.text)) continue;
+            if (!isLeader(k) || !looksLikePlayerName(l.text)) {
+                // Right beside us their tag runs into ours ("-ian_ -kYjheLe26-" as one line, and the
+                // map opened with them next to us, 10:35): try each word on its own.
+                String hit = null;
+                for (String w : l.text.trim().split("\\s+")) {
+                    String wk = nameKey(w);
+                    if (wk.length() >= 5 && isLeader(wk) && looksLikePlayerName(w)) hit = wk;
+                }
+                if (hit == null) continue;
+                k = hit;
+            }
             float d = fromCharacter(b);
             if (d < tagDist) {
                 tag = b;
@@ -5738,7 +5750,10 @@ public class ClickService extends AccessibilityService {
             followLostAlerted = false;
             leaderDirX = (tag.exactCenterX() - screenW * 0.5f) / Math.max(1f, tagDist);
             leaderDirY = (tag.exactCenterY() - screenH * 0.53f) / Math.max(1f, tagDist);
-            if (tagDist <= screenW * FOLLOW_NEAR_W) return;            // close enough (or it's us)
+            if (tagDist <= screenW * FOLLOW_NEAR_W) {                  // close enough (or it's us)
+                lastLeaderNearAt = now;
+                return;
+            }
             // Far: the map's tap walks the whole way around walls; the joystick is for near (the
             // user, 10:27: "if it is near use the simple nav, if not use the mini map").
             if (tagDist > screenW * FOLLOW_MAP_FAR && now - lastMapOpenAt >= MAP_FOLLOW_GAP_MS) {
@@ -5778,6 +5793,8 @@ public class ClickService extends AccessibilityService {
         // Not on screen: the big map shows the party master as an "M" icon, and tapping a spot on
         // it walks there by itself, around walls (the user's idea, 12:45).
         lastWalkLeaderDist = 0;
+        // Seen right beside us a moment ago: still there, the tag just didn't read (overlapping ours).
+        if (lastLeaderNearAt > 0 && now - lastLeaderNearAt < FOLLOW_NEAR_GRACE_MS) return;
         // Not on screen: the big map says how far they are - M by us = stay, far = tap it. No blind
         // walking where they were last seen: that wandered off (phone 09:51, "drifting away").
         if (now - lastMapFollowAt >= MAP_FOLLOW_GAP_MS) {
