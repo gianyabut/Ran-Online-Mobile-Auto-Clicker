@@ -3217,7 +3217,21 @@ public class ClickService extends AccessibilityService {
         String msg = "Home set: " + homeMap + "[" + homeX + "," + homeY + "], staying within " + leashR;
         Log.i(TAG, "farmer: " + msg + " (" + why + ")");
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show();
+        // The toast doesn't show over the game on the phone (MIUI), and an anchor set again looks
+        // like the old one (the user, 2026-10-08: "no indicator that the anchor is saved"): the
+        // button shows the saved spot in green for a few seconds, and Telegram says it too.
+        if (leashButton != null) {
+            leashButton.setBackground(circle(Color.rgb(40, 170, 60)));
+            leashButton.setText(homeX + "\n" + homeY);
+            barText(leashButton, 11);
+            handler.removeCallbacks(leashFlashEnd);
+            handler.postDelayed(leashFlashEnd, LEASH_FLASH_MS);
+        }
+        Telegram.send(this, "⚓ " + msg);
     }
+
+    private static final int LEASH_FLASH_MS = 4000;
+    private final Runnable leashFlashEnd = this::refreshLeashButton;
 
     /** Reads the coordinates for ⚓; the read misses about half the time (08:05), so try a few times. */
     private void readHomeSpot(int tries) {
@@ -3285,6 +3299,24 @@ public class ClickService extends AccessibilityService {
         android.widget.Toast.makeText(this, "Couldn't read the coordinates, tap again", android.widget.Toast.LENGTH_SHORT).show();
     }
 
+    private int slipCount, slipX, slipY;
+    private static final int SLIP_TAKE_AFTER = 3;
+
+    /** a is b with one digit dropped or added (and not just a step or two away). */
+    private static boolean digitSlip(int a, int b) {
+        if (Math.abs(a - b) <= 8) return false;
+        String sa = Integer.toString(a), sb = Integer.toString(b);
+        return oneDigitLess(sb, sa) || oneDigitLess(sa, sb);
+    }
+
+    private static boolean oneDigitLess(String longer, String shorter) {
+        if (longer.length() != shorter.length() + 1) return false;
+        for (int i = 0; i < longer.length(); i++) {
+            if ((longer.substring(0, i) + longer.substring(i + 1)).equals(shorter)) return true;
+        }
+        return false;
+    }
+
     private void farmCoordRead(Bitmap shot) {
         int x = Math.round(screenW * COORD_L), y = Math.round(screenH * COORD_T);
         int w = Math.min(Math.round(screenW * COORD_W), shot.getWidth() - x);
@@ -3293,6 +3325,20 @@ public class ClickService extends AccessibilityService {
         Bitmap crop;
         try {
             crop = Bitmap.createBitmap(shot, x, y, w, h);
+            if (Layout.active()) {
+                // The phone's small text lost the leading 1 of [123,139] ("[23,139]", 22:57): read
+                // it at twice the size (970x64 -> 1940x128, under 1 MB).
+                Bitmap big;
+                try {
+                    big = Bitmap.createScaledBitmap(crop, w * 2, h * 2, true);
+                } catch (RuntimeException | OutOfMemoryError e) {
+                    big = crop;                                     // read it at its own size
+                }
+                if (big != crop) {
+                    crop.recycle();
+                    crop = big;
+                }
+            }
         } catch (RuntimeException | OutOfMemoryError e) {
             return;
         }
@@ -3305,8 +3351,30 @@ public class ClickService extends AccessibilityService {
                 int rx = coordNumber(m.group(2)), ry = coordNumber(m.group(3));
                 lastSeenMap = map;
                 lastSeenMapAt = SystemClock.uptimeMillis();
-                if (homeReading) homeFromFarmRead(map, rx, ry);
                 long t = SystemClock.uptimeMillis();
+                // The last good position with a digit dropped or added ("[23,139]" for [123,139],
+                // phone 22:57): read the same way twice, the two-reads rule below let it in, and the
+                // bot walked to the map edge "100 from home". Not taken while a good read is fresh.
+                // The same "slip" 3 times in a row is taken as real, though: otherwise a wrong
+                // position that got in another way would hold off the right reads (pre-install audit).
+                if (posMap != null && sameMap(map, posMap) && t - posAt < 60_000
+                        && (digitSlip(rx, posX) || digitSlip(ry, posY))) {
+                    boolean again = slipCount > 0 && Math.abs(rx - slipX) <= 2 && Math.abs(ry - slipY) <= 2;
+                    slipCount = again ? slipCount + 1 : 1;
+                    slipX = rx;
+                    slipY = ry;
+                    jumpX = rx;                                     // so the 3rd agrees below
+                    jumpY = ry;
+                    jumpAt = t;
+                    if (slipCount < SLIP_TAKE_AFTER) {
+                        Log.d(TAG, "coordinates: [" + rx + "," + ry + "] looks like [" + posX + "," + posY
+                                + "] misread (a digit dropped or added), ignored (" + slipCount + ")");
+                        return;
+                    }
+                    Log.i(TAG, "coordinates: [" + rx + "," + ry + "] read " + slipCount + " times in a row - taking it");
+                }
+                slipCount = 0;
+                if (homeReading) homeFromFarmRead(map, rx, ry);
                 // A dropped digit ("[126,11" for [126,115], 19:05) looks like a 100-unit jump: the
                 // character covers ~1-2 units a second, so take a big jump only when read twice.
                 // Two reads that agree with each other win, though: a misread first read ([127,17],
