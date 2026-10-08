@@ -3620,7 +3620,9 @@ public class ClickService extends AccessibilityService {
             }
             return true;
         }
-        if (dist <= leashBackR()) {
+        // A diagonal neighbour ([121,136] for [122,135], 1.4 away) is back too: with radius 2 (back
+        // within 1) the game left it there and the map was tapped once more for that step (13:10).
+        if (dist <= leashBackR() + 0.5f) {
             returning = false;
             Log.i(TAG, "farmer: back home (" + Math.round(dist) + " away, " + (now - returnStartedAt) / 1000 + " s), attacking again");
             repHomeMs += now - returnStartedAt;
