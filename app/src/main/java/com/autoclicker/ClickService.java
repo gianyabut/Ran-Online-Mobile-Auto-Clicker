@@ -7391,8 +7391,22 @@ public class ClickService extends AccessibilityService {
             handler.removeCallbacks(useBackPoint);
             handler.removeCallbacks(backAtSpot);
             Telegram.send(this, "💀 Ran Online: your character died - tapped Use (revive item), carrying on here.");
+            // ...but make sure: a Use that didn't take leaves it in town, and nothing brought it back
+            // (the user, 2026-10-08: "make sure it clicked on Used, or used backpoint whenever it
+            // didn't respawn to the previous point").
+            if (backPointMode()) {
+                useCheckTries = useCheckLooks = 0;
+                useDiedIn = now - lastSeenMapAt < 60_000 ? lastSeenMap : null;   // Boost reads it rarely
+                useCheckGen++;
+                handler.removeCallbacks(useCheck);
+                handler.postDelayed(useCheck, USE_CHECK_MS);
+            }
             return;
         }
+        // Revive (no Use, or the Use taps went nowhere): its own Back Point flow - a pending
+        // after-Use check must not run on top of it (a second Back Point, the death rest cut short).
+        useCheckGen++;
+        handler.removeCallbacks(useCheck);
         deathMap = posMap;
         revivedAt = now;
         backPointTries = 0;
@@ -7497,6 +7511,50 @@ public class ClickService extends AccessibilityService {
                 + homeMap + ".");
         handler.removeCallbacks(useBackPoint);
         handler.post(useBackPoint);
+    }
+
+    // After tapping Use: still on the map it died on, or in a town (then the Back Point)? The
+    // revive countdown is 10 s, so the first look is after it; a second look 8 s later if it still
+    // showed the death map (a Use that missed times out into town). Pre-install audit 2026-10-08.
+    private static final int USE_CHECK_MS = 13_000, USE_CHECK_AGAIN_MS = 8000, USE_CHECK_RETRY_MS = 4000;
+    private static final int USE_CHECK_LOOKS = 2, USE_CHECK_TRIES = 4;
+    private final Runnable useCheck = this::useCheck;
+    private int useCheckTries, useCheckLooks, useCheckGen;
+    private String useDiedIn;
+
+    private void useCheck() {
+        if (!running || manual || !backPointMode()) return;
+        final int gen = useCheckGen;
+        readMapName(map -> {
+            if (gen != useCheckGen || !running || manual) return;          // a newer death took over
+            // Other flows own the trip to and from town.
+            if (sellStage != 0 || sellRunning || feedTripStage != 0 || feedRunning || pkHold
+                    || SystemClock.uptimeMillis() < pkRestUntil) return;
+            if (map == null) {
+                if (++useCheckTries < USE_CHECK_TRIES) handler.postDelayed(useCheck, USE_CHECK_RETRY_MS);
+                else Log.w(TAG, "died: tapped Use, but the map name couldn't be read - carrying on");
+                return;
+            }
+            // Died in this very town (a PK rest in MarketPlace): Use revived it right here.
+            if (!isTown(map) || (useDiedIn != null && sameMap(map, useDiedIn))) {
+                if (++useCheckLooks < USE_CHECK_LOOKS) {
+                    handler.postDelayed(useCheck, USE_CHECK_AGAIN_MS);
+                } else {
+                    Log.i(TAG, "died: revived with Use, still in " + map + " - carrying on");
+                }
+                return;
+            }
+            long t = SystemClock.uptimeMillis();
+            Log.w(TAG, "died: tapped Use but woke up in " + map + " - using the Back Point");
+            Telegram.send(this, "\u26A0 Ran Online: tapped Use but woke up in " + map + " - using the Back Point card (slot S).");
+            deathMap = farmer ? homeMap : null;                     // Boost: off the town is back
+            revivedAt = t;
+            backPointTries = 0;
+            deadUntil = Math.max(deadUntil, t + BACK_POINT_LOAD_MS + 5000);
+            busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
+            handler.removeCallbacks(useBackPoint);
+            handler.post(useBackPoint);
+        });
     }
 
     private void useBackPoint() {
