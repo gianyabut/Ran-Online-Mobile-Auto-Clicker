@@ -216,7 +216,9 @@ public class ClickService extends AccessibilityService {
     private long farmHoldUntil;
     // The shared "pause after tap" (3 s, set for heals) spaced attacks ~4 s apart.
     // 800 ms: the game accepted 62% of the taps (08:36, cooldowns/locks), each refusal costing 0.84 s.
-    private static final int FARM_TAP_GAP_MS = 500;
+    // 500 ms (10-05 to 10-09), then 1 s: the game closing itself every 1-2 h of Farmer on both
+    // devices, never in Boost; fewer taps is the user's call (2026-10-09).
+    private static final int FARM_TAP_GAP_MS = 1000;
     // Buffs in Farmer: hold attacks this long after a buff so its cast isn't cancelled; wait at most
     // FARM_BUFF_MAX_WAIT_MS before one; a cast that didn't take is retried after FARM_BUFF_RETRY_MS.
     private static final int FARM_AFTER_BUFF_MS = 1500, FARM_BUFF_MAX_WAIT_MS = 1500, FARM_BUFF_RETRY_MS = 15_000;
