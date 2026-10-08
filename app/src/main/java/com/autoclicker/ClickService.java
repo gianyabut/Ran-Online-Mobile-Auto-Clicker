@@ -3865,8 +3865,10 @@ public class ClickService extends AccessibilityService {
 
     /** Taps the "..." bubble if bmp (whose top-left is at ox,oy on screen) shows it. */
     private void openChatIfHidden(Bitmap bmp, int ox, int oy) {
-        // Not on the phone: the user keeps the chat closed there while boosting (23:45).
-        if (Layout.active()) return;
+        // Not on the phone while boosting: the user keeps the chat closed there (23:45). Farming
+        // there needs it: the report's gold and items come from the chat's pickup lines, and with it
+        // closed every report said "Gold: 0" (the Brawler moved to the phone, 2026-10-08 22:30).
+        if (Layout.active() && !farmer) return;
         long now = SystemClock.uptimeMillis();
         // Never in the middle of something: its tap cancelled the walk home's "open map" (tablet 10:36).
         if (returning || now < farmHoldUntil || lootStartedAt > 0 || sellStage != 0) return;
