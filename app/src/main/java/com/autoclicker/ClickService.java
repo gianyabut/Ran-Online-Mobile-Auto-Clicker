@@ -922,6 +922,7 @@ public class ClickService extends AccessibilityService {
         Watchdog.schedule(this);
 
         bar = new LinearLayout(this);
+        barButtons.clear();                                     // a reconnect of the same service: not the old bar's buttons
         bar.setOrientation(LinearLayout.VERTICAL);
         barRow = null;
         toggle = roundButton("");
@@ -1243,6 +1244,7 @@ public class ClickService extends AccessibilityService {
         manualButton.setText(on ? "AUTO" : "✋");
         barText(manualButton, on ? 12 : 20);
         manualButton.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        reflowBar();
         manualButton.setBackground(circle(on ? Color.rgb(40, 150, 60) : Color.rgb(120, 70, 170)));
         if (changed && why.equals("button")) {
             shake(manualButton);
@@ -2200,6 +2202,7 @@ public class ClickService extends AccessibilityService {
             fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
             modeButton.setVisibility(booster ? View.GONE : View.VISIBLE);
             leashButton.setVisibility(farmer ? View.VISIBLE : View.GONE);
+            reflowBar();
         }
         for (Target t : targets) {
             t.root.setVisibility(on || manual || overlaysHidden ? View.GONE : View.VISIBLE);
@@ -2232,6 +2235,7 @@ public class ClickService extends AccessibilityService {
             fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
             modeButton.setVisibility(booster ? View.GONE : View.VISIBLE);
             leashButton.setVisibility(farmer ? View.VISIBLE : View.GONE);
+            reflowBar();
         }
     }
 
@@ -9172,27 +9176,59 @@ public class ClickService extends AccessibilityService {
     }
 
     // Small screens: the bar in two columns. One column of finger-sized buttons ran down onto the
-    // joystick - ✋ sat on it, and the jiggle's push landed on ✋ instead (phone, 02:23).
+    // joystick - ✋ sat on it, and the jiggle's push landed on ✋ instead (phone, 02:23). The rows
+    // are packed from the buttons that show: fixed pairs left a hidden button's hole and its gap
+    // (Farmer hides FB, and KILL sat alone, pushed right - phone, 22:30, the user).
     private LinearLayout barRow;
+    private final List<View> barButtons = new ArrayList<>();
 
     private void barAdd(View v, LinearLayout.LayoutParams lp) {
         if (uiScale() >= BAR_MIN_SCALE) {
             bar.addView(v, lp);
             return;
         }
-        if (barRow == null || barRow.getChildCount() >= 2) {
-            barRow = new LinearLayout(this);
-            barRow.setOrientation(LinearLayout.HORIZONTAL);
-            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-            rowLp.topMargin = bar.getChildCount() == 0 ? 0 : lp.topMargin;
-            bar.addView(barRow, rowLp);
-            lp.topMargin = 0;
-        } else {
-            lp.leftMargin = barDp(8);
-            lp.topMargin = 0;
+        barButtons.add(v);
+        reflowBar();
+    }
+
+    /** Small screens: the bar's showing buttons in rows of two, evenly spaced; hidden ones last. */
+    private void reflowBar() {
+        if (bar == null || uiScale() >= BAR_MIN_SCALE || barButtons.isEmpty()) return;
+        for (View v : barButtons) {
+            if (v.getParent() instanceof android.view.ViewGroup) ((android.view.ViewGroup) v.getParent()).removeView(v);
         }
-        barRow.addView(v, lp);
+        bar.removeAllViews();
+        barRow = null;
+        int size = barDp(48), gap = barDp(8), inRow = 0;
+        List<View> hidden = new ArrayList<>();
+        for (View v : barButtons) {
+            if (v.getVisibility() == View.GONE) {
+                hidden.add(v);
+                continue;
+            }
+            if (barRow == null || inRow == 2) {
+                barRow = new LinearLayout(this);
+                barRow.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                rowLp.topMargin = bar.getChildCount() == 0 ? 0 : gap;
+                bar.addView(barRow, rowLp);
+                inRow = 0;
+            }
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
+            lp.leftMargin = inRow == 0 ? 0 : gap;
+            barRow.addView(v, lp);
+            inRow++;
+        }
+        // Hidden ones take no room; kept in the bar so one shown without a reflow still appears.
+        for (View v : hidden) {
+            if (barRow == null) {
+                barRow = new LinearLayout(this);
+                barRow.setOrientation(LinearLayout.HORIZONTAL);
+                bar.addView(barRow);
+            }
+            barRow.addView(v, new LinearLayout.LayoutParams(size, size));
+        }
     }
 
     // The bar's buttons stay big enough for a finger on small screens (the user, phone: "too hard
