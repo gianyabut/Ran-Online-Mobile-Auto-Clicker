@@ -206,7 +206,9 @@ public class ClickService extends AccessibilityService {
     // 10 s without damage: drop it and find another (the user, 11:11: a Skating Master sat at 99%
     // for 46 s). A full bar that stays full may be a new monster each check (fast kills: 3 in 15 s
     // read 99% every time) - those kills show as pickups/gold in the chat, which count as progress.
-    private static final int FARM_STUCK_MS = 10_000;
+    private static final int FARM_STUCK_MS = 10_000, STUCK_MIN_ATTACKS = 12;
+    private int attackTaps, attackTapsAtProgress;
+    private long progressMarkAt;
     private static final int FARM_STUCK_FULL_MS = 10_000;
     private long farmProgressAt;
     private float farmTargetHp = -1;
@@ -2608,7 +2610,14 @@ public class ClickService extends AccessibilityService {
         repMobSum += mobs;
         repMobScans++;
         long stuckAfter = targetHp >= 0.97f ? FARM_STUCK_FULL_MS : FARM_STUCK_MS;
-        if (target && !luring && now - farmProgressAt >= stuckAfter && canFarmMove(now)) {
+        // Only time spent attacking counts: casting buffs (rings 6-10) mid-fight held its HP at 67%
+        // for 11 s, it was taken for stuck and the step walked 4 tiles off (tablet 09:10).
+        if (farmProgressAt != progressMarkAt) {
+            progressMarkAt = farmProgressAt;
+            attackTapsAtProgress = attackTaps;
+        }
+        boolean attackedOn = attackTaps - attackTapsAtProgress >= STUCK_MIN_ATTACKS;
+        if (target && !luring && attackedOn && now - farmProgressAt >= stuckAfter && canFarmMove(now)) {
             Log.i(TAG, "farmer: target HP stuck at " + Math.round(targetHp * 100) + "% for "
                     + (now - farmProgressAt) / 1000 + " s, dropping it and stepping away");
             dropTargetAndStep(now);
@@ -2844,6 +2853,12 @@ public class ClickService extends AccessibilityService {
         farmProgressAt = now;
         ownDropAt = SystemClock.uptimeMillis();
         tapAt(MobCounter.closeX(screenW), screenH * MobCounter.CLOSE_Y, "drop target");
+        if (homeMap != null) {
+            // With an anchor: no step - the step walked away from it (4 tiles, tablet 09:10); the leash
+            // keeps it near and the game picks another monster.
+            busyUntil = farmHoldUntil = now + TAP_MS + DESELECT_SETTLE_MS;
+            return;
+        }
         busyUntil = farmHoldUntil = now + TAP_MS + DESELECT_SETTLE_MS + FARM_PUSH_MS + FARM_WALK_MS
                 + FARM_WALK_SETTLE_MS;
         handler.postDelayed(() -> farmWalk(SystemClock.uptimeMillis()), TAP_MS + DESELECT_SETTLE_MS);
@@ -3067,8 +3082,14 @@ public class ClickService extends AccessibilityService {
 
     private void loadHome() {
         homeMap = null;
-        int r = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_LEASH_R, 10);
-        leashR = r == 3 || r == 6 || r == 10 || r == 15 ? r : 10;
+        SharedPreferences lp = getSharedPreferences(PREFS, MODE_PRIVATE);
+        int r = lp.getInt(KEY_LEASH_R, 10);
+        if (r == 3 && !lp.getBoolean("leash_3_to_2", false)) {
+            // "change anchor from 3 to 2" (the user, 2026-10-08): once, keeping the same spot.
+            r = 2;
+            lp.edit().putInt(KEY_LEASH_R, 2).putBoolean("leash_3_to_2", true).apply();
+        }
+        leashR = r == 2 || r == 3 || r == 6 || r == 10 || r == 15 ? r : 10;
         refreshLeashButton();                                   // grey unless a home loads below
         String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_HOME, null);
         if (saved == null) return;
@@ -7081,8 +7102,8 @@ public class ClickService extends AccessibilityService {
     private static final float COORD_L = 0f, COORD_T = 0.95f, COORD_W = 0.35f, COORD_H = 0.05f;
     // 10 since walking home by the map works well (the user, 19:24).
     // The leash radius is the user's pick on the anchor button: 6, 10 or 15 (the user, 22:40).
-    private static final int COORD_EVERY_MS = 6000, LEASH_PROBE_MS = 2500;
-    private static final int[] LEASH_RADII = {3, 6, 10, 15};   // 3 added (the user, 2026-10-07)
+    private static final int COORD_EVERY_MS = 6000, COORD_AWAY_MS = 2000, LEASH_PROBE_MS = 2500;
+    private static final int[] LEASH_RADII = {2, 3, 6, 10, 15};   // 3 added 2026-10-07, 2 on 2026-10-08 (the user)
     private static final String KEY_LEASH_R = "farm_leash_r";
     private int leashR = 10;
     private static final java.util.regex.Pattern COORD_TEXT =
@@ -7120,7 +7141,8 @@ public class ClickService extends AccessibilityService {
      * stand on it, every second walking is a second not farming (the user, 11:03).
      */
     private int leashBackR() {
-        return Math.max(2, leashR / 2);
+        // Radius 2: back to within 1, or it stops at the edge and is out again on the next chase.
+        return leashR <= 2 ? 1 : Math.max(2, leashR / 2);
     }
     private boolean returning;
     private int calSign = 1;                                   // probe E/N, or W/S after a blocked try
@@ -7627,6 +7649,7 @@ public class ClickService extends AccessibilityService {
         t.ring.getLocationOnScreen(loc);
         float x = loc[0] + t.ring.getWidth() / 2f;
         float y = loc[1] + t.ring.getHeight() / 2f;
+        if (!t.isSmart()) attackTaps++;                         // Farmer's stuck rule counts real attacks
         tapAt(x, y, "target " + (targets.indexOf(t) + 1) + " at " + Math.round(x) + "," + Math.round(y));
     }
 
@@ -7876,7 +7899,11 @@ public class ClickService extends AccessibilityService {
                         lastChatReadAt = now;
                         farmChatRead(shot);
                     }
-                    if (now - lastCoordReadAt >= (returning ? RETURN_COORD_MS : COORD_EVERY_MS) - 100) {
+                    // 2+ tiles out: every COORD_AWAY_MS - at 6 s a chase was 5-6 tiles off before the
+                    // leash saw it (radius 3, tablet 08:40-09:15).
+                    boolean awayFromHome = homeMap != null && posMap != null && sameMap(posMap, homeMap)
+                            && Math.hypot(homeX - posX, homeY - posY) >= 2;
+                    if (now - lastCoordReadAt >= (returning ? RETURN_COORD_MS : awayFromHome ? COORD_AWAY_MS : COORD_EVERY_MS) - 100) {
                         lastCoordReadAt = now;
                         farmCoordRead(shot);
                     }
