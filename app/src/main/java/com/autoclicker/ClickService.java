@@ -3362,7 +3362,7 @@ public class ClickService extends AccessibilityService {
     // shows the coordinates of the last spot touched). Each tap's readout corrects the scale.
     private static final float MAP_K_DEFAULT = 15.6f;
     private static float MAP_RO_L = 0.86f, MAP_RO_T = 0.785f, MAP_RO_W = 0.11f, MAP_RO_H = 0.06f;
-    private static final int MAP_HOME_GAP_MS = 4000;
+    private static final int MAP_HOME_GAP_MS = 4000, WALK_MS_PER_TILE = 1000;
     private static final java.util.regex.Pattern MAP_READOUT = java.util.regex.Pattern.compile("(\\d{1,4})\\s+(\\d{1,4})");
     private long lastMapHomeAt;
 
@@ -3422,7 +3422,13 @@ public class ClickService extends AccessibilityService {
         if (!running || !farmer) return;
         long now = SystemClock.uptimeMillis();
         lastMapHomeAt = now;
-        leashWalkEnd = now + 3000;
+        // Give the walk its time (~1 s a tile) before judging it: after a fixed 3 s the next reading
+        // still showed it 2 away, just setting off, and the map was opened a second time - every walk
+        // home took 14 s instead of ~7 (the user, 13:03: "it returns home twice").
+        float walkD = (float) Math.hypot(hx - posX, hy - posY);
+        leashWalkEnd = now + MAP_OPEN_MS + 2500 + Math.round(walkD * WALK_MS_PER_TILE);
+        returnCheckPosAt = posAt;                                   // the next reading is judged against here
+        returnCheckDist = walkD;
         busyUntil = farmHoldUntil = Math.max(busyUntil, now + MAP_OPEN_MS + 1500);
         final int px0 = posX, py0 = posY;
         final String map = posMap;
@@ -3506,6 +3512,10 @@ public class ClickService extends AccessibilityService {
                             Log.i(TAG, "farmer: map tap read [" + rx + "," + ry + "], not [" + hx + "," + hy + "] - tapping "
                                     + Math.round(cx) + "," + Math.round(cy) + " instead");
                             tapAt(cx, cy, "map home (corrected)");
+                            // The corrected tap starts the walk again: wait from here.
+                            long tt = SystemClock.uptimeMillis();
+                            lastMapHomeAt = tt;
+                            leashWalkEnd = Math.max(leashWalkEnd, tt + 2000 + Math.round(Math.hypot(hx - px0, hy - py0) * WALK_MS_PER_TILE));
                             busyUntil = farmHoldUntil = Math.max(busyUntil, SystemClock.uptimeMillis() + 1200);
                             handler.postDelayed(ClickService.this::closeMap, 500);
                         } else {
