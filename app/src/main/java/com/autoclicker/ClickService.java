@@ -5390,9 +5390,17 @@ public class ClickService extends AccessibilityService {
         // The hand is animated: an open glove (hand.png) and a fist (hand_fist.png). With the glove
         // only, every fist frame scored 0.43-0.56 and real hands went untapped (the user, 22:52: "the
         // hand is showing but the bot didnt clicked it"). Both: 0.98-1.0 real, at most 0.27 not.
-        int x = 1670, y = 1358, r = 35;
-        float[] m = PetCard.find(this, new String[]{"loot/hand.png", "loot/hand_fist.png"}, shot, x - r, y - r, x + r, y + r, 1f);
+        // Where it sits moves with the game's UI layout: after a game restart (10-08 20:40, its UI
+        // area went 2560x1504 -> 2560x1600) the glove was ~58 px left of the old spot, outside a
+        // +-35 px search, and nothing got looted (0.95 there, 0.5 at the old spot). Search the area
+        // around it and tap where it's found (top-left 1612,1361 then; 1670,1358 before).
+        int x = 1640, y = 1360, rx = 90, ry = 60;
+        float[] m = PetCard.find(this, new String[]{"loot/hand.png", "loot/hand_fist.png"}, shot, x - rx, y - ry, x + rx, y + ry, 1f);
         boolean yes = m != null && m[0] >= LOOT_HAND_MIN;
+        if (yes) {
+            handTapX = m[1] + m[3] / 2f;                             // the glove's centre
+            handTapY = m[2] + m[4] / 2f;
+        }
         if (!yes && SystemClock.uptimeMillis() - lastFakeHandLogAt > 30_000) {
             lastFakeHandLogAt = SystemClock.uptimeMillis();
             Log.d(TAG, "loot hand: tan pixels but not the glove (" + (m == null ? "-" : Math.round(m[0] * 100) / 100f) + "), ignoring");
@@ -5531,11 +5539,12 @@ public class ClickService extends AccessibilityService {
             return;
         }
         lastLootTapAt = now;
-        tapAt(screenW * LOOT_HAND_X, screenH * LOOT_HAND_Y, "loot hand");
+        tapAt(handTapX > 0 ? handTapX : screenW * LOOT_HAND_X, handTapY > 0 ? handTapY : screenH * LOOT_HAND_Y, "loot hand");
         handler.postDelayed(lootTapTick, LOOT_RETAP_MS);
     }
 
     private long handReadAt, lastLootTapAt;
+    private float handTapX, handTapY;                                  // where the glove was last found
     private boolean handUpAtRead;
 
     /** Push the joystick from the centre by (dx, dy) and hold it there for holdMs, then release. */
