@@ -7089,6 +7089,10 @@ public class ClickService extends AccessibilityService {
     private String deathMap;
     private long revivedAt;
     private int backPointTries;
+    // The cards share a cooldown: right after the Start Point (feeding trip) the Back Point said "wait
+    // for item cool down time" twice and it gave up (tablet 12:33). Keep trying a while, slower.
+    private long backPointFirstAt;
+    private static final int BACK_POINT_COOL_RETRY_MS = 20_000, BACK_POINT_COOL_MAX_MS = 4 * 60_000;
     // Hunted (the user, 13:25): 3 deaths in DEATH_WINDOW_MS (10:06, 10:18, 10:20 - a player camping
     // the spot) -> stay in town DEATH_REST_MS before the Back Point, instead of walking into it again.
     private static final int DEATHS_TO_REST = 3;
@@ -7365,6 +7369,7 @@ public class ClickService extends AccessibilityService {
                 return;
             }
             backPointTries++;
+            if (backPointTries == 1) backPointFirstAt = t;
             Log.i(TAG, "died: in " + map + ", using the Back Point card (slot S) to return to " + deathMap
                     + " (try " + backPointTries + ")");
             onCardPage(() -> tapAt(screenW * BACK_POINT_X, screenH * BACK_POINT_Y, "back point"), "Back Point");
@@ -7390,12 +7395,21 @@ public class ClickService extends AccessibilityService {
                 handler.post(useBackPoint);
                 return;
             }
+            if (t - backPointFirstAt < BACK_POINT_COOL_MAX_MS) {
+                Log.w(TAG, "died: still in " + map + " - the card may be cooling down, Back Point again in "
+                        + BACK_POINT_COOL_RETRY_MS / 1000 + " s");
+                deadUntil = busyUntil = farmHoldUntil = t + BACK_POINT_COOL_RETRY_MS + BACK_POINT_LOAD_MS + 5000;
+                handler.removeCallbacks(useBackPoint);
+                handler.postDelayed(useBackPoint, BACK_POINT_COOL_RETRY_MS);
+                return;
+            }
             // Out of tries: don't farm in town. Hold everything and say so.
             deadUntil = busyUntil = farmHoldUntil = t + 10 * 60_000;
             feedTripStage = 0;
             Log.w(TAG, "died: still in " + map + " after " + backPointTries + " Back Point taps, holding");
-            Telegram.send(this, "\u26A0 Ran Online: revived but still in " + map + " after " + backPointTries
-                    + " Back Point taps (no card left?). Farming is on hold.");
+            Telegram.send(this, "\u26A0 Ran Online: " + (feedTripStage != 0 ? "fed the pet" : "revived") + " but still in "
+                    + map + " after " + backPointTries + " Back Point taps over " + (t - backPointFirstAt) / 60_000
+                    + " min (no card left?). Farming is on hold.");
         });
     }
 
