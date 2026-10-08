@@ -206,7 +206,8 @@ public class ClickService extends AccessibilityService {
     // 10 s without damage: drop it and find another (the user, 11:11: a Skating Master sat at 99%
     // for 46 s). A full bar that stays full may be a new monster each check (fast kills: 3 in 15 s
     // read 99% every time) - those kills show as pickups/gold in the chat, which count as progress.
-    private static final int FARM_STUCK_MS = 10_000, STUCK_MIN_ATTACKS = 12;
+    // 5 attacks: at one per 2.2 s (each waits out the last cast) that's ~11 s, near FARM_STUCK_MS.
+    private static final int FARM_STUCK_MS = 10_000, STUCK_MIN_ATTACKS = 5;
     private int attackTaps, attackTapsAtProgress;
     private long progressMarkAt;
     private static final int FARM_STUCK_FULL_MS = 10_000;
@@ -216,13 +217,18 @@ public class ClickService extends AccessibilityService {
     private long farmHoldUntil;
     // The shared "pause after tap" (3 s, set for heals) spaced attacks ~4 s apart.
     // 800 ms: the game accepted 62% of the taps (08:36, cooldowns/locks), each refusal costing 0.84 s.
-    // 500 ms (10-05 to 10-09), then 1 s: the game closing itself every 1-2 h of Farmer on both
-    // devices, never in Boost; fewer taps is the user's call (2026-10-09).
-    private static final int FARM_TAP_GAP_MS = 1000;
+    // 500 ms (10-05 to 10-09): the game closing itself every 1-2 h of Farmer on both devices,
+    // never in Boost; fewer taps is the user's call (2026-10-09). Wait out each cast instead: the
+    // game's own log ([target] ... skill=) on the phone showed a cast every ~2.1 s (cast to cast
+    // 2.03-2.12 s, now and then 1.05) whatever the pace, so taps at 0.5-1 s were 41-46% refused
+    // (158 taps, 86 casts in 5 min). 2160 + TAP_MS = a tap every 2.2 s, after the lock.
+    private static final int FARM_TAP_GAP_MS = 2160;
     // Buffs in Farmer: hold attacks this long after a buff so its cast isn't cancelled; wait at most
     // FARM_BUFF_MAX_WAIT_MS before one; a cast that didn't take is retried after FARM_BUFF_RETRY_MS.
-    private static final int FARM_AFTER_BUFF_MS = 1500, FARM_BUFF_MAX_WAIT_MS = 1500, FARM_BUFF_RETRY_MS = 15_000;
-    private static final int FARM_BUFF_AFTER_BUFF_MS = 2500;
+    // A buff locks longer than an attack: the next cast came 2.46-2.67 s after it (phone, 10-09),
+    // so an attack 1.5 s after a buff was refused.
+    private static final int FARM_AFTER_BUFF_MS = 2600, FARM_BUFF_MAX_WAIT_MS = 1500, FARM_BUFF_RETRY_MS = 15_000;
+    private static final int FARM_BUFF_AFTER_BUFF_MS = 2650;
     // Loot: the hand button beside F1 picks up everything nearby (the user's pick, 2026-10-04,
     // after walking to gold labels kept stopping short and attacks pulled the character away).
     // While the hand shows, attacks pause until it's picked up (farmLootCheck).
