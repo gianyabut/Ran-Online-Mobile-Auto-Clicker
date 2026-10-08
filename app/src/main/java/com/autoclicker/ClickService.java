@@ -3468,6 +3468,10 @@ public class ClickService extends AccessibilityService {
             float dx = (hx - px0) * k, dy = -(hy - py0) * k * mapYRatio();
             // Home off the visible map: go as far as the map shows that way.
             float minX = screenW * 0.05f, maxX = screenW * 0.95f, minY = screenH * 0.15f, maxY = screenH * 0.82f, f = 1f;
+            if (Layout.active()) {                              // the phone's narrower map window
+                minX = Math.max(minX, screenW * MAPBAR_L + 20 * Layout.sy());
+                maxX = Math.min(maxX, screenW * MAPBAR_R - 20 * Layout.sy());
+            }
             if (dx > 0 && a[0] + dx > maxX) f = Math.min(f, (maxX - a[0]) / dx);
             if (dx < 0 && a[0] + dx < minX) f = Math.min(f, (minX - a[0]) / dx);
             if (dy > 0 && a[1] + dy > maxY) f = Math.min(f, (maxY - a[1]) / dy);
@@ -4795,7 +4799,7 @@ public class ClickService extends AccessibilityService {
     /** Is there anything in slot (r, c)? Empty slots are flat dark grey. */
     private boolean bagSlotFilled(Bitmap crop, int ox, int oy, int r, int c) {
         int cx = Math.round(screenW * (BAG_X0 + c * BAG_DX)) - ox, cy = Math.round(screenH * (BAG_Y0 + r * BAG_DY)) - oy;
-        int half = Math.round(screenW * 50 / 2560f), n = 0;
+        int half = Layout.active() ? Math.round(50 * Layout.sx(Layout.RIGHT)) : Math.round(screenW * 50 / 2560f), n = 0;
         long sum = 0, sum2 = 0;
         for (int y = cy - half; y <= cy + half; y += 4) {
             for (int x = cx - half; x <= cx + half; x += 4) {
@@ -5386,7 +5390,27 @@ public class ClickService extends AccessibilityService {
      * the hand, 0.2 for those two.
      */
     private boolean lootHandPicture(Bitmap shot) {
-        if (screenW != 2560 || screenH != 1600) return true;      // measured on the tablet only
+        // The phone (2772x1280, the farming account moved there 2026-10-08): the same pictures at the
+        // height scale, 0.95-0.96 for both frames at (2073-2079,1144-1147), 0.54 at most without the
+        // hand (67 screenshots, 21:51); it sits 655,44 tablet px from the attack fist, scaled the same.
+        if (Layout.active()) {
+            float sy = Layout.sy();
+            float[] fist = Layout.pt("fist", 2362, 1389);
+            float cx = fist[0] - 655 * sy, cy = fist[1] + 44 * sy;          // the glove's centre
+            int px = Math.round(cx - 75 * sy), py = Math.round(cy - 72 * sy);  // a 150x145 picture's top-left
+            int prx = Math.round(90 * sy), pry = Math.round(60 * sy);
+            // Where it was last found first (a few ms); the whole area (~75-125 ms on the main
+            // thread at this scale, pre-install audit) only when that misses.
+            if (handTapX > 0) {
+                int qx = Math.round(handTapX - 75 * sy), qy = Math.round(handTapY - 72 * sy), q = Math.round(12 * sy);
+                float[] near = PetCard.find(this, new String[]{"loot/hand.png", "loot/hand_fist.png"}, shot,
+                        qx - q, qy - q, qx + q, qy + q, sy);
+                if (near != null && near[0] >= LOOT_HAND_MIN) return lootHandMatch(near);
+            }
+            return lootHandMatch(PetCard.find(this, new String[]{"loot/hand.png", "loot/hand_fist.png"}, shot,
+                    px - prx, py - pry, px + prx, py + pry, sy));
+        }
+        if (screenW != 2560 || screenH != 1600) return true;      // measured on the tablet and the phone only
         // The hand is animated: an open glove (hand.png) and a fist (hand_fist.png). With the glove
         // only, every fist frame scored 0.43-0.56 and real hands went untapped (the user, 22:52: "the
         // hand is showing but the bot didnt clicked it"). Both: 0.98-1.0 real, at most 0.27 not.
@@ -5395,7 +5419,11 @@ public class ClickService extends AccessibilityService {
         // +-35 px search, and nothing got looted (0.95 there, 0.5 at the old spot). Search the area
         // around it and tap where it's found (top-left 1612,1361 then; 1670,1358 before).
         int x = 1640, y = 1360, rx = 90, ry = 60;
-        float[] m = PetCard.find(this, new String[]{"loot/hand.png", "loot/hand_fist.png"}, shot, x - rx, y - ry, x + rx, y + ry, 1f);
+        return lootHandMatch(PetCard.find(this, new String[]{"loot/hand.png", "loot/hand_fist.png"}, shot, x - rx, y - ry, x + rx, y + ry, 1f));
+    }
+
+    /** A picture match m ({score, left, top, w, h}) good enough to be the hand: remember where to tap. */
+    private boolean lootHandMatch(float[] m) {
         boolean yes = m != null && m[0] >= LOOT_HAND_MIN;
         if (yes) {
             handTapX = m[1] + m[3] / 2f;                             // the glove's centre
@@ -6493,6 +6521,21 @@ public class ClickService extends AccessibilityService {
         // shot is half size: bins of 16 px and every pixel = 32 px bins at every 2nd pixel full size.
         int w = shot.getWidth(), h = shot.getHeight();
         int x0 = Math.round(w * 0.07f), x1 = Math.round(w * 0.97f), y0 = Math.round(h * 0.09f), y1 = Math.round(h * 0.86f);
+        if (Layout.active()) {                                  // the phone's narrower map window
+            x0 = Math.max(x0, Math.round(w * MAPBAR_L));
+            x1 = Math.min(x1, Math.round(w * MAPBAR_R));
+        }
+        // Our bar (teal anchor button) and rings are in the screenshot too: leave the bar out.
+        int bl = -1, bt = -1, br = -1, bb = -1;
+        if (bar != null && bar.getVisibility() == View.VISIBLE && bar.getWidth() > 0) {
+            int[] loc = new int[2];
+            bar.getLocationOnScreen(loc);
+            float half = w / (float) Math.max(1, screenW);          // shot is half size
+            bl = Math.round((loc[0] - 8) * half);
+            bt = Math.round((loc[1] - 8) * half);
+            br = Math.round((loc[0] + bar.getWidth() + 8) * half);
+            bb = Math.round((loc[1] + bar.getHeight() + 8) * half);
+        }
         final int bin = 16;
         int bw = w / bin + 1, bh = h / bin + 1;
         int[] counts = new int[bw * bh];
@@ -6505,7 +6548,7 @@ public class ClickService extends AccessibilityService {
                 boolean hit = arrow
                         ? r < 110 && g > 100 && g < 165 && b > 130 && b > g + 5 && !(x > w * 0.78f && y < h * 0.3f)
                         : r > 215 && g > 120 && g < 185 && b < 100 && r - b > 130;
-                if (!hit) continue;
+                if (!hit || (x >= bl && x <= br && y >= bt && y <= bb)) continue;
                 int k = (y / bin) * bw + x / bin;
                 counts[k]++;
                 sx[k] += x;
@@ -6728,7 +6771,7 @@ public class ClickService extends AccessibilityService {
      * used on the pet card in the bag, so the pet needn't be out), then the Back Point card (S) back.
      * Stages: 1 on the way, 2 feeding there, 3 on the way back.
      */
-    private static final float START_POINT_X = 2164 / 2560f, START_POINT_Y = 756 / 1600f;
+    private static float START_POINT_X = 2164 / 2560f, START_POINT_Y = 756 / 1600f;   // moved by applyLayout
     private static final int FEED_MAX_MS = 60_000, FEED_TRIP_MOVED = 8;
     private int feedTripStage, feedTripTries, feedTripFromX, feedTripFromY;
     private String feedTripFromMap;
@@ -8758,6 +8801,8 @@ public class ClickService extends AccessibilityService {
         CAMPUS_CARD_Y = Layout.fy("Z", 2470, 756);
         BACK_POINT_X = Layout.fx("Z", 2317, 755);
         BACK_POINT_Y = Layout.fy("Z", 2317, 755);
+        START_POINT_X = Layout.fx("Z", 2164, 756);
+        START_POINT_Y = Layout.fy("Z", 2164, 756);
         BAR_LBL_L = Layout.fx("Z", 2390, 690);
         BAR_LBL_T = Layout.fy("Z", 2390, 690);
         BAR_LBL_W = Layout.fx("Z", 2470, 690) - BAR_LBL_L;
