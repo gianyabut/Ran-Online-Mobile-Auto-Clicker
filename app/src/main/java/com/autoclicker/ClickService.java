@@ -331,7 +331,7 @@ public class ClickService extends AccessibilityService {
     private long lastTargetBarAt;
     private final Runnable lootTapTick = this::lootTapTick;
     // Text reading (the anti-bot question) on every 2nd fight-check screenshot, from the play area.
-    private static final int FARM_OCR_MS = 4000;
+    private static final int FARM_OCR_MS = 4000, NEAR_KILL_OCR_MS = 2000;
     private long lastFarmOcrAt;
     // From just under the HP bars at the top (so the target bar's name is in it) down to the chat.
     // Wide, for luring on sparse maps (a Skating Master at 0.87W was out of view); the HUD, ring
@@ -7966,7 +7966,11 @@ public class ClickService extends AccessibilityService {
                     }
                     boolean nearKill = (farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP)   // to see where it dies
                             || (now < postKillUntil && now - killAt < DROP_READ_MS);                  // and what it drops
-                    if (luring || nearKill || now - lastFarmOcrAt >= FARM_OCR_MS - 100) {   // every scan while luring
+                    // Near a kill the scans come every second (for the loot hand, found by picture);
+                    // the big text read stays at every 2 s, as before those 1 s scans - every second
+                    // it added to the memory the tablet ran out of. 0 = a read asked for this scan.
+                    long ocrGap = luring ? 0 : nearKill ? NEAR_KILL_OCR_MS : FARM_OCR_MS;
+                    if (lastFarmOcrAt == 0 || now - lastFarmOcrAt >= ocrGap - 100) {   // every scan while luring
                         lastFarmOcrAt = now;
                         farmOcr(shot);
                     }
@@ -9347,6 +9351,7 @@ public class ClickService extends AccessibilityService {
     @Override
     public void onDestroy() {
         if (instance == this) instance = null;
+        Ocr.close();
         watchHandler.removeCallbacksAndMessages(null);
         if (wm != null) removeOverlays("destroy");
         if (sellReceiver != null) {

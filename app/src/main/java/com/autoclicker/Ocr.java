@@ -28,7 +28,25 @@ final class Ocr {
         void onText(List<MathQuestion.Line> lines, List<MathQuestion.Word> words);
     }
 
+    // One recognizer for the whole run. A new one per read reloaded the models and set up 4
+    // interpreters every time: 32 reloads a minute while farming (tablet 18:15), and the Pad 5 ran
+    // out of memory about once an hour, which made the game close itself ("had to stop").
+    private static TextRecognizer recognizer;
+
     private Ocr() {
+    }
+
+    private static synchronized TextRecognizer recognizer() {
+        if (recognizer == null) recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        return recognizer;
+    }
+
+    /** Frees the models; the next read loads them again. */
+    static synchronized void close() {
+        if (recognizer != null) {
+            recognizer.close();
+            recognizer = null;
+        }
     }
 
     static void read(Bitmap bitmap, Callback cb) {
@@ -41,18 +59,17 @@ final class Ocr {
             cb.onText(new ArrayList<>(), new ArrayList<>());
             return;
         }
-        TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-        recognizer.process(InputImage.fromBitmap(bitmap, 0))
+        recognizer().process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener(text -> {
                     List<MathQuestion.Line> lines = new ArrayList<>();
                     List<MathQuestion.Word> words = new ArrayList<>();
                     flatten(text, lines, words);
-                    finish(recycle ? bitmap : null, recognizer);
+                    finish(recycle ? bitmap : null);
                     cb.onText(lines, words);
                 })
                 .addOnFailureListener(e -> {
                     Log.w(TAG, "OCR failed", e);
-                    finish(recycle ? bitmap : null, recognizer);
+                    finish(recycle ? bitmap : null);
                     cb.onText(new ArrayList<>(), new ArrayList<>());
                 });
     }
@@ -70,8 +87,7 @@ final class Ocr {
         }
     }
 
-    private static void finish(Bitmap bitmap, TextRecognizer recognizer) {
-        recognizer.close();
+    private static void finish(Bitmap bitmap) {
         if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
     }
 }
