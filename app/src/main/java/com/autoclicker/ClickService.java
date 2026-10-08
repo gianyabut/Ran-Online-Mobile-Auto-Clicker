@@ -2330,6 +2330,7 @@ public class ClickService extends AccessibilityService {
 
     /** In booster/farmer: the game is in front, in landscape, and no keyboard is up. */
     private boolean boosterCanAct() {
+        if (atLogin()) return false;
         if (keyboardShowing()) return false;
         DisplayMetrics real = new DisplayMetrics();
         wm.getDefaultDisplay().getRealMetrics(real);
@@ -5616,6 +5617,7 @@ public class ClickService extends AccessibilityService {
      * and never while the keyboard is up: the rings would land on its keys (backspace, enter...).
      */
     private boolean gameInFront() {
+        if (atLogin()) return false;
         if (keyboardShowing()) {
             if (!pausedForKeyboard) {
                 Log.i(TAG, "paused: keyboard is open");
@@ -7556,7 +7558,36 @@ public class ClickService extends AccessibilityService {
         tapAt(x, y, "pet no (stray)");
     }
 
+    // The game's login screen (after a restart the game came back there and the bot "farmed" on it,
+    // tapping and walking - tablet 12:41, the user): nothing is tapped until it's gone.
+    private static final int LOGIN_HOLD_MS = 8000;
+    private long loginSeenAt, loginAlertAt;
+
+    private boolean atLogin() {
+        return loginSeenAt != 0 && SystemClock.uptimeMillis() - loginSeenAt < LOGIN_HOLD_MS;
+    }
+
+    private void checkLogin(List<MathQuestion.Line> lines) {
+        int hits = 0;
+        for (MathQuestion.Line l : lines) {
+            String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+            if (k.contains("welcomeback") || k.contains("selectserver") || k.contains("signintocontinue")
+                    || k.equals("privacypolicy") || k.equals("deleteaccount") || k.equals("rememberme")) hits++;
+        }
+        if (hits < 2) return;
+        long now = SystemClock.uptimeMillis();
+        if (!atLogin()) Log.w(TAG, "game: at the login screen - not tapping until it's gone");
+        loginSeenAt = now;
+        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + LOGIN_HOLD_MS);
+        panelQuietUntil = Math.max(panelQuietUntil, now + LOGIN_HOLD_MS);   // not a panel to X
+        if (running && !manual && now - loginAlertAt > 30 * 60_000L) {
+            loginAlertAt = now;
+            Telegram.send(this, "\uD83D\uDD11 Ran Online: the game is at the login screen - please log in. I'm not tapping until then.");
+        }
+    }
+
     private void checkForQuestion(String game, List<MathQuestion.Line> lines) {
+        checkLogin(lines);
         checkRevive(lines);
         checkStrayPetDialog(lines);
         noteExp(lines);
