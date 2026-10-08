@@ -217,12 +217,13 @@ public class ClickService extends AccessibilityService {
     private long farmHoldUntil;
     // The shared "pause after tap" (3 s, set for heals) spaced attacks ~4 s apart.
     // 800 ms: the game accepted 62% of the taps (08:36, cooldowns/locks), each refusal costing 0.84 s.
-    // 500 ms (10-05 to 10-09): the game closing itself every 1-2 h of Farmer on both devices,
-    // never in Boost; fewer taps is the user's call (2026-10-09). Wait out each cast instead: the
-    // game's own log ([target] ... skill=) on the phone showed a cast every ~2.1 s (cast to cast
-    // 2.03-2.12 s, now and then 1.05) whatever the pace, so taps at 0.5-1 s were 41-46% refused
-    // (158 taps, 86 casts in 5 min). 2160 + TAP_MS = a tap every 2.2 s, after the lock.
-    private static final int FARM_TAP_GAP_MS = 2160;
+    // The slowdown to 2160 (a tap every 2.2 s, one per cast) was meant to stop the game closing
+    // itself every 1-2 h of Farmer - but that was the unanswered presence check (now auto-tapped,
+    // see updatePresenceCheck), not the tap rate. Back to 500 ms (the user, 2026-10-09): the game
+    // still only casts every ~2.1 s (the skill lock), so most of these are refused, but a fresh tap
+    // is always ready the moment the lock lifts, so a missed cast is recovered in <1 s instead of
+    // waiting out another whole 2.2 s gap.
+    private static final int FARM_TAP_GAP_MS = 500;
     // Buffs in Farmer: hold attacks this long after a buff so its cast isn't cancelled; wait at most
     // FARM_BUFF_MAX_WAIT_MS before one; a cast that didn't take is retried after FARM_BUFF_RETRY_MS.
     // A buff locks longer than an attack: the next cast came 2.46-2.67 s after it (phone, 10-09),
@@ -459,6 +460,15 @@ public class ClickService extends AccessibilityService {
     private boolean chatArmed = true;
     private int chatAbsentScans;
     private boolean presenceCheckShown;
+    // Auto-tap the Move button to answer the "please click Confirm" presence check (the user asked,
+    // 2026-10-09). An unanswered check is what was closing the game - the "The game had to stop"
+    // dialog followed a Move panel left sitting. Only when the button is seen at its known spot and
+    // the clicker runs (manual = you're playing); re-tap if it's still up, alert after a few tries.
+    private static final int PRESENCE_MAX_TAPS = 4;
+    private static final int PRESENCE_RETAP_MS = 3000;
+    private int presenceTaps;
+    private long lastPresenceTapAt;
+    private boolean presenceAlerted;
     // After a wave, buffs at or below this are recast (the user's call). With a clear every ~2 min
     // (93-214 s on 2026-10-02) the ~4.5-5 min buffs sit at ~55-60% after one wave and well below
     // after two: recast every 2nd wave. Confusion Strike (~2 min) and Massive Haste (~40 s) every
@@ -498,7 +508,9 @@ public class ClickService extends AccessibilityService {
     private final Handler watchHandler = new Handler(Looper.getMainLooper());
     // Off the 1 s / 2 s screenshot rhythm of the other checks, so it doesn't keep colliding.
     private static final int QUESTION_WATCH_MS = 3170;
-    private static final float QUESTION_SCAN_H = 0.66f;     // down to the answer buttons
+    // Down to the math answer buttons, and far enough for the presence panel's "Move" button
+    // (above the chat, ~65% down) so it can be auto-tapped in FS/booster too, not just Farmer.
+    private static final float QUESTION_SCAN_H = 0.74f;
     // Not plain "verify": the loading screen says "Verifying~" (13:09, a false alert).
     private static final String[] QUESTION_WATCH_WORDS = {"simple question", "verify this"};
     private final Runnable questionWatchTick = this::questionWatchTick;
@@ -1598,7 +1610,9 @@ public class ClickService extends AccessibilityService {
         // Farmer: attacks keep the quick pace; a buff waits out the last skill's lock (its learned
         // extra wait), or it lands mid-animation and is ignored (12:32-12:33).
         if (farmer) {
-            long extra = t.isSmart() ? Math.min(t.extraGapMs, FARM_BUFF_MAX_WAIT_MS) : 0;   // never stall attacks long
+            // Only what it learned beyond the first 1 s: the 2.2 s attack pace already covers the
+            // lock, and the 1 s on top held every buff 3.2 s after an attack (audit, 2026-10-09).
+            long extra = t.isSmart() ? Math.min(Math.max(0, t.extraGapMs - MIN_EXTRA_GAP_MS), FARM_BUFF_MAX_WAIT_MS) : 0;
             // Right after another buff the game's lock is longer: Blood Lust 1.8 s after Power Kick
             // was swallowed twice (14:17-14:18).
             if (t.isSmart() && lastBuffTapAt > 0 && lastBuffTapAt == lastAnyTapAt) {
@@ -1976,22 +1990,61 @@ public class ClickService extends AccessibilityService {
     }
 
     /**
-     * The game's "please click Confirm" panel: disconnects you if nobody answers in ~25 s. Alert
-     * (sound, vibration, heads-up; on a linked phone too) the moment it shows, clear it once it's
-     * gone. Answering is up to you.
+     * The game's "please click Confirm" panel: disconnects you (and then shows "The game had to
+     * stop") if nobody answers in ~25 s. Auto-tap the Move button to answer it, as long as we can
+     * see the button at its known spot and the clicker is running (in manual you're playing). Re-tap
+     * if it's still up; after a few tries, or when we can't tap it, fall back to alerting you.
      */
-    private void updatePresenceCheck(boolean shown) {
-        if (shown == presenceCheckShown) return;
-        presenceCheckShown = shown;
-        if (shown) {
-            Log.w(TAG, "the game is asking if you're there (Move button): alerting you");
+    /** Centre of the Move button at its fingerprinted spot (the backup locator). */
+    private float[] presenceFpPoint() {
+        return new float[]{(Prompts.LEFT + Prompts.WIDTH / 2f) * screenW,
+                (Prompts.TOP + Prompts.HEIGHT / 2f) * screenH};
+    }
+
+    private void updatePresenceCheck(boolean shown, float[] tapPt) {
+        if (!shown) {
+            if (presenceCheckShown) {
+                Log.i(TAG, "presence check gone");
+                Alerts.clearQuestion(this);
+            }
+            presenceCheckShown = false;
+            presenceTaps = 0;
+            presenceAlerted = false;
+            return;
+        }
+        if (!presenceCheckShown) Log.w(TAG, "the game is asking if you're there (Move)");
+        presenceCheckShown = true;
+        long now = SystemClock.uptimeMillis();
+        // Tap only where we actually found the button - the OCR'd "Move" box, or the pixel-matched
+        // spot. Tapping a fixed guess on just the text could hit the game world (the panel sits in a
+        // different place per device and moves with the chat box). In manual you're playing.
+        boolean canTap = tapPt != null && running && !manual;
+        if (canTap && presenceTaps < PRESENCE_MAX_TAPS && (presenceTaps == 0 || now - lastPresenceTapAt >= PRESENCE_RETAP_MS)) {
+            presenceTaps++;
+            lastPresenceTapAt = now;
+            final float x = tapPt[0], y = tapPt[1];
+            final int tn = presenceTaps;
+            Log.i(TAG, "presence check: tapping Move at " + Math.round(x) + "," + Math.round(y)
+                    + " (tap " + tn + ")");
+            busyUntil = Math.max(busyUntil, now + QUESTION_TAP_HOLD_MS);   // no attack tap in between
+            long wait = Math.max(0, lastAnyTapAt + TAP_MS + 60 - now);      // not on top of one either
+            handler.postDelayed(() -> tapAt(x, y, "presence Move (" + tn + ")"), wait);
+            if (tn == 1) {
+                Telegram.send(this, "✅ Ran Online: the presence check popped up - auto-tapped Move. "
+                        + "Double-check it stayed in if you can.");
+            }
+            return;
+        }
+        // Couldn't tap (never located the button, or in manual), or it's still up after a few tries:
+        // alert so you can tap it before the ~25 s grace runs out.
+        if (!presenceAlerted && ((presenceTaps == 0 && !canTap) || presenceTaps >= PRESENCE_MAX_TAPS)) {
+            presenceAlerted = true;
+            Log.w(TAG, "presence check: not auto-tapping (" + (tapPt == null ? "Move not located"
+                    : !canTap ? "manual/not running" : "still up after " + presenceTaps + " taps") + "), alerting you");
             Alerts.question(this, gamePackage != null ? gamePackage : DEFAULT_GAME,
                     "The game is checking if you're there. Tap Move within ~25 s or it disconnects you.");
-            Telegram.send(this, "⚠️ Ran Online: the game is checking if you're there. "
-                    + "Tap Move within ~25 s or it disconnects you.");
-        } else {
-            Log.i(TAG, "presence check gone");
-            Alerts.clearQuestion(this);
+            Telegram.send(this, "⚠ Ran Online: the game is checking if you're there and the auto-tap "
+                    + "couldn't answer it. Tap Move within ~25 s or it disconnects you.");
         }
     }
 
@@ -5579,7 +5632,9 @@ public class ClickService extends AccessibilityService {
             }
             lootStartedAt = 0;
             handler.removeCallbacks(lootTapTick);
-            busyUntil = farmHoldUntil = now;
+            // Still the last cast's lock: a loot can start right after an attack and end ~1 s later.
+            busyUntil = Math.max(now, lastAnyTapAt + TAP_MS + tapGapMs);
+            farmHoldUntil = now;
             farmMobsSeenAt = farmProgressAt = now;          // standing still to loot isn't idling
             schedulePump(0);
             return;
@@ -7813,7 +7868,47 @@ public class ClickService extends AccessibilityService {
         }
     }
 
+    // The same check by its words, "Hello, please click "Confirm" button.": the Move button's pixel
+    // fingerprint never fired once (10-08: the panel moves with the chat box, and the phone's is
+    // elsewhere), and the game closed at 3 of the closes with the panel up. Seen in a read, it
+    // stays "shown" this long after (reads come every 2-4 s), and holds the taps meanwhile so
+    // yours isn't crossed by one of ours.
+    private static final int PRESENCE_TEXT_MS = 6000;
+    private long presenceTextAt;
+
+    private boolean presenceTextSeen() {
+        return presenceTextAt != 0 && SystemClock.uptimeMillis() - presenceTextAt < PRESENCE_TEXT_MS;
+    }
+
+    private void checkPresenceText(List<MathQuestion.Line> lines) {
+        MathQuestion.Line presence = null;
+        Rect move = null;                                   // the panel's "Move" button, by its text
+        for (MathQuestion.Line l : lines) {
+            String k = l.text.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z]", "");
+            if (k.contains("pleaseclick") && (k.contains("confirm") || k.contains("button"))) {
+                if (presence == null) presence = l;
+            } else if (k.equals("move")) {
+                // The button sits just below the text; nearest to it wins (the map's run/move UI or
+                // a chat line could read "move" too).
+                if (move == null || (presence != null
+                        && Math.abs(l.box.exactCenterY() - presence.box.exactCenterY())
+                        < Math.abs(move.exactCenterY() - presence.box.exactCenterY()))) {
+                    move = l.box;
+                }
+            }
+        }
+        if (presence == null) return;
+        long now = SystemClock.uptimeMillis();
+        presenceTextAt = now;
+        busyUntil = farmHoldUntil = Math.max(farmHoldUntil, now + PRESENCE_TEXT_MS);
+        // Only trust a "Move" box that's near the panel text, not one off in the chat or the HUD.
+        float[] pt = (move != null && Math.abs(move.exactCenterY() - presence.box.exactCenterY()) < screenH * 0.25f)
+                ? new float[]{move.exactCenterX(), move.exactCenterY()} : null;
+        updatePresenceCheck(true, pt);
+    }
+
     private void checkForQuestion(String game, List<MathQuestion.Line> lines) {
+        checkPresenceText(lines);
         checkLogin(lines);
         checkRevive(lines);
         checkStrayPetDialog(lines);
@@ -8063,7 +8158,8 @@ public class ClickService extends AccessibilityService {
                     lastBoostShotAt = SystemClock.uptimeMillis();
                     if (!running || !booster) return;
                     if (keyboardShowing() || (gamePackage != null && !gamePackage.equals(foregroundPackage()))) return;
-                    updatePresenceCheck(Prompts.presenceCheck(shot, screenW, screenH));
+                    boolean presenceBtn = Prompts.presenceCheck(shot, screenW, screenH);
+                    updatePresenceCheck(presenceBtn || presenceTextSeen(), presenceBtn ? presenceFpPoint() : null);
                     if (follow) return;                              // follow reads the text itself
                     lastScanShotAt = SystemClock.uptimeMillis();     // the question watch stands down
                     Bitmap top = null;
@@ -8195,7 +8291,8 @@ public class ClickService extends AccessibilityService {
                     }
                 }
                 if (scanBuffs) targetSelected = MobCounter.targetSelected(shot, screenW, screenH);
-                updatePresenceCheck(Prompts.presenceCheck(shot, screenW, screenH));
+                boolean presenceBtn = Prompts.presenceCheck(shot, screenW, screenH);
+                updatePresenceCheck(presenceBtn || presenceTextSeen(), presenceBtn ? presenceFpPoint() : null);
                 // The whole row vanishing at once means something covered it (a menu, an effect),
                 // not that every buff ran out in the same second. Only believe it after a while.
                 // Judge by our own learned buffs: if none of them can be seen at once, the row is
