@@ -236,8 +236,9 @@ public class ClickService extends AccessibilityService {
     private static final int LOOT_STALL_MS = 3500, LOOT_CHAT_MS = 1500;   // 5 s per unpickable item added up (81 s in 17 min)
     private long lastPickupAt;
     // Not faster while looting: 1 s screenshots under memory pressure preceded Android's own
-    // system process hanging and restarting (12:35-12:37, watchdog kill), as at 11:43.
-    private static final int LOOT_SCAN_MS = 700;
+    // system process hanging and restarting (12:35-12:37, watchdog kill), as at 11:43. 0.7 s
+    // (10-07) added ~850 MB a minute of screenshot copies; the game ran out of memory hourly.
+    private static final int LOOT_SCAN_MS = 1000;
     // A skill still animating ignores other input; give it this long after the last attack tap.
     private static final int LOOT_AFTER_SKILL_MS = 700;
     // No walking for loot: the loot button walks the character to the item by itself (the user,
@@ -3886,6 +3887,10 @@ public class ClickService extends AccessibilityService {
         tapAt(c[0], c[1], "chat open");
     }
 
+    // chatBubble's buffers, kept: new ones were 4.4 MB on every chat read (main thread only).
+    private int[] bubblePx, bubbleSum;
+    private boolean[] bubbleWhite;
+
     /** Centre of the "..." bubble in screen pixels, or null. */
     private float[] chatBubble(Bitmap bmp, int ox, int oy) {
         float s = Layout.active() ? Layout.sy() : screenW / 2560f;
@@ -3894,10 +3899,17 @@ public class ClickService extends AccessibilityService {
         int y1 = Math.min(bmp.getHeight(), Math.round(screenH * CHATB_B) - oy);
         int w = x1 - x0, h = y1 - y0, bw = Math.round(60 * s), bh = Math.round(40 * s);
         if (w <= bw || h <= bh) return null;
-        int[] px = new int[w * h];
+        if (bubblePx == null || bubblePx.length < w * h) {
+            bubblePx = new int[w * h];
+            bubbleWhite = new boolean[w * h];
+        }
+        if (bubbleSum == null || bubbleSum.length < (w + 1) * (h + 1)) bubbleSum = new int[(w + 1) * (h + 1)];
+        int[] px = bubblePx;
+        boolean[] white = bubbleWhite;
+        int[] sum = bubbleSum;                                  // integral image of the white pixels
         bmp.getPixels(px, 0, w, x0, y0, w, h);
-        boolean[] white = new boolean[w * h];
-        int[] sum = new int[(w + 1) * (h + 1)];                 // integral image of the white pixels
+        java.util.Arrays.fill(sum, 0, w + 1, 0);                // its first row and column stay 0
+        for (int y = 1; y <= h; y++) sum[y * (w + 1)] = 0;
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
                 int p = px[y * w + x];
@@ -3962,8 +3974,8 @@ public class ClickService extends AccessibilityService {
             for (int k = 1; k <= gap; k++) {
                 int q = pos + dir * k;
                 if (q < 0 || q > lim) break;
-                boolean ok = horizontal ? whiteRun(white, w, q, cy - 6, q, cy + 6) >= 9
-                        : whiteRun(white, w, cx - 15, q, cx + 15, q) >= 24;
+                boolean ok = horizontal ? whiteRun(white, w, h, q, cy - 6, q, cy + 6) >= 9
+                        : whiteRun(white, w, h, cx - 15, q, cx + 15, q) >= 24;
                 if (ok) {
                     next = q;
                     break;
@@ -3974,8 +3986,8 @@ public class ClickService extends AccessibilityService {
         }
     }
 
-    private static int whiteRun(boolean[] white, int w, int xa, int ya, int xb, int yb) {
-        int n = 0, h = white.length / w;
+    private static int whiteRun(boolean[] white, int w, int h, int xa, int ya, int xb, int yb) {
+        int n = 0;                                              // h: the buffer can be bigger (reused)
         for (int y = Math.max(0, ya); y <= Math.min(h - 1, yb); y++) {
             for (int x = Math.max(0, xa); x <= Math.min(w - 1, xb); x++) if (white[y * w + x]) n++;
         }
@@ -4233,7 +4245,10 @@ public class ClickService extends AccessibilityService {
             if (!running || sellStage != 2) return;
             openMapTap();
             handler.postDelayed(() -> captureHalfScreen(shot -> {
-                if (!running || sellStage != 2) return;
+                if (!running || sellStage != 2) {
+                    if (shot != null) shot.recycle();
+                    return;
+                }
                 boolean open = shot != null && mapIsOpen(shot, 1f);
                 if (shot != null) shot.recycle();
                 if (!open) {
@@ -4394,7 +4409,10 @@ public class ClickService extends AccessibilityService {
         closeMap();
         // Both windows: one X closed the bag ("Equipment's Tool") but left the "Store" up (16:00).
         handler.postDelayed(() -> captureRegionForOcr(0f, 180 / 1600f, 1f, 160 / 1600f, crop -> {
-            if (!running || sellStage != 5) return;
+            if (!running || sellStage != 5) {
+                if (crop != null) crop.recycle();
+                return;
+            }
             if (crop == null) {
                 handler.postDelayed(this::sellBackPoint, 500);
                 return;
@@ -4756,7 +4774,10 @@ public class ClickService extends AccessibilityService {
         }
         tapAt(screenW * BAG_DOWN_X, screenH * BAG_DOWN_Y, "bag down");
         handler.postDelayed(() -> captureRegionForOcr(BAG_L, BAG_T, BAG_W, BAG_H, crop -> {
-            if (!sellRunning) return;
+            if (!sellRunning) {
+                if (crop != null) crop.recycle();
+                return;
+            }
             if (crop == null) {
                 sellDone("no screenshot after scrolling");
                 return;
@@ -5476,13 +5497,15 @@ public class ClickService extends AccessibilityService {
     }
 
     /**
-     * Every 2 s; every second in a fight or just after a kill, to catch the loot hand: at 2 s (p90
-     * 3.9 s) the hand sat there unseen and the user saw the loot "delaying" (tablet 21:55-22:00).
+     * Every 2 s; every second near a kill (the target's last 40%) and just after it, to catch the
+     * loot hand: at 2 s (p90 3.9 s) the hand sat there unseen and the user saw the loot "delaying"
+     * (tablet 21:55-22:00). Not the whole fight: 1 s scans in every fight doubled the screenshots
+     * (~1 GB a minute) and the tablet's game closed itself on low memory every hour (10-08).
      */
     private int farmScanMs() {
         if (lootStartedAt > 0) return LOOT_SCAN_MS;
         long now = SystemClock.uptimeMillis();
-        boolean nearKill = now < postKillUntil || farmTargetHp >= 0;
+        boolean nearKill = now < postKillUntil || (farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP);
         return nearKill ? KILL_SCAN_MS : FARM_SCAN_MS;
     }
 
@@ -7964,13 +7987,17 @@ public class ClickService extends AccessibilityService {
                         lastCoordReadAt = now;
                         farmCoordRead(shot);
                     }
-                    boolean nearKill = (farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP)   // to see where it dies
-                            || (now < postKillUntil && now - killAt < DROP_READ_MS);                  // and what it drops
-                    // Near a kill the scans come every second (for the loot hand, found by picture);
-                    // the big text read stays at every 2 s, as before those 1 s scans - every second
-                    // it added to the memory the tablet ran out of. 0 = a read asked for this scan.
+                    // After a kill the scans come every second (for the loot hand, found by picture);
+                    // the big text read, to see what dropped, stays at every 2 s - every second it
+                    // added to the memory the tablet ran out of. Plus one read in the 4.5-5.5 s window
+                    // that decides "nothing dropped, attack" (2 s apart missed it half the time). The
+                    // last 40% of HP only placed the kill spot, for loot walks (off). 0 = asked for.
+                    boolean postKill = now < postKillUntil && now - killAt < DROP_READ_MS;
+                    boolean decideRead = postKill && now - killAt >= DROP_DECIDE_MS
+                            && lastFarmOcrAt < killAt + DROP_DECIDE_MS;
+                    boolean nearKill = postKill || (LOOT_WALKS && farmTargetHp >= 0 && farmTargetHp <= KILL_SOON_HP);
                     long ocrGap = luring ? 0 : nearKill ? NEAR_KILL_OCR_MS : FARM_OCR_MS;
-                    if (lastFarmOcrAt == 0 || now - lastFarmOcrAt >= ocrGap - 100) {   // every scan while luring
+                    if (lastFarmOcrAt == 0 || decideRead || now - lastFarmOcrAt >= ocrGap - 100) {   // every scan while luring
                         lastFarmOcrAt = now;
                         farmOcr(shot);
                     }
@@ -8292,7 +8319,7 @@ public class ClickService extends AccessibilityService {
                         shot = part.copy(Bitmap.Config.ARGB_8888, false);
                         if (part != hw) part.recycle();
                     }
-                } catch (RuntimeException e) {
+                } catch (RuntimeException | OutOfMemoryError e) {
                     Log.w(TAG, "couldn't copy the region: " + e);
                 }
                 hw.recycle();

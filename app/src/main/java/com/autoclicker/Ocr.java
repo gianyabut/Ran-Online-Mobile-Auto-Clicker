@@ -71,6 +71,11 @@ final class Ocr {
                     Log.w(TAG, "OCR failed", e);
                     finish(recycle ? bitmap : null);
                     cb.onText(new ArrayList<>(), new ArrayList<>());
+                })
+                .addOnCanceledListener(() -> {
+                    // close() cancels a read under way: neither listener above runs then.
+                    finish(recycle ? bitmap : null);
+                    cb.onText(new ArrayList<>(), new ArrayList<>());
                 });
     }
 
