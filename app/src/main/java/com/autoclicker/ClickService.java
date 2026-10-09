@@ -5273,7 +5273,12 @@ public class ClickService extends AccessibilityService {
         handler.postDelayed(lootReportTick, LOOT_REPORT_MS);
         if (!running || !farmer) return;
         long now = System.currentTimeMillis();
-        if (manual) {                                         // played by hand: nothing to report
+        // Nothing to report when we're not actually farming: played by hand (manual), or the game
+        // isn't in play - at the login screen after a disconnect/kick, or not in the foreground. The
+        // bot doesn't tap then (atLogin guards), but it was still sending a "Farm" report every 5 min
+        // that it wasn't online (the user, 2026-10-10: "phone report farm but it isnt online").
+        boolean offline = atLogin() || (gamePackage != null && !gamePackage.equals(foregroundPackage()));
+        if (manual || offline) {
             lootGold = 0;
             lootItems.clear();
             repReset();
