@@ -322,6 +322,13 @@ public class ClickService extends AccessibilityService {
     private List<String> lastChatLines = new ArrayList<>();
     private boolean chatPrimed;
     private final Runnable lootReportTick = this::lootReportTick;
+    // Boost mode: an hourly EXP summary to Telegram (the user, 2026-10-10). EXP is already tracked by
+    // noteExp (runs in Boost too, via checkForQuestion). boostReportBase* snapshot it per window.
+    private static final int BOOST_REPORT_MS = 60 * 60_000;
+    private final Runnable boostReportTick = this::boostReportTick;
+    private long boostReportFrom;
+    private float boostReportBaseExp;
+    private int boostReportBaseLevelUps;
     private static final java.util.regex.Pattern PICKUP_LINE =
             java.util.regex.Pattern.compile("up\\s*item\\s*\\W*(.+?)\\W*$", java.util.regex.Pattern.CASE_INSENSITIVE);
     private static final java.util.regex.Pattern GOLD_LINE =
@@ -1223,6 +1230,17 @@ public class ClickService extends AccessibilityService {
             petStartCheck = true;
             petGoneReads = 0;
             lastPetBarAt = 0;
+        }
+        if (run && booster) {
+            // Fresh EXP window for the hourly Boost report. expNow -1 so a stale reading from before
+            // the start doesn't count as a jump.
+            sessExp = 0;
+            repLevelUps = 0;
+            expNow = expAtStart = -1;
+            boostReportBaseExp = 0;
+            boostReportBaseLevelUps = 0;
+            boostReportFrom = System.currentTimeMillis();
+            handler.postDelayed(boostReportTick, BOOST_REPORT_MS);
         }
         if (run && follow) {
             leaderKey = null;
@@ -5355,6 +5373,35 @@ public class ClickService extends AccessibilityService {
         lootItems.clear();
         repReset();
         lootReportFrom = now;
+    }
+
+    /** Every hour in Boost: how much EXP was gained, to Telegram (the user, 2026-10-10). */
+    private void boostReportTick() {
+        handler.postDelayed(boostReportTick, BOOST_REPORT_MS);
+        long now = System.currentTimeMillis();
+        // Nothing to report when we're not actually boosting: stopped, by hand, or the game isn't in
+        // play (login screen / not in front). Reset the window so a gap doesn't inflate the next one.
+        boolean offline = atLogin() || (gamePackage != null && !gamePackage.equals(foregroundPackage()));
+        if (!running || !booster || manual || offline) {
+            boostReportFrom = now;
+            boostReportBaseExp = sessExp;
+            boostReportBaseLevelUps = repLevelUps;
+            return;
+        }
+        float gained = sessExp - boostReportBaseExp;
+        int levelUps = repLevelUps - boostReportBaseLevelUps;
+        float hours = Math.max(1f / 60f, (now - boostReportFrom) / 3_600_000f);
+        java.util.Locale L = java.util.Locale.ROOT;
+        java.text.SimpleDateFormat hm = new java.text.SimpleDateFormat("HH:mm", L);
+        String msg = String.format(L, "✨ Boost %s-%s · EXP +%.4f%% (~%.4f%%/h)",
+                hm.format(new java.util.Date(boostReportFrom)), hm.format(new java.util.Date(now)),
+                gained, gained / hours);
+        if (levelUps > 0) msg += " · " + levelUps + " level up" + (levelUps > 1 ? "s" : "");
+        Telegram.send(this, msg);
+        Log.i(TAG, "boost exp report: " + msg);
+        boostReportFrom = now;
+        boostReportBaseExp = sessExp;
+        boostReportBaseLevelUps = repLevelUps;
     }
 
     /** After a kill: no attacks for a moment, so the drop is looted before the next fight. */
