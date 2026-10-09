@@ -4668,6 +4668,9 @@ public class ClickService extends AccessibilityService {
     private static float INFO_X_X = 1371 / 2560f, INFO_X_Y = 81 / 1600f;
     private static float CONFIRM_L = 400 / 2560f, CONFIRM_T = 400 / 1600f, CONFIRM_W = 1760 / 2560f, CONFIRM_H = 760 / 1600f;
     private int sellConfirmTries;
+    // Re-read the item window when its Type line hasn't drawn yet (see sellReadInfo).
+    private static final int SELL_INFO_RETRIES = 2, SELL_INFO_RETRY_MS = 650;
+    private int sellInfoRetry;
     private static final String[] SELL_TYPES = {"ring", "body", "hand", "foot", "glove", "shoe", "boot", "head", "hat",
             "helm", "neck", "ear", "belt", "wrist", "pant", "skirt", "coat", "robe", "suit"};
     // Never weapons: "Heavy Attack Gauntlets [Ice]" (type HandHeld Weapon) was the user's own weapon
@@ -4801,6 +4804,7 @@ public class ClickService extends AccessibilityService {
             return;
         }
         float x = screenW * (BAG_X0 + slot[1] * BAG_DX), y = screenH * (BAG_Y0 + slot[0] * BAG_DY);
+        sellInfoRetry = 0;
         tapAt(x, y, "bag slot " + slot[0] + "," + slot[1]);
         handler.postDelayed(this::sellReadInfo, 900);
     }
@@ -4841,6 +4845,17 @@ public class ClickService extends AccessibilityService {
                 if (name == null && sell == null) {
                     Log.i(TAG, "sell: no details window, next slot");
                     handler.postDelayed(this::sellNext, 300);
+                    return;
+                }
+                // The "Type:" line reads null when the details window hasn't finished drawing, and the
+                // item is then wrongly kept (shoes/rings/pants/suits skipped while others sold, 2026-10-09;
+                // the same items sold fine on a re-run). Re-read a couple of times before giving up, so a
+                // slow render doesn't skip a sale. Only when it isn't on the keep-list (potions etc. have
+                // no Type line and would retry for nothing); still null after the retries -> keep (safe).
+                if (type == null && name != null && !keep && sellInfoRetry < SELL_INFO_RETRIES) {
+                    sellInfoRetry++;
+                    Log.i(TAG, "sell: \"" + name + "\" - Type not read yet, re-reading (" + sellInfoRetry + ")");
+                    handler.postDelayed(this::sellReadInfo, SELL_INFO_RETRY_MS);
                     return;
                 }
                 if (equipment && shop && !keep && sell != null) {
