@@ -120,6 +120,11 @@ public class ClickService extends AccessibilityService {
     // - Low Level FS: each buff is recast on its own when it drops to its recast % (40%).
     private static final String KEY_END_GAME = "end_game";
     private boolean endGame = true;
+    // FS "party rule" (PR button): return to campus (Campus Return card) and stop when the party
+    // disbands or shrinks past CAMPUS_PARTY. On by default; the user can switch it off so a misread
+    // (or a brief drop while members lure out of range) doesn't pull the FS back to town.
+    private static final String KEY_PARTY_RULE = "party_rule";
+    private boolean partyRule = true;
     private boolean manual;
     // Booster mode (BOOST on the mode button): the character just stands there to be carried. No
     // rings, heals, buffs, FB or chat-FB; the only two things it does are the left-right jiggle every
@@ -545,6 +550,7 @@ public class ClickService extends AccessibilityService {
     private TextView fullBuffButton;
     private TextView manualButton;
     private TextView modeButton;
+    private TextView partyRuleButton;
     private View editor;
     private View modeChooser;
     private static final int CHOOSER_OPEN_MS = 15_000;          // closes by itself after this
@@ -966,6 +972,12 @@ public class ClickService extends AccessibilityService {
         LinearLayout.LayoutParams modeGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
         modeGap.topMargin = barDp(8);
         barAdd(modeButton, modeGap);
+        partyRuleButton = roundButton("PR");
+        barText(partyRuleButton, 15);
+        partyRuleButton.setTypeface(Typeface.DEFAULT_BOLD);
+        LinearLayout.LayoutParams prGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
+        prGap.topMargin = barDp(8);
+        barAdd(partyRuleButton, prGap);
         manualButton = roundButton("");
         barText(manualButton, 20);
         LinearLayout.LayoutParams manualGap = new LinearLayout.LayoutParams(barDp(48), barDp(48));
@@ -993,6 +1005,7 @@ public class ClickService extends AccessibilityService {
         makeDraggable(leashButton, bar, barParams, this::onSetLeash, null);
         loadHome();
         makeDraggable(modeButton, bar, barParams, this::onModeButton, null);
+        makeDraggable(partyRuleButton, bar, barParams, this::onPartyRuleButton, null);
         if (!safeAdd(bar, barParams)) {
             // Half connected (switched back on too soon after a crash): nothing will work until
             // the service is turned off and on again.
@@ -1007,6 +1020,8 @@ public class ClickService extends AccessibilityService {
         // Android kills background apps when the game uses most of the memory, then restarts
         // this service. If you had pressed ▶, carry on where it left off.
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        partyRule = prefs.getBoolean(KEY_PARTY_RULE, true);
+        refreshPartyRuleButton();
         setEndGame(prefs.getBoolean(KEY_END_GAME, true), "restored");
         setFarmer(farmer, "restored");
         setBooster(prefs.getBoolean(KEY_BOOSTER, false), "restored");
@@ -1256,6 +1271,7 @@ public class ClickService extends AccessibilityService {
         add.setVisibility(others);
         // FB and EG/LL only mean something in FS.
         fullBuffButton.setVisibility(on || !fsMode() ? View.GONE : View.VISIBLE);
+        if (partyRuleButton != null) partyRuleButton.setVisibility(on || !fsMode() ? View.GONE : View.VISIBLE);
         modeButton.setVisibility(on || booster ? View.GONE : View.VISIBLE);   // EG/LL, or KILL/LURE in Farmer
         leashButton.setVisibility(!on && farmer ? View.VISIBLE : View.GONE);
         LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) manualButton.getLayoutParams();
@@ -1856,6 +1872,10 @@ public class ClickService extends AccessibilityService {
 
     private void partyLeft(int before, int members) {
         if (!running || manual || !fsMode()) return;
+        if (!partyRule) {                                       // PR button off: don't leave over a party drop
+            Log.i(TAG, "party down from " + before + " to " + members + " - party rule is off, staying put");
+            return;
+        }
         Log.w(TAG, "party down from " + before + " to " + members + ": Campus Return card (slot D), then manual mode");
         // Stop only after the tap: stopping clears the handler, which would drop a pending bar flip.
         onCardPage(() -> {
@@ -2120,6 +2140,26 @@ public class ClickService extends AccessibilityService {
         setEndGame(!endGame, "button");
     }
 
+    /** PR button (FS only): the party rule green = on (returns to campus if the party collapses). */
+    private void refreshPartyRuleButton() {
+        if (partyRuleButton == null) return;
+        partyRuleButton.setText("PR");
+        barText(partyRuleButton, 15);
+        partyRuleButton.setBackground(circle(partyRule ? Color.rgb(40, 160, 60) : Color.rgb(110, 110, 110)));
+    }
+
+    /** Toggle the FS party rule: whether a collapsing party sends the FS back to campus (Campus Return). */
+    private void onPartyRuleButton() {
+        partyRule = !partyRule;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_PARTY_RULE, partyRule).apply();
+        Log.i(TAG, "FS party rule " + (partyRule ? "on - Campus Return + manual when the party collapses"
+                : "off - staying put when the party collapses"));
+        android.widget.Toast.makeText(this, partyRule ? "Party rule ON: back to campus if the party drops"
+                : "Party rule OFF: stay when the party drops", android.widget.Toast.LENGTH_SHORT).show();
+        refreshPartyRuleButton();
+        shake(partyRuleButton);
+    }
+
     private void setLureMode(boolean on) {
         lureMode = on;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_LURE, on).apply();
@@ -2261,6 +2301,7 @@ public class ClickService extends AccessibilityService {
         refreshModeButton();
         if (!manual) {
             fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
+            if (partyRuleButton != null) partyRuleButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
             modeButton.setVisibility(booster ? View.GONE : View.VISIBLE);
             leashButton.setVisibility(farmer ? View.VISIBLE : View.GONE);
             reflowBar();
@@ -2294,6 +2335,7 @@ public class ClickService extends AccessibilityService {
         }
         if (!manual) {
             fullBuffButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
+            if (partyRuleButton != null) partyRuleButton.setVisibility(fsMode() ? View.VISIBLE : View.GONE);
             modeButton.setVisibility(booster ? View.GONE : View.VISIBLE);
             leashButton.setVisibility(farmer ? View.VISIBLE : View.GONE);
             reflowBar();
