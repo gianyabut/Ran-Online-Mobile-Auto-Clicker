@@ -6931,6 +6931,12 @@ public class ClickService extends AccessibilityService {
 
     private long lastReviveAt;
     private int reviveUseTries;
+    // Boost: with only "Revive" and no "Use" item, don't tap Revive (it sends the carried character
+    // to town, away from the party) - the user, 2026-10-10. Alert at most this often.
+    private long boostNoUseAlertAt;
+    // Farmer: after a death the character can drop items where it died. Once revived/back at the
+    // spot, hold attacks this long so the loot hand (the drops) gets tapped before fighting resumes.
+    private static final int POST_DEATH_LOOT_MS = 12_000;
     private static final int USE_REVIVE_TRIES = 2, REVIVE_RETAP_MS = 2500;
     private static final String KEY_USE_X = "revive_use_x", KEY_USE_Y = "revive_use_y";
     private float useSpotX, useSpotY;
@@ -7518,6 +7524,18 @@ public class ClickService extends AccessibilityService {
             if (k.equals("revive") && button == null) button = l.box;
             if ((k.equals("use") || k.startsWith("use") && k.length() <= 8) && use == null) use = l.box;
         }
+        // Boost (the user, 2026-10-10): the character is being carried, so only a "Use" revive item
+        // keeps it on the spot. With no Use (only Revive), don't tap anything - Revive would send it
+        // to town, away from the party. Leave it for a party revive / the user.
+        if (booster && use == null) {
+            if (now - boostNoUseAlertAt > 5 * 60_000L) {
+                boostNoUseAlertAt = now;
+                Log.w(TAG, "died in Boost with no Use item (only Revive) - not tapping Revive");
+                Telegram.send(this, "💀 Ran Online: your boost character died and there's no revive item "
+                        + "(only \"Revive\"). Not tapping Revive - please revive it in-game.");
+            }
+            return;
+        }
         // "Use" first (the user, 21:44): the revive item brings the character back on the spot. A
         // dialog still up after USE_REVIVE_TRIES Use taps (no item left?) gets Revive instead.
         // Only a dialog still up right after the Use tap means Use failed: dying again 25 s later
@@ -7557,8 +7575,10 @@ public class ClickService extends AccessibilityService {
             return;
         }
         if (inPlace) {
-            // Back on the spot: no trip to town, no Back Point - carry on after a moment.
-            deadUntil = now + 3000;
+            // Back on the spot: no trip to town, no Back Point - carry on after a moment. In Farmer
+            // hold attacks longer (POST_DEATH_LOOT_MS) so any items dropped on death get looted here
+            // before fighting resumes (the user, 2026-10-10).
+            deadUntil = now + (farmer ? POST_DEATH_LOOT_MS : 3000);
             busyUntil = farmHoldUntil = Math.max(busyUntil, deadUntil);
             handler.removeCallbacks(useBackPoint);
             handler.removeCallbacks(backAtSpot);
@@ -7817,12 +7837,21 @@ public class ClickService extends AccessibilityService {
             return;
         }
         farmMobsSeenAt = farmProgressAt = lastTargetBarAt = now;
-        if (feedTripStage != 0) Log.i(TAG, "pet: back from feeding at the save point");
+        boolean wasFeed = feedTripStage != 0;
+        if (wasFeed) Log.i(TAG, "pet: back from feeding at the save point");
         feedTripStage = 0;
         Log.i(TAG, "died: back from the Back Point, summoning the pet, then farming again");
         summonPet();
         Telegram.send(this, "\u2705 Ran Online: Back Point used, back in " + posMap + ", farming again. Check how many Back Point cards are left.");
         handler.post(this::farmFullBuff);
+        if (!wasFeed) {
+            // Loot items dropped on death before fighting again (the user, 2026-10-10): hold attacks a
+            // moment so the loot hand gets tapped first (loot isn't blocked by busyUntil). Clear the
+            // "skip the hand" timers so the fresh drops aren't ignored.
+            busyUntil = farmHoldUntil = now + POST_DEATH_LOOT_MS;
+            lootIgnoreUntil = handFreeUntil = handUpSince = 0;
+            Log.i(TAG, "died: holding " + POST_DEATH_LOOT_MS / 1000 + " s to loot any dropped items first");
+        }
         schedulePump(0);
     }
 
