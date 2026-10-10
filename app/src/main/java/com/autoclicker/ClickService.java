@@ -481,11 +481,11 @@ public class ClickService extends AccessibilityService {
     private int presenceTaps;
     private long lastPresenceTapAt;
     private boolean presenceAlerted;
-    // After a wave, buffs at or below this are recast (the user's call). With a clear every ~2 min
-    // (93-214 s on 2026-10-02) the ~4.5-5 min buffs sit at ~55-60% after one wave and well below
-    // after two: recast every 2nd wave. Confusion Strike (~2 min) and Massive Haste (~40 s) every
-    // wave. 40% risked the long buffs running out when a short gap was followed by a long one.
-    private static final float WAVE_BUFF_AT = 0.5f;
+    // After a wave, buffs at or below this are recast (the user's call). Was 0.5 -> 0.65 (2026-10-10).
+    // With a clear every ~2 min the ~4.5-5 min buffs sit at ~55-60% after one wave, so 0.65 now
+    // recasts a full buff after most waves (not every 2nd like 0.5 did). Off-waves still cast
+    // Massive Haste only. 40% had risked the long buffs running out when a short gap met a long one.
+    private static final float WAVE_BUFF_AT = 0.65f;
     // A full buff was stopped because the wave came back; the next clear buffs regardless.
     private boolean fullBuffOwed;
     // Readings at the wave level in a row while a full buff is going out.
