@@ -7497,10 +7497,13 @@ public class ClickService extends AccessibilityService {
 
     /**
      * Death: "Do you wish to be revived?" over a Revive button (killed by a player, 2026-10-05
-     * 07:37). Tap Revive whenever it shows, in any mode (the user's rule), and say so on Telegram.
+     * 07:37). Tap Use/Revive when it shows (while running or stopped), and say so on Telegram.
      */
     private void checkRevive(List<MathQuestion.Line> lines) {
-        // Any mode, even manual or stopped (the user, 21:40: "whenever the char died use revive").
+        // Not in manual mode: you're playing by hand and handle death yourself (the user, 2026-10-10,
+        // refining the 21:40 "revive in any mode" - don't touch Use/Revive while in manual). It still
+        // revives when running, and when just stopped.
+        if (manual) return;
         long now = SystemClock.uptimeMillis();
         // Again after REVIVE_RETAP_MS if it's still up: the countdown is 10 s, and 5 s left one retry.
         if (now - lastReviveAt < REVIVE_RETAP_MS) return;
