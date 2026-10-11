@@ -7157,12 +7157,22 @@ public class ClickService extends AccessibilityService {
                     return;
                 }
                 if (can == null || can[0] < FEED_MIN) {
-                    // Other feeds look different: try the first row's columns 2-4 by the item's name
-                    // (the user, 2026-10-07: food there too). One can per feeding all the same.
-                    // Where the food was last time first: trying 2, 3, 4 in turn held the skills ~20 s
-                    // (tablet 22:00:48-22:01:09, the user: "it isnt tapping on the skills button").
+                    // Other feeds look different: try the first row's columns 2-5 by the item's name
+                    // (the user, 2026-10-07: food there too; 2026-10-11: added columns 2 and 5). One
+                    // can per feeding all the same. Where the food was last time first: trying each in
+                    // turn held the skills ~20 s (tablet 22:00:48-22:01:09, the user: "it isnt tapping
+                    // on the skills button").
                     int last = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_FEED_COL, 0);
-                    feedOrder = last >= 2 && last <= 4 ? new int[]{last, last == 2 ? 3 : 2, last == 4 ? 3 : 4} : new int[]{2, 3, 4};
+                    int[] cols = {2, 3, 4, 5};
+                    if (last >= 2 && last <= 5) {
+                        int[] order = new int[cols.length];
+                        order[0] = last;                                    // the last column that had food first
+                        int j = 1;
+                        for (int c : cols) if (c != last) order[j++] = c;
+                        feedOrder = order;
+                    } else {
+                        feedOrder = cols;
+                    }
                     Log.i(TAG, "pet: no Advanced Feed by its picture - trying row 1, column " + feedOrder[0] + " first");
                     feedTrySlot(0);
                     return;
@@ -7183,15 +7193,15 @@ public class ClickService extends AccessibilityService {
     }
 
     private static final String KEY_FEED_COL = "feed_col";
-    private int[] feedOrder = {2, 3, 4};
+    private int[] feedOrder = {2, 3, 4, 5};
 
     /** Taps row 1, column feedOrder[i] of the bag; a "Feed" in the item window's name -> Use on..., else the next. */
     private void feedTrySlot(int i) {
         if (!feedRunning) return;
         if (i >= feedOrder.length) {
             feedBackoffUntil = SystemClock.uptimeMillis() + FEED_NO_FOOD_BACKOFF_MS;
-            Log.w(TAG, "pet: no pet food in row 1, columns 2-4");
-            Telegram.send(this, "\uD83D\uDC3E Ran Online: your pet is hungry but there's no pet food in the bag (row 1, columns 2-4). Please add some - I'll look again in 30 min.");
+            Log.w(TAG, "pet: no pet food in row 1, columns 2-5");
+            Telegram.send(this, "\uD83D\uDC3E Ran Online: your pet is hungry but there's no pet food in the bag (row 1, columns 2-5). Please add some - I'll look again in 30 min.");
             feedEnd("no food", true);
             return;
         }
