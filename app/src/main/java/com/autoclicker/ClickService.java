@@ -3753,6 +3753,12 @@ public class ClickService extends AccessibilityService {
             returning = false;
             return false;
         }
+        // Handling a death (revive / Back Point): don't walk home or open the map - it would cover
+        // the revive dialog and the Back Point card. The character died while the map was open and
+        // the walk-home loop kept re-opening it over the dialog, getting stuck (the user, 2026-10-11).
+        // deadUntil is set by checkRevive (POST_DEATH_LOOT_MS in place, BACK_POINT_LOAD_MS+30 s via
+        // Revive) and cleared once the character is back (backAtSpot / arrivedAtSpot).
+        if (now < deadUntil) return returning;
         boolean fresh = posMap != null && sameMap(posMap, homeMap) && now - posAt <= 6000;
         if (returning && now - returnStartedAt > RETURN_MAX_MS) {
             returning = false;
@@ -7576,6 +7582,16 @@ public class ClickService extends AccessibilityService {
             // Not farming: just the revive, no Back Point or death rules.
             Telegram.send(this, "💀 Ran Online: your character died - tapped " + what + ".");
             return;
+        }
+        // Died mid walk-home (the map was open): drop the walk-home state so it doesn't keep
+        // re-opening the map over the revive dialog / Back Point card while the death is handled
+        // (the user, 2026-10-11, "died while map is open and got stuck"). returnHome stays off until
+        // deadUntil clears; at that point the character is back at the spot, so it won't restart.
+        if (farmer) {
+            returning = false;
+            mapHomeStuck = 0;
+            mapHomeLastDist = 0;
+            returnCheckDist = 0;
         }
         if (inPlace) {
             // Back on the spot: no trip to town, no Back Point - carry on after a moment. In Farmer
