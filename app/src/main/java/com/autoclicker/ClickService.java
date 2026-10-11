@@ -7174,6 +7174,7 @@ public class ClickService extends AccessibilityService {
                         feedOrder = cols;
                     }
                     Log.i(TAG, "pet: no Advanced Feed by its picture - trying row 1, column " + feedOrder[0] + " first");
+                    feedTouchWaits = 0;
                     feedTrySlot(0);
                     return;
                 }
@@ -7194,6 +7195,8 @@ public class ClickService extends AccessibilityService {
 
     private static final String KEY_FEED_COL = "feed_col";
     private int[] feedOrder = {2, 3, 4, 5};
+    private static final int FEED_TOUCH_MAX_WAITS = 4;
+    private int feedTouchWaits;
 
     /** Taps row 1, column feedOrder[i] of the bag; a "Feed" in the item window's name -> Use on..., else the next. */
     private void feedTrySlot(int i) {
@@ -7203,6 +7206,17 @@ public class ClickService extends AccessibilityService {
             Log.w(TAG, "pet: no pet food in row 1, columns 2-5");
             Telegram.send(this, "\uD83D\uDC3E Ran Online: your pet is hungry but there's no pet food in the bag (row 1, columns 2-5). Please add some - I'll look again in 30 min.");
             feedEnd("no food", true);
+            return;
+        }
+        // You're touching the screen: Android cancels our slot tap (seen 2026-10-11, "it doesnt read
+        // #2" - the tap on column 2 was cancelled 94 ms after a touch). Don't take that column for
+        // empty: wait for the touch to pass and try the SAME column again (up to a few times).
+        long touchNow = SystemClock.uptimeMillis();
+        if (touchNow - userTouchAt < USER_TOUCH_PAUSE_MS && feedTouchWaits < FEED_TOUCH_MAX_WAITS) {
+            feedTouchWaits++;
+            feedHold();
+            Log.i(TAG, "pet: screen being touched - waiting to try column " + feedOrder[i] + " again");
+            handler.postDelayed(() -> feedTrySlot(i), USER_TOUCH_PAUSE_MS);
             return;
         }
         feedHold();
